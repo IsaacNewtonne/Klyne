@@ -35,6 +35,7 @@ impl Workspace {
             pending: None,
             outcome: None,
             tool_budget: Some(Default::default()),
+            success_criterion: None,
         }
     }
     fn runtime(&self) -> AgentRuntime<HeuristicModel, SqliteEventStore> {

@@ -3,7 +3,7 @@ use crate::model::Model;
 use crate::permissions::{PermissionDecision, PermissionPolicy};
 use crate::tools::ToolRegistry;
 use crate::types::{Action, Objective, Observation, StepDecision};
-use crate::verification::{FileContentsVerifier, SuccessCriterion, Verifier};
+use crate::verification::{FileEvidenceVerifier, SuccessCriterion, Verifier};
 use std::io;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -24,6 +24,11 @@ pub struct RunState {
     pub outcome: Option<RunOutcome>,
     #[serde(default)]
     pub tool_budget: Option<ToolBudget>,
+    /// Explicit success claim for runs whose objective grammar the CLI adapter
+    /// cannot parse (e.g. digest/range repair goals). `None` derives the claim
+    /// from the objective text, preserving legacy behavior.
+    #[serde(default)]
+    pub success_criterion: Option<SuccessCriterion>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -135,6 +140,18 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
     }
 
     pub fn run(&mut self, objective: Objective) -> io::Result<RunOutcome> {
+        self.run_with_criterion(objective, None)
+    }
+
+    /// Start a run with an explicit machine-checked success claim instead of
+    /// deriving one from the objective text. The claim persists in the
+    /// checkpoint and survives resume; budgets, permissions, and independent
+    /// verification behave identically to [`AgentRuntime::run`].
+    pub fn run_with_criterion(
+        &mut self,
+        objective: Objective,
+        criterion: Option<SuccessCriterion>,
+    ) -> io::Result<RunOutcome> {
         if self.events.load()?.is_some() {
             return Err(io::Error::other("store already contains a run; use resume"));
         }
@@ -151,6 +168,7 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
                 used: 0,
                 limit: self.max_tool_calls,
             }),
+            success_criterion: criterion,
         };
         self.events.checkpoint(&state)?;
         let objective = &state.objective;
@@ -189,9 +207,16 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
             return Ok(());
         };
         self.action_event("ReconciliationStarted", state, &action, None)?;
+        // Read-only actions recover with a fresh observation; interrupted
+        // writes are confirmed by postcondition, never replayed. Patches,
+        // shell commands, and terminal markers stay blocked: their effects
+        // cannot be distinguished as before/after/conflicting from outside.
         let read = match &action {
             Action::WriteFile { path, .. } | Action::ReadFile { path } => {
                 Action::ReadFile { path: path.clone() }
+            }
+            Action::ReadFileRange { .. } | Action::HashFile { .. } | Action::SearchFile { .. } => {
+                action.clone()
             }
             _ => {
                 return Err(io::Error::other(
@@ -293,7 +318,11 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
                 }
                 StepDecision::Complete(_) => {
                     self.events.append("VerificationStarted", &objective.id)?;
-                    let Some(criterion) = SuccessCriterion::from_objective(&objective.text) else {
+                    let criterion = state
+                        .success_criterion
+                        .clone()
+                        .or_else(|| SuccessCriterion::from_objective(&objective.text));
+                    let Some(criterion) = criterion else {
                         let reason = "objective has no supported success criterion";
                         self.events.append("VerificationFailed", reason)?;
                         self.events.append("GoalFailed", reason)?;
@@ -310,9 +339,9 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
                         .history
                         .last()
                         .ok_or_else(|| io::Error::other("missing verification observation"))?;
-                    let verification = FileContentsVerifier.verify(&criterion, action, observation);
+                    let verification = FileEvidenceVerifier.verify(&criterion, action, observation);
                     if !verification.passed {
-                        let reason = "independent file-content verification failed";
+                        let reason = "independent file verification failed";
                         self.events.append("VerificationFailed", reason)?;
                         self.events.append("GoalFailed", reason)?;
                         return Ok(RunOutcome::Failed(reason.into()));

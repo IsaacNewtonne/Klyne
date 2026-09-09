@@ -46,6 +46,11 @@ pub enum Action {
         replacement: String,
         expected_sha256: String,
     },
+    SearchFile {
+        path: String,
+        needle: String,
+        max_matches: u64,
+    },
     RunShell {
         program: String,
         args: Vec<String>,
@@ -62,7 +67,8 @@ impl Action {
             | Self::ReadFile { .. }
             | Self::ReadFileRange { .. }
             | Self::HashFile { .. }
-            | Self::PatchFile { .. } => "workspace_fs",
+            | Self::PatchFile { .. }
+            | Self::SearchFile { .. } => "workspace_fs",
             Self::RunShell { .. } => "workspace_shell",
             Self::Finish { .. } => "runtime",
         }
@@ -109,6 +115,7 @@ impl fmt::Display for Action {
             } => write!(f, "read_range:{path}:{offset}:{length}"),
             Action::HashFile { path } => write!(f, "hash_file:{path}"),
             Action::PatchFile { path, offset, .. } => write!(f, "patch_file:{path}:{offset}"),
+            Action::SearchFile { path, needle, .. } => write!(f, "search_file:{path}:{needle}"),
             Action::RunShell { program, args } => write!(f, "shell:{} {}", program, args.join(" ")),
             Action::Finish { summary } => write!(f, "finish:{summary}"),
         }

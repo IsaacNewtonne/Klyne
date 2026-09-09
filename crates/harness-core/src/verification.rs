@@ -4,7 +4,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SuccessCriterion {
-    FileContents { path: String, expected: String },
+    FileContents {
+        path: String,
+        expected: String,
+    },
+    FileDigest {
+        path: String,
+        sha256: String,
+    },
+    FileRange {
+        path: String,
+        offset: u64,
+        expected: String,
+    },
 }
 
 impl SuccessCriterion {
@@ -42,6 +54,16 @@ impl SuccessCriterion {
     pub fn observation_action(&self) -> Action {
         match self {
             Self::FileContents { path, .. } => Action::ReadFile { path: path.clone() },
+            Self::FileDigest { path, .. } => Action::HashFile { path: path.clone() },
+            Self::FileRange {
+                path,
+                offset,
+                expected,
+            } => Action::ReadFileRange {
+                path: path.clone(),
+                offset: *offset,
+                length: expected.len() as u64,
+            },
         }
     }
 }
@@ -55,31 +77,82 @@ pub trait Verifier: Send + Sync {
     ) -> Verification;
 }
 
-pub struct FileContentsVerifier;
-impl Verifier for FileContentsVerifier {
+fn observation_field(observation: &Observation, field: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(&observation.data)
+        .ok()?
+        .get(field)?
+        .as_str()
+        .map(str::to_string)
+}
+
+pub struct FileEvidenceVerifier;
+impl Verifier for FileEvidenceVerifier {
     fn verify(
         &self,
         criterion: &SuccessCriterion,
         action: &Action,
         observation: &Observation,
     ) -> Verification {
-        let SuccessCriterion::FileContents { path, expected } = criterion;
-        let passed = action == &criterion.observation_action()
-            && observation.ok
-            && observation.data == *expected;
-        Verification {
-            passed,
-            evidence: if passed {
-                format!(
-                    "independently verified file '{path}' contains {} expected bytes",
-                    expected.len()
+        let bound = action == &criterion.observation_action() && observation.ok;
+        let (passed, evidence) = match criterion {
+            SuccessCriterion::FileContents { path, expected } => {
+                let passed = bound && observation.data == *expected;
+                (
+                    passed,
+                    if passed {
+                        format!(
+                            "independently verified file '{path}' contains {} expected bytes",
+                            expected.len()
+                        )
+                    } else {
+                        format!("file-content evidence failed for '{path}'")
+                    },
                 )
-            } else {
-                format!("file-content evidence failed for '{path}'")
-            },
-        }
+            }
+            SuccessCriterion::FileDigest { path, sha256 } => {
+                let observed = bound
+                    .then(|| observation_field(observation, "sha256"))
+                    .flatten();
+                let passed = observed
+                    .as_deref()
+                    .is_some_and(|digest| digest.eq_ignore_ascii_case(sha256));
+                (
+                    passed,
+                    if passed {
+                        format!("independently verified file '{path}' matches digest {sha256}")
+                    } else {
+                        format!("file-digest evidence failed for '{path}'")
+                    },
+                )
+            }
+            SuccessCriterion::FileRange {
+                path,
+                offset,
+                expected,
+            } => {
+                let observed = bound
+                    .then(|| observation_field(observation, "text"))
+                    .flatten();
+                let passed = observed.as_deref() == Some(expected.as_str());
+                (
+                    passed,
+                    if passed {
+                        format!(
+                            "independently verified file '{path}' range at {offset} contains {} expected bytes",
+                            expected.len()
+                        )
+                    } else {
+                        format!("file-range evidence failed for '{path}' at {offset}")
+                    },
+                )
+            }
+        };
+        Verification { passed, evidence }
     }
 }
+
+/// Historical name retained for existing callers.
+pub type FileContentsVerifier = FileEvidenceVerifier;
 
 #[cfg(test)]
 mod tests {
@@ -95,12 +168,12 @@ mod tests {
             data: "expected".into(),
         };
         assert!(
-            FileContentsVerifier
+            FileEvidenceVerifier
                 .verify(&criterion, &criterion.observation_action(), &obs)
                 .passed
         );
         assert!(
-            !FileContentsVerifier
+            !FileEvidenceVerifier
                 .verify(
                     &criterion,
                     &Action::ReadFile {
@@ -112,15 +185,97 @@ mod tests {
         );
         obs.ok = false;
         assert!(
-            !FileContentsVerifier
+            !FileEvidenceVerifier
                 .verify(&criterion, &criterion.observation_action(), &obs)
                 .passed
         );
         obs.ok = true;
         obs.data = "different".into();
         assert!(
-            !FileContentsVerifier
+            !FileEvidenceVerifier
                 .verify(&criterion, &criterion.observation_action(), &obs)
+                .passed
+        );
+    }
+
+    #[test]
+    fn digest_and_range_criteria_bind_evidence_to_typed_observations() {
+        let digest = SuccessCriterion::FileDigest {
+            path: "data".into(),
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+        };
+        let obs = Observation {
+            ok: true,
+            summary: "completed hash_file:data".into(),
+            data: r#"{"algorithm":"sha256","sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","bytes":3}"#.into(),
+        };
+        assert!(
+            FileEvidenceVerifier
+                .verify(&digest, &digest.observation_action(), &obs)
+                .passed
+        );
+        let wrong_digest = SuccessCriterion::FileDigest {
+            path: "data".into(),
+            sha256: "0".repeat(64),
+        };
+        assert!(
+            !FileEvidenceVerifier
+                .verify(&wrong_digest, &wrong_digest.observation_action(), &obs)
+                .passed
+        );
+        assert!(
+            !FileEvidenceVerifier
+                .verify(
+                    &digest,
+                    &Action::ReadFile {
+                        path: "data".into()
+                    },
+                    &obs
+                )
+                .passed
+        );
+
+        let range = SuccessCriterion::FileRange {
+            path: "data".into(),
+            offset: 3,
+            expected: "tail".into(),
+        };
+        assert_eq!(
+            range.observation_action(),
+            Action::ReadFileRange {
+                path: "data".into(),
+                offset: 3,
+                length: 4,
+            }
+        );
+        let range_obs = Observation {
+            ok: true,
+            summary: "completed read_range:data:3:4".into(),
+            data: r#"{"offset":3,"length":4,"file_size":7,"eof":true,"text":"tail"}"#.into(),
+        };
+        assert!(
+            FileEvidenceVerifier
+                .verify(&range, &range.observation_action(), &range_obs)
+                .passed
+        );
+        let stale = Observation {
+            ok: true,
+            summary: "completed read_range:data:3:4".into(),
+            data: r#"{"offset":3,"length":4,"file_size":7,"eof":true,"text":"XXXX"}"#.into(),
+        };
+        assert!(
+            !FileEvidenceVerifier
+                .verify(&range, &range.observation_action(), &stale)
+                .passed
+        );
+        let failed = Observation {
+            ok: false,
+            summary: "failed".into(),
+            data: range_obs.data.clone(),
+        };
+        assert!(
+            !FileEvidenceVerifier
+                .verify(&range, &range.observation_action(), &failed)
                 .passed
         );
     }

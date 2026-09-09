@@ -77,7 +77,7 @@ impl Tool for WorkspaceFsTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             tool: self.name().into(),
-            description: "Workspace-scoped file operations. Writes capped at 1 MiB; range/hash/patch helpers cover larger files.".into(),
+            description: "Workspace-scoped file operations. Writes capped at 1 MiB; range/hash/patch/search helpers cover larger files.".into(),
             actions: vec![
                 ActionDescriptor {
                     action: "WriteFile".into(),
@@ -104,6 +104,11 @@ impl Tool for WorkspaceFsTool {
                     description: "Digest-guarded byte-range replacement for files up to 64 MiB.".into(),
                     effects: "mutating:filesystem.write".into(),
                 },
+                ActionDescriptor {
+                    action: "SearchFile".into(),
+                    description: "Bounded substring search (needle <=1 KiB, <=50 matches) over files up to 64 MiB.".into(),
+                    effects: "read-only:filesystem.read".into(),
+                },
             ],
         }
     }
@@ -119,20 +124,21 @@ impl Tool for WorkspaceFsTool {
             };
         }
         match action {
-            Action::ReadFileRange { .. } | Action::HashFile { .. } | Action::PatchFile { .. } => {
-                match crate::large_files::execute(action, policy) {
-                    Ok(data) => Observation {
-                        ok: true,
-                        summary: format!("completed {action}"),
-                        data,
-                    },
-                    Err(error) => Observation {
-                        ok: false,
-                        summary: format!("failed {action}"),
-                        data: error.to_string(),
-                    },
-                }
-            }
+            Action::ReadFileRange { .. }
+            | Action::HashFile { .. }
+            | Action::PatchFile { .. }
+            | Action::SearchFile { .. } => match crate::large_files::execute(action, policy) {
+                Ok(data) => Observation {
+                    ok: true,
+                    summary: format!("completed {action}"),
+                    data,
+                },
+                Err(error) => Observation {
+                    ok: false,
+                    summary: format!("failed {action}"),
+                    data: error.to_string(),
+                },
+            },
             Action::WriteFile { path, contents } => {
                 if contents.len() > MAX_FILE_BYTES {
                     return Observation {

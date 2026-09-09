@@ -15,6 +15,7 @@ A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions
 - Persisted tool-call reservations (32 by default), including verification and reconciliation; filesystem reads/writes capped at 1 MiB per operation.
 - Typed range reads, streaming SHA-256, and digest-guarded patches for larger files; see [large-file operations](docs/large-files.md).
 - Structured tool descriptors and discovery (`--tools`); supervised argv process execution with explicit grants, timeout, output bounds, and Windows tree kill; see [process supervision](docs/process-supervision.md).
+- Bounded single-file substring search plus hash/range-based success criteria; a deterministic scripted agent can inspect, patch, and verify a controlled file through the runtime (`run_with_criterion`), with read-only recovery and blocked patch reconciliation; see [coding loop](docs/coding-loop.md).
 - Negative security tests, actual process-kill recovery test, checkpoint-boundary tests, supervised-process tests (nonzero exit, timeout, output bounds, denials, env grants, tree kill).
 
 ## Run
@@ -33,7 +34,7 @@ One run per database, defaulting to `<workspace>/.harness/run.sqlite3`. Use a fr
 
 Ordinary `--resume` refuses pending actions. `--reconcile` rechecks permissions and reads the target: matching interrupted writes are recorded as satisfied postconditions, pending reads receive fresh observations, and normal execution resumes. Missing or conflicting contents remain pending; no corrective write is attempted. Shell actions cannot be reconciled. Matching contents prove current state, not that the original process wrote them.
 
-The adapter accepts `create file <relative-path> with content <text>` or `write file <relative-path> :: <text>`. It is not an LLM and cannot solve general coding tasks.
+The adapter accepts `create file <relative-path> with content <text>` or `write file <relative-path> :: <text>`. It is not an LLM and cannot solve general coding tasks. Hash/range criteria and `run_with_criterion` are available to typed model implementations through the library interface, not the CLI grammar.
 
 ## Verify and benchmark
 

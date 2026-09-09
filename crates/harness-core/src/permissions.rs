@@ -112,7 +112,8 @@ impl PermissionPolicy {
             Action::WriteFile { path, .. } => self.check_path(path, Capability::FilesystemWrite),
             Action::ReadFile { path }
             | Action::ReadFileRange { path, .. }
-            | Action::HashFile { path } => self.check_path(path, Capability::FilesystemRead),
+            | Action::HashFile { path }
+            | Action::SearchFile { path, .. } => self.check_path(path, Capability::FilesystemRead),
             Action::PatchFile { path, .. } => {
                 let read = self.check_path(path, Capability::FilesystemRead);
                 if read != PermissionDecision::Allow {
