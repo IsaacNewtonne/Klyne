@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: harness-cli --workspace <dir> [--objective <text> | --resume | --reconcile | --events | --tools | --inspect] [--database <path>] [--max-tool-calls <integer> (new runs only)] [--openai-compat]"
+        "Usage: harness-cli --workspace <dir> [--objective <text> | --resume | --reconcile | --events | --tools | --inspect | --radar] [--database <path>] [--max-tool-calls <integer> (new runs only)] [--openai-compat] [--radar-query <text>] [--radar-limit <n>]"
     );
     eprintln!(
         "Example: harness-cli --workspace ./workspace --objective 'create file hello.txt with content hello agent'"
@@ -32,6 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut show_events = false;
     let mut show_tools = false;
     let mut show_inspect = false;
+    let mut radar = false;
+    let mut radar_query: Option<String> = None;
+    let mut radar_limit: u8 = 10;
     let mut openai_compat = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -54,6 +57,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--events" => show_events = true,
             "--tools" => show_tools = true,
             "--inspect" => show_inspect = true,
+            "--radar" => radar = true,
+            "--radar-query" => radar_query = args.next(),
+            "--radar-limit" => {
+                radar_limit = args
+                    .next()
+                    .ok_or("--radar-limit requires an integer")?
+                    .parse()?
+            }
             "--openai-compat" => openai_compat = true,
             "-h" | "--help" => usage(),
             other => return Err(format!("unknown argument: {other}").into()),
@@ -69,6 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         + usize::from(show_events)
         + usize::from(show_tools)
         + usize::from(show_inspect)
+        + usize::from(radar)
         != 1
     {
         usage();
@@ -96,6 +108,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             serde_json::to_string_pretty(&harness_core::inspect::inspect_run(&mut events)?)
                 .map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+    if radar {
+        use harness_provider::radar;
+        let mut policy = PermissionPolicy::milestone_default(&workspace);
+        policy.allow_network_domain("api.github.com");
+        let mut registry = ToolRegistry::milestone_default();
+        registry.register(Box::new(harness_provider::FetchTool::default()));
+        let query = radar_query.unwrap_or_else(radar::default_query);
+        let url = radar::github_search_url(&query, radar_limit);
+        let body = radar::fetch_text(&registry, &policy, &url)?;
+        println!(
+            "{}",
+            radar::render_digest(&body, usize::from(radar_limit)).map_err(|e| e.to_string())?
         );
         return Ok(());
     }

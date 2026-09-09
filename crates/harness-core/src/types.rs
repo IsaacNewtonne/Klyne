@@ -55,6 +55,9 @@ pub enum Action {
         program: String,
         args: Vec<String>,
     },
+    FetchUrl {
+        url: String,
+    },
     Finish {
         summary: String,
     },
@@ -70,6 +73,7 @@ impl Action {
             | Self::PatchFile { .. }
             | Self::SearchFile { .. } => "workspace_fs",
             Self::RunShell { .. } => "workspace_shell",
+            Self::FetchUrl { .. } => "network_fetch",
             Self::Finish { .. } => "runtime",
         }
     }
@@ -132,6 +136,7 @@ impl fmt::Display for Action {
             Action::PatchFile { path, offset, .. } => write!(f, "patch_file:{path}:{offset}"),
             Action::SearchFile { path, needle, .. } => write!(f, "search_file:{path}:{needle}"),
             Action::RunShell { program, args } => write!(f, "shell:{} {}", program, args.join(" ")),
+            Action::FetchUrl { url } => write!(f, "fetch:{url}"),
             Action::Finish { summary } => write!(f, "finish:{summary}"),
         }
     }

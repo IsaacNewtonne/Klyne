@@ -22,6 +22,7 @@ A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions
 - Memory and context selection: SQLite-backed project/episodic/procedural/failure memory with confidence, provenance, explained retrieval, retention, and consolidation; recalled experience improves repeated benchmarks without blind replay; see [memory](docs/memory.md).
 - Long-running reliability: wall-clock/token/cost budgets, repeated-error detection, graceful shutdown, step heartbeats, and machine-readable run inspection (`--inspect`); see [reliability](docs/reliability.md).
 - Scoped delegation: fenced child runs with narrowed scope, inherited limits, budget firewall, read-only verifiers, and artifact collection; see [delegation](docs/delegation.md).
+- Supervised network fetch and repo radar: allowlisted read-only HTTPS GET with strict URL validation, plus a GitHub trending digest (`--radar`); fetched bytes are untrusted data; see [network fetch](docs/network-fetch.md).
 - Negative security tests, actual process-kill recovery test, checkpoint-boundary tests, supervised-process tests (nonzero exit, timeout, output bounds, denials, env grants, tree kill).
 
 ## Run
@@ -62,7 +63,7 @@ The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cas
 - Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Reconciliation audit attempts may repeat after a crash; consumers should group them by action ID. IDs are scoped to a run/database, not globally unique idempotency keys. No exactly-once or host-power-loss guarantee.
 - Recovery assumes a stateless model. One database handles one run. Cognitive-step and tool-call budgets exist; time, token and monetary budgets remain planned.
 - Objectives, observations and checkpoints contain task data. Secret redaction is absent: do not supply secrets.
-- General planners, model routing, general coding intelligence, vector memory, browser, GUI, and self-improvement are **PLANNED**. Provider, scripted repair benchmark, durable plans, lexical memory, reliability budgets, and scoped single-level delegation are implemented; OS isolation is investigated but not built.
+- General planners, model routing, general coding intelligence, vector memory, full browser control, GUI control, and self-improvement are **PLANNED**. Provider, scripted repair benchmark, durable plans, lexical memory, reliability budgets, scoped delegation, and supervised fetch/radar are implemented; OS isolation is investigated but not built.
 
 See [implementation evidence](docs/milestone-durable-core.md) and [historical architecture](docs/architecture-v0.1.md).
 

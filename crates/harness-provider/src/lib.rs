@@ -6,8 +6,11 @@
 //! from the environment per call and never enter prompts, decisions, events,
 //! or checkpoints.
 
+pub mod fetch;
 pub mod openai;
+pub mod radar;
 
+pub use fetch::{FetchLimits, FetchTool};
 pub use openai::{OpenAiCompat, Pricing, ProviderConfig};
 
 use std::time::Duration;

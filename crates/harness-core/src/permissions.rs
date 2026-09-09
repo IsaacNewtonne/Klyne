@@ -7,6 +7,97 @@ pub enum Capability {
     FilesystemRead,
     FilesystemWrite,
     ShellExecute,
+    NetworkFetch,
+}
+
+/// A strictly parsed subset of URLs: `https://host[:port][/path]`, plus
+/// `http://` for loopback hosts only (local mock servers and LAN devices).
+/// No userinfo, no whitespace, no other schemes. Anything else is rejected
+/// before any grant is consulted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedUrl {
+    pub scheme: String,
+    pub host: String,
+    pub path: String,
+}
+
+pub fn parse_fetch_url(raw: &str) -> Result<ParsedUrl, String> {
+    if raw.len() > 2048 {
+        return Err("URL exceeds 2048 characters".into());
+    }
+    let (scheme, rest) = raw
+        .split_once("://")
+        .ok_or_else(|| "URL must look like scheme://host/path".to_string())?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "https" && scheme != "http" {
+        return Err(format!("scheme '{scheme}' is not allowed; use https"));
+    }
+    if rest.is_empty() {
+        return Err("URL has no host".into());
+    }
+    let end = rest.find('/').unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(end);
+    if authority.contains('@') {
+        return Err("URL userinfo is not allowed".into());
+    }
+    // Split an optional numeric port; bracketed IPv6 keeps its brackets so
+    // the allowlist sees one canonical form.
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (inner, rest) = bracketed
+            .split_once(']')
+            .ok_or_else(|| "IPv6 host is missing ']'".to_string())?;
+        if !rest.is_empty() {
+            let port = rest
+                .strip_prefix(':')
+                .ok_or_else(|| "malformed IPv6 authority".to_string())?;
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("port must be numeric".into());
+            }
+        }
+        if inner.is_empty() || !inner.bytes().all(|b| b.is_ascii_hexdigit() || b == b':') {
+            return Err("host contains illegal characters".into());
+        }
+        format!("[{inner}]").to_ascii_lowercase()
+    } else {
+        let host = match authority.rsplit_once(':') {
+            Some((host, port))
+                if !host.is_empty()
+                    && !port.is_empty()
+                    && port.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                host
+            }
+            _ => authority,
+        };
+        let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+        let malformed = host.is_empty()
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            || host.starts_with('-')
+            || host.starts_with('.')
+            || host.contains("..");
+        if malformed {
+            return Err("host is malformed".into());
+        }
+        host
+    };
+    if scheme == "http" && !is_loopback(&host) {
+        return Err("plain http is allowed for loopback hosts only".into());
+    }
+    Ok(ParsedUrl {
+        scheme,
+        host,
+        path: if path.is_empty() {
+            "/".into()
+        } else {
+            path.into()
+        },
+    })
+}
+
+fn is_loopback(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1"
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +119,9 @@ pub struct PermissionPolicy {
     /// Environment variable names forwarded to supervised processes.
     /// Empty by default; process env is otherwise cleared.
     env_allowlist: BTreeSet<String>,
+    /// Exact hostnames fetchable over the network. Empty by default, and
+    /// matching is exact (case-insensitive): subdomains are not implied.
+    network_allowlist: BTreeSet<String>,
 }
 
 impl PermissionPolicy {
@@ -45,7 +139,17 @@ impl PermissionPolicy {
             shell_allowlist,
             shell_arg_grants: std::collections::BTreeMap::new(),
             env_allowlist: BTreeSet::new(),
+            network_allowlist: BTreeSet::new(),
         }
+    }
+
+    /// Grant fetching from one exact hostname (case-insensitive, all ports).
+    /// Enables the network capability; loopback hosts additionally require
+    /// this grant, so tests and local devices stay explicit too.
+    pub fn allow_network_domain(&mut self, host: impl Into<String>) {
+        self.capabilities.insert(Capability::NetworkFetch);
+        self.network_allowlist
+            .insert(host.into().to_ascii_lowercase());
     }
 
     /// Explicitly grant a supervised executable. Enables the shell capability
@@ -158,7 +262,27 @@ impl PermissionPolicy {
             shell_allowlist: BTreeSet::new(),
             shell_arg_grants: Default::default(),
             env_allowlist: BTreeSet::new(),
+            // Narrowed children fetch nothing until explicitly re-granted.
+            network_allowlist: BTreeSet::new(),
         })
+    }
+
+    /// Re-grant one fetch hostname to a narrowed child policy. Fails unless
+    /// the parent holds the exact same grant.
+    pub fn grant_network_from(
+        &mut self,
+        parent: &PermissionPolicy,
+        host: &str,
+    ) -> Result<(), String> {
+        let host = host.to_ascii_lowercase();
+        if !parent.network_allowlist.contains(&host) {
+            return Err(format!(
+                "parent does not grant host '{host}'; cannot delegate it"
+            ));
+        }
+        self.capabilities.insert(Capability::NetworkFetch);
+        self.network_allowlist.insert(host);
+        Ok(())
     }
 
     /// Re-grant one environment variable to a narrowed child policy. Fails
@@ -223,6 +347,21 @@ impl PermissionPolicy {
                     return read;
                 }
                 self.check_path(path, Capability::FilesystemWrite)
+            }
+            Action::FetchUrl { url } => {
+                if !self.capabilities.contains(&Capability::NetworkFetch) {
+                    return PermissionDecision::Deny("network.fetch capability is disabled".into());
+                }
+                match parse_fetch_url(url) {
+                    Err(reason) => PermissionDecision::Deny(reason),
+                    Ok(parsed) if self.network_allowlist.contains(&parsed.host) => {
+                        PermissionDecision::Allow
+                    }
+                    Ok(parsed) => PermissionDecision::Deny(format!(
+                        "host '{}' is outside the network allowlist",
+                        parsed.host
+                    )),
+                }
             }
             Action::RunShell { program, args } => {
                 if !self.capabilities.contains(&Capability::ShellExecute) {
@@ -323,5 +462,109 @@ impl PermissionPolicy {
             PermissionDecision::Allow => Ok(self.workspace_root.join(relative)),
             PermissionDecision::Deny(reason) | PermissionDecision::Ask(reason) => Err(reason),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fetch(url: &str) -> Action {
+        Action::FetchUrl { url: url.into() }
+    }
+
+    #[test]
+    fn url_parser_accepts_canonical_forms() {
+        let parsed = parse_fetch_url("https://api.github.com/search?q=x").unwrap();
+        assert_eq!(parsed.scheme, "https");
+        assert_eq!(parsed.host, "api.github.com");
+        assert_eq!(parsed.path, "/search?q=x");
+        assert_eq!(
+            parse_fetch_url("HTTPS://Example.COM:8443/a").unwrap().host,
+            "example.com"
+        );
+        assert_eq!(
+            parse_fetch_url("https://example.com./a").unwrap().host,
+            "example.com"
+        );
+        assert_eq!(parse_fetch_url("https://example.com").unwrap().path, "/");
+        assert_eq!(
+            parse_fetch_url("http://127.0.0.1:8080/a").unwrap().scheme,
+            "http"
+        );
+        assert_eq!(
+            parse_fetch_url("http://localhost/a").unwrap().host,
+            "localhost"
+        );
+        assert_eq!(parse_fetch_url("http://[::1]/a").unwrap().host, "[::1]");
+    }
+
+    #[test]
+    fn url_parser_rejects_hostile_shapes() {
+        for raw in [
+            "ftp://example.com/a",
+            "file:///etc/passwd",
+            "data:text/plain,hi",
+            "http://example.com/a",
+            "http://[::1]evil/a",
+            "https://user:pass@example.com/a",
+            "https://exa mple.com/a",
+            "https://-bad.com/a",
+            "https://.bad.com/a",
+            "https://bad..com/a",
+            "https://example.com:abc/a",
+            "https://",
+            "https://[::1/a",
+            "not a url",
+            "",
+        ] {
+            assert!(parse_fetch_url(raw).is_err(), "{raw}");
+        }
+        assert!(parse_fetch_url(&format!("https://example.com/{}", "x".repeat(3000))).is_err());
+    }
+
+    #[test]
+    fn network_gating_defaults_deny_and_matches_exactly() {
+        let root = std::env::temp_dir();
+        let bare = PermissionPolicy::milestone_default(&root);
+        assert!(matches!(
+            bare.check(&fetch("https://api.github.com/x")),
+            PermissionDecision::Deny(_)
+        ));
+        let mut policy = PermissionPolicy::milestone_default(&root);
+        policy.allow_network_domain("API.GitHub.COM");
+        assert_eq!(
+            policy.check(&fetch("https://api.github.com/x")),
+            PermissionDecision::Allow
+        );
+        // Subdomains are not implied; lookalikes do not match.
+        for url in [
+            "https://evil-api.github.com/x",
+            "https://api.github.com.evil.com/x",
+            "http://api.github.com/x",
+        ] {
+            assert!(
+                matches!(policy.check(&fetch(url)), PermissionDecision::Deny(_)),
+                "{url}"
+            );
+        }
+        // Loopback still needs its own explicit grant.
+        assert!(matches!(
+            policy.check(&fetch("http://127.0.0.1:9/x")),
+            PermissionDecision::Deny(_)
+        ));
+        policy.allow_network_domain("127.0.0.1");
+        assert_eq!(
+            policy.check(&fetch("http://127.0.0.1:9/x")),
+            PermissionDecision::Allow
+        );
+        // Delegation parity: children re-grant only what parents hold.
+        let mut child = policy.narrow_to_subdir("sub").unwrap();
+        assert!(child.grant_network_from(&policy, "other.com").is_err());
+        assert!(child.grant_network_from(&policy, "api.github.com").is_ok());
+        assert_eq!(
+            child.check(&fetch("https://api.github.com/x")),
+            PermissionDecision::Allow
+        );
     }
 }

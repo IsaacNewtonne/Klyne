@@ -502,6 +502,13 @@ impl ToolRegistry {
         self.tools.iter().map(|t| t.descriptor()).collect()
     }
 
+    /// Compose an extension tool (e.g. network fetch) into the registry.
+    /// Registration grants nothing: the permission policy still decides
+    /// every action, and capabilities default to disabled.
+    pub fn register(&mut self, tool: Box<dyn Tool>) {
+        self.tools.push(tool);
+    }
+
     pub fn execute(&self, action: &Action, policy: &PermissionPolicy) -> Observation {
         let wanted = action.tool_name();
         match self.tools.iter().find(|t| t.name() == wanted) {
