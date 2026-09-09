@@ -11,6 +11,7 @@ A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions
 - SQLite migrations, versioned events, transactional checkpoints, process-exclusion lock.
 - Durable objective, history, step budget, pending action, and terminal outcome.
 - Resume between actions after process termination; refuse uncertain interrupted actions.
+- Explicit `--reconcile` inspects interrupted file actions without replaying writes; action audit records carry stable run-scoped IDs.
 - Negative security tests, actual process-kill recovery test, checkpoint-boundary tests.
 
 ## Run
@@ -20,10 +21,13 @@ Requires pinned Rust 1.98.1 and a native C compiler for bundled SQLite.
 ```sh
 cargo run -p harness-cli -- --workspace workspace/example --objective "create file hello.txt with content hello agent"
 cargo run -p harness-cli -- --workspace workspace/example --resume
+cargo run -p harness-cli -- --workspace workspace/example --reconcile
 cargo run -p harness-cli -- --workspace workspace/example --events
 ```
 
 One run per database, defaulting to `<workspace>/.harness/run.sqlite3`. Use a fresh workspace or explicit `--database <path>` for another run. Terminal resume returns the historical result without new actions or fresh verification. The legacy text store remains available to library callers without recovery support.
+
+Ordinary `--resume` refuses pending actions. `--reconcile` rechecks permissions and reads the target: matching interrupted writes are recorded as satisfied postconditions, pending reads receive fresh observations, and normal execution resumes. Missing or conflicting contents remain pending; no corrective write is attempted. Shell actions cannot be reconciled. Matching contents prove current state, not that the original process wrote them.
 
 The adapter accepts `create file <relative-path> with content <text>` or `write file <relative-path> :: <text>`. It is not an LLM and cannot solve general coding tasks.
 
@@ -43,7 +47,7 @@ The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cas
 
 - Path checks reject traversal, reserved runtime paths, existing symlinks and Windows reparse points. They are **not an OS sandbox**: concurrent path replacement, hard links and hostile workspace mutation remain unresolved. Use trusted isolated workspaces. Writes are not atomic.
 - Shell source is retained, but default policy denies execution. Argument scopes, timeouts, output bounds and isolation must precede enabling it.
-- Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Uncertain actions need reconciliation. No exactly-once or host-power-loss guarantee.
+- Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Reconciliation audit attempts may repeat after a crash; consumers should group them by action ID. IDs are scoped to a run/database, not globally unique idempotency keys. No exactly-once or host-power-loss guarantee.
 - Recovery assumes a stateless model. One database handles one run. Only cognitive-step budgets exist.
 - Objectives, observations and checkpoints contain task data. Secret redaction is absent: do not supply secrets.
 - Goal DAGs, planners, real providers, general coding, memory, browser, GUI, delegation and self-improvement are **PLANNED**.

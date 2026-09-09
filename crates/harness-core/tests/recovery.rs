@@ -105,6 +105,203 @@ fn exhausted_budget_survives_restart() {
 }
 
 #[test]
+fn reconcile_matching_write_without_rewriting_and_preserve_id() {
+    let w = Workspace::new();
+    let mut state = w.state();
+    state.pending = Some(harness_core::Action::WriteFile {
+        path: "result.txt".into(),
+        contents: "durable".into(),
+    });
+    let action_id = state.next_action_id();
+    fs::write(w.0.join("result.txt"), "durable").unwrap();
+    let modified = fs::metadata(w.0.join("result.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    SqliteEventStore::open(w.db())
+        .unwrap()
+        .checkpoint(&state)
+        .unwrap();
+    assert!(matches!(
+        w.runtime().reconcile_and_resume().unwrap(),
+        RunOutcome::Completed(_)
+    ));
+    assert_eq!(
+        fs::metadata(w.0.join("result.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
+    );
+    let events = SqliteEventStore::open(w.db()).unwrap().events().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == "ToolCalled" && e.detail == "write_file:result.txt")
+    );
+    let reconciled = events
+        .iter()
+        .find(|e| e.kind == "ActionReconciled")
+        .unwrap();
+    let detail: serde_json::Value = serde_json::from_str(&reconciled.detail).unwrap();
+    assert_eq!(detail["action_id"], action_id);
+}
+
+#[test]
+fn reconciliation_refuses_missing_mismatching_and_forbidden_paths() {
+    for (path, existing) in [
+        ("result.txt", None),
+        ("result.txt", Some("other")),
+        ("../escape.txt", None),
+        (".harness/private", None),
+    ] {
+        let w = Workspace::new();
+        let mut state = w.state();
+        let action = harness_core::Action::WriteFile {
+            path: path.into(),
+            contents: "durable".into(),
+        };
+        state.pending = Some(action.clone());
+        if let Some(contents) = existing {
+            fs::write(w.0.join(path), contents).unwrap();
+        }
+        SqliteEventStore::open(w.db())
+            .unwrap()
+            .checkpoint(&state)
+            .unwrap();
+        assert!(w.runtime().reconcile_and_resume().is_err());
+        assert_eq!(
+            SqliteEventStore::open(w.db())
+                .unwrap()
+                .load()
+                .unwrap()
+                .unwrap()
+                .pending,
+            Some(action)
+        );
+        if let Some(contents) = existing {
+            assert_eq!(fs::read_to_string(w.0.join(path)).unwrap(), contents);
+        }
+    }
+}
+
+#[test]
+fn interrupted_shell_is_never_replayed_by_reconciler() {
+    let w = Workspace::new();
+    let mut state = w.state();
+    state.pending = Some(harness_core::Action::RunShell {
+        program: "echo".into(),
+        args: vec!["unsafe".into()],
+    });
+    SqliteEventStore::open(w.db())
+        .unwrap()
+        .checkpoint(&state)
+        .unwrap();
+    assert!(
+        w.runtime()
+            .reconcile_and_resume()
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported")
+    );
+    let events = SqliteEventStore::open(w.db()).unwrap().events().unwrap();
+    assert!(!events.iter().any(|e| e.kind == "ToolCalled"));
+}
+
+#[test]
+fn pending_read_is_refreshed_then_independently_verified() {
+    let w = Workspace::new();
+    let mut state = w.state();
+    state.history.push((
+        harness_core::Action::WriteFile {
+            path: "result.txt".into(),
+            contents: "durable".into(),
+        },
+        harness_core::Observation {
+            ok: true,
+            summary: "written".into(),
+            data: "7".into(),
+        },
+    ));
+    state.pending = Some(harness_core::Action::ReadFile {
+        path: "result.txt".into(),
+    });
+    fs::write(w.0.join("result.txt"), "durable").unwrap();
+    SqliteEventStore::open(w.db())
+        .unwrap()
+        .checkpoint(&state)
+        .unwrap();
+    assert!(matches!(
+        w.runtime().reconcile_and_resume().unwrap(),
+        RunOutcome::Completed(_)
+    ));
+    let store = SqliteEventStore::open(w.db()).unwrap();
+    let events = store.events().unwrap();
+    assert!(events.iter().any(|e| e.kind == "VerificationPassed"));
+    let prepared: Vec<serde_json::Value> = events
+        .iter()
+        .filter(|e| e.kind == "ActionPrepared")
+        .map(|e| serde_json::from_str(&e.detail).unwrap())
+        .collect();
+    assert_eq!(prepared.len(), 1); // Final runtime-owned verification remains mandatory.
+    assert_ne!(prepared[0]["action_id"], state.next_action_id());
+}
+
+#[test]
+fn failed_reconciliation_checkpoint_can_be_retried_without_write() {
+    struct FailCheckpoint(SqliteEventStore);
+    impl EventStore for FailCheckpoint {
+        fn append(&mut self, kind: &str, detail: &str) -> std::io::Result<harness_core::Event> {
+            self.0.append(kind, detail)
+        }
+        fn load(&mut self) -> std::io::Result<Option<RunState>> {
+            self.0.load()
+        }
+        fn checkpoint(&mut self, _: &RunState) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected checkpoint failure"))
+        }
+    }
+    let w = Workspace::new();
+    let mut state = w.state();
+    state.pending = Some(harness_core::Action::WriteFile {
+        path: "result.txt".into(),
+        contents: "durable".into(),
+    });
+    fs::write(w.0.join("result.txt"), "durable").unwrap();
+    SqliteEventStore::open(w.db())
+        .unwrap()
+        .checkpoint(&state)
+        .unwrap();
+    let mut runtime = AgentRuntime::new(
+        HeuristicModel,
+        ToolRegistry::milestone_default(),
+        PermissionPolicy::milestone_default(&w.0),
+        FailCheckpoint(SqliteEventStore::open(w.db()).unwrap()),
+    );
+    assert!(runtime.reconcile_and_resume().is_err());
+    drop(runtime);
+    assert_eq!(
+        SqliteEventStore::open(w.db())
+            .unwrap()
+            .load()
+            .unwrap()
+            .unwrap()
+            .pending,
+        state.pending
+    );
+    assert!(matches!(
+        w.runtime().reconcile_and_resume().unwrap(),
+        RunOutcome::Completed(_)
+    ));
+    let events = SqliteEventStore::open(w.db()).unwrap().events().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == "ToolCalled" && e.detail == "write_file:result.txt")
+    );
+}
+
+#[test]
 fn excludes_second_executor_and_rejects_newer_schema() {
     let w = Workspace::new();
     let first = SqliteEventStore::open(w.db()).unwrap();
@@ -159,17 +356,95 @@ fn crash_worker() {
         }
     }
     let root = PathBuf::from(root);
+    struct CrashStore {
+        inner: SqliteEventStore,
+        root: PathBuf,
+    }
+    impl EventStore for CrashStore {
+        fn append(&mut self, kind: &str, detail: &str) -> std::io::Result<harness_core::Event> {
+            let result = self.inner.append(kind, detail)?;
+            if kind == "ActionObserved" && std::env::var_os("HARNESS_CRASH_AFTER_TOOL").is_some() {
+                fs::write(
+                    self.root.join("ready"),
+                    b"tool executed, checkpoint still pending",
+                )?;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+            Ok(result)
+        }
+        fn checkpoint(&mut self, state: &RunState) -> std::io::Result<()> {
+            self.inner.checkpoint(state)
+        }
+        fn load(&mut self) -> std::io::Result<Option<RunState>> {
+            self.inner.load()
+        }
+    }
     let mut runtime = AgentRuntime::new(
         PauseModel(root.clone()),
         ToolRegistry::milestone_default(),
         PermissionPolicy::milestone_default(&root),
-        SqliteEventStore::open(root.join("run.sqlite3")).unwrap(),
+        CrashStore {
+            inner: SqliteEventStore::open(root.join("run.sqlite3")).unwrap(),
+            root: root.clone(),
+        },
     );
     runtime
         .run(Objective::new(
             "create file result.txt with content durable",
         ))
         .unwrap();
+}
+
+#[test]
+fn kill_after_write_before_checkpoint_then_reconcile() {
+    let w = Workspace::new();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "crash_worker", "--nocapture"])
+        .env("HARNESS_CRASH_TEST_ROOT", &w.0)
+        .env("HARNESS_CRASH_AFTER_TOOL", "1")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !w.0.join("ready").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let ready = w.0.join("ready").exists();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(ready);
+    let state = SqliteEventStore::open(w.db())
+        .unwrap()
+        .load()
+        .unwrap()
+        .unwrap();
+    assert!(state.pending.is_some());
+    assert!(state.history.is_empty());
+    let action_id = state.next_action_id();
+    assert!(w.runtime().resume().is_err());
+    assert!(matches!(
+        w.runtime().reconcile_and_resume().unwrap(),
+        RunOutcome::Completed(_)
+    ));
+    let events = SqliteEventStore::open(w.db()).unwrap().events().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == "ToolCalled" && e.detail == "write_file:result.txt")
+            .count(),
+        1
+    );
+    for kind in ["ActionPrepared", "ActionObserved", "ActionReconciled"] {
+        let event = events.iter().find(|e| e.kind == kind).unwrap();
+        let detail: serde_json::Value = serde_json::from_str(&event.detail).unwrap();
+        assert_eq!(detail["action_id"], action_id);
+    }
+    assert_eq!(
+        fs::read_to_string(w.0.join("result.txt")).unwrap(),
+        "durable"
+    );
 }
 
 #[test]

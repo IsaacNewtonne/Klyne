@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: harness-cli --workspace <dir> [--objective <text> | --resume | --events] [--database <path>]"
+        "Usage: harness-cli --workspace <dir> [--objective <text> | --resume | --reconcile | --events] [--database <path>]"
     );
     eprintln!(
         "Example: harness-cli --workspace ./workspace --objective 'create file hello.txt with content hello agent'"
@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut objective: Option<String> = None;
     let mut database: Option<PathBuf> = None;
     let mut resume = false;
+    let mut reconcile = false;
     let mut show_events = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -33,13 +34,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ))
             }
             "--resume" => resume = true,
+            "--reconcile" => reconcile = true,
             "--events" => show_events = true,
             "-h" | "--help" => usage(),
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
     let workspace = workspace.unwrap_or_else(|| PathBuf::from("./workspace"));
-    if usize::from(objective.is_some()) + usize::from(resume) + usize::from(show_events) != 1 {
+    if usize::from(objective.is_some())
+        + usize::from(resume)
+        + usize::from(reconcile)
+        + usize::from(show_events)
+        != 1
+    {
         usage();
     }
     fs::create_dir_all(&workspace)?;
@@ -59,7 +66,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         events,
     );
 
-    let outcome = if resume {
+    let outcome = if reconcile {
+        runtime.reconcile_and_resume()?
+    } else if resume {
         runtime.resume()?
     } else {
         runtime.run(Objective::new(objective.ok_or("missing objective")?))?

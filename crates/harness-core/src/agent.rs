@@ -24,6 +24,13 @@ pub struct RunState {
     pub outcome: Option<RunOutcome>,
 }
 
+impl RunState {
+    /// Stable within a run, including across restarts and reconciliation attempts.
+    pub fn next_action_id(&self) -> String {
+        format!("{}/action/{}", self.objective.id, self.history.len())
+    }
+}
+
 pub struct AgentRuntime<M: Model, E: EventStore> {
     model: M,
     tools: ToolRegistry,
@@ -71,7 +78,9 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
         self.events.append("ToolCalled", &action.to_string())?;
         state.pending = Some(action.clone());
         self.events.checkpoint(state)?;
+        self.action_event("ActionPrepared", state, &action, None)?;
         let obs = self.tools.execute(&action, &self.policy);
+        self.action_event("ActionObserved", state, &action, Some(&obs))?;
         self.events.append(
             if obs.ok {
                 "ToolCompleted"
@@ -111,7 +120,76 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
     }
 
     pub fn resume(&mut self) -> io::Result<RunOutcome> {
-        let state = self
+        self.resume_with_reconciliation(false)
+    }
+
+    /// Inspect interrupted file actions without repeating a write. A matching
+    /// postcondition proves current state, not which process produced it.
+    pub fn reconcile_and_resume(&mut self) -> io::Result<RunOutcome> {
+        self.resume_with_reconciliation(true)
+    }
+
+    fn action_event(
+        &mut self,
+        kind: &str,
+        state: &RunState,
+        action: &Action,
+        observation: Option<&Observation>,
+    ) -> io::Result<()> {
+        let detail = serde_json::json!({"version":1, "action_id":state.next_action_id(), "action":action, "observation":observation});
+        self.events.append(kind, &detail.to_string())?;
+        Ok(())
+    }
+
+    fn reconcile_pending(&mut self, state: &mut RunState) -> io::Result<()> {
+        let Some(action) = state.pending.clone() else {
+            return Ok(());
+        };
+        self.action_event("ReconciliationStarted", state, &action, None)?;
+        let read = match &action {
+            Action::WriteFile { path, .. } | Action::ReadFile { path } => {
+                Action::ReadFile { path: path.clone() }
+            }
+            _ => {
+                return Err(io::Error::other(
+                    "reconciliation is unsupported for this action; no replay performed",
+                ));
+            }
+        };
+        for request in [&action, &read] {
+            if let PermissionDecision::Deny(reason) | PermissionDecision::Ask(reason) =
+                self.policy.check(request)
+            {
+                self.action_event("ReconciliationDenied", state, &action, None)?;
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
+            }
+        }
+        let observed = self.tools.execute(&read, &self.policy);
+        self.action_event("ReconciliationObserved", state, &read, Some(&observed))?;
+        if !observed.ok
+            || matches!(&action, Action::WriteFile { contents, .. } if *contents != observed.data)
+        {
+            self.action_event("ReconciliationBlocked", state, &action, None)?;
+            return Err(io::Error::other(
+                "reconciliation could not establish the postcondition; pending action preserved",
+            ));
+        }
+        let result = match &action {
+            Action::WriteFile { contents, .. } => Observation {
+                ok: true,
+                summary: "write postcondition observed; write was not repeated".into(),
+                data: contents.len().to_string(),
+            },
+            _ => observed,
+        };
+        self.action_event("ActionReconciled", state, &action, Some(&result))?;
+        state.history.push((action, result));
+        state.pending = None;
+        self.events.checkpoint(state)
+    }
+
+    fn resume_with_reconciliation(&mut self, reconcile: bool) -> io::Result<RunOutcome> {
+        let mut state = self
             .events
             .load()?
             .ok_or_else(|| io::Error::other("no checkpoint to resume"))?;
@@ -123,8 +201,9 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
         if let Some(outcome) = state.outcome {
             return Ok(outcome);
         }
-        // Never replay an ambiguous side effect. A future reconciler can inspect
-        // preconditions and postconditions before explicitly resolving this state.
+        if reconcile {
+            self.reconcile_pending(&mut state)?;
+        }
         if state.pending.is_some() {
             return Err(io::Error::other(
                 "interrupted action has uncertain outcome; reconciliation required",

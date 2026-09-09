@@ -40,6 +40,6 @@ Single measured sample, not a throughput guarantee or intelligence comparison. C
 
 ## Remaining work
 
-Phase 1 is a tested file-action subset; usable supervised shell execution is partial. Phase 2 is a checkpoint subset, not a complete durable scheduler. Next: stable action IDs and reconciliation, bounded process supervisor, goal/task DAG, atomic file writes and filesystem capability handles. Real providers and autonomous coding follow those boundaries.
+Phase 1 is a tested file-action subset; usable supervised shell execution is partial. Phase 2 is a checkpoint subset, not a complete durable scheduler. Stable run-scoped action IDs and conservative file reconciliation are now implemented; see [reconciliation evidence](reconciliation.md). Next: bounded process supervisor, goal/task DAG, atomic file writes and filesystem capability handles. Real providers and autonomous coding follow those boundaries.
 
 No model-provider, GUI, browser, host reboot, or general coding benchmark success is claimed.
