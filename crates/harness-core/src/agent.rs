@@ -77,6 +77,13 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
         self
     }
 
+    /// Bound on cognitive steps for a new run. The persisted `max_steps`
+    /// wins on resume; this never raises a resumed run's stored bound.
+    pub fn with_max_steps(mut self, max_steps: usize) -> Self {
+        self.max_steps = max_steps;
+        self
+    }
+
     fn reserve_tool_call(&mut self, state: &mut RunState) -> io::Result<()> {
         let budget = state.tool_budget.as_mut().ok_or_else(|| {
             io::Error::other(

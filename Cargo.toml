@@ -3,5 +3,6 @@ resolver = "2"
 members = [
   "crates/harness-core",
   "crates/harness-provider",
+  "crates/harness-benchmark",
   "apps/cli",
 ]

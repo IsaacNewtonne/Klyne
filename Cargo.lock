@@ -259,6 +259,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-benchmark"
+version = "0.1.0"
+dependencies = [
+ "harness-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "harness-cli"
 version = "0.1.0"
 dependencies = [
