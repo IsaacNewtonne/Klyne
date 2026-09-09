@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: harness-cli --workspace <dir> [--objective <text> | --resume | --reconcile | --events] [--database <path>] [--max-tool-calls <integer> (new runs only)]"
+        "Usage: harness-cli --workspace <dir> [--objective <text> | --resume | --reconcile | --events | --tools] [--database <path>] [--max-tool-calls <integer> (new runs only)]"
     );
     eprintln!(
         "Example: harness-cli --workspace ./workspace --objective 'create file hello.txt with content hello agent'"
@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_tool_calls: Option<u64> = None;
     let mut reconcile = false;
     let mut show_events = false;
+    let mut show_tools = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--workspace" => workspace = args.next().map(PathBuf::from),
@@ -44,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--reconcile" => reconcile = true,
             "--events" => show_events = true,
+            "--tools" => show_tools = true,
             "-h" | "--help" => usage(),
             other => return Err(format!("unknown argument: {other}").into()),
         }
@@ -56,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         + usize::from(resume)
         + usize::from(reconcile)
         + usize::from(show_events)
+        + usize::from(show_tools)
         != 1
     {
         usage();
@@ -63,6 +66,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&workspace)?;
     let events =
         SqliteEventStore::open(database.unwrap_or_else(|| workspace.join(".harness/run.sqlite3")))?;
+    if show_tools {
+        let registry = ToolRegistry::milestone_default();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&registry.descriptors()).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
     if show_events {
         for event in events.events()? {
             println!("{}\t{}\t{:?}", event.seq, event.kind, event.detail);

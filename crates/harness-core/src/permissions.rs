@@ -21,6 +21,13 @@ pub struct PermissionPolicy {
     workspace_root: PathBuf,
     capabilities: BTreeSet<Capability>,
     shell_allowlist: BTreeSet<String>,
+    /// Optional per-program argument grants. Absent entry means any argv is
+    /// allowed for an allowlisted program (broad grant, audited in events).
+    /// Present entry requires argv to start with one of the allowed prefixes.
+    shell_arg_grants: std::collections::BTreeMap<String, Vec<Vec<String>>>,
+    /// Environment variable names forwarded to supervised processes.
+    /// Empty by default; process env is otherwise cleared.
+    env_allowlist: BTreeSet<String>,
 }
 
 impl PermissionPolicy {
@@ -36,7 +43,64 @@ impl PermissionPolicy {
             workspace_root: workspace_root.into(),
             capabilities,
             shell_allowlist,
+            shell_arg_grants: std::collections::BTreeMap::new(),
+            env_allowlist: BTreeSet::new(),
         }
+    }
+
+    /// Explicitly grant a supervised executable. Enables the shell capability
+    /// and allowlists `program` with unrestricted argv (audited per call).
+    /// Prefer [`PermissionPolicy::allow_shell_with_arg_prefix`] for tighter grants.
+    pub fn allow_shell_program(&mut self, program: impl Into<String>) {
+        self.capabilities.insert(Capability::ShellExecute);
+        self.shell_allowlist.insert(program.into());
+    }
+
+    /// Grant `program` only when argv starts with `prefix` (exact element match).
+    /// Multiple prefixes may be registered; one match suffices.
+    pub fn allow_shell_with_arg_prefix(&mut self, program: impl Into<String>, prefix: Vec<String>) {
+        let program = program.into();
+        self.capabilities.insert(Capability::ShellExecute);
+        self.shell_allowlist.insert(program.clone());
+        self.shell_arg_grants
+            .entry(program)
+            .or_default()
+            .push(prefix);
+    }
+
+    /// Grant an environment variable name for forwarding to child processes.
+    pub fn allow_env(&mut self, name: impl Into<String>) {
+        self.env_allowlist.insert(name.into());
+    }
+
+    /// Resolve the child environment: cleared process env plus allowlisted
+    /// names present in this process. Executable lookup requires `PATH`
+    /// (plus `PATHEXT`/`COMSPEC`/`SYSTEMROOT` on Windows), so those
+    /// non-secret OS-minimum entries are always forwarded when present.
+    /// Anything else, including secrets, requires an explicit grant.
+    pub fn shell_env(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for name in &self.env_allowlist {
+            if let Ok(value) = std::env::var(name) {
+                out.push((name.clone(), value));
+            }
+        }
+        let mut forward_os_minimum = |name: &str| {
+            if !self.env_allowlist.iter().any(|n| n == name)
+                && let Ok(value) = std::env::var(name)
+            {
+                out.push((name.to_string(), value));
+            }
+        };
+        forward_os_minimum("PATH");
+        #[cfg(windows)]
+        {
+            forward_os_minimum("SYSTEMROOT");
+            forward_os_minimum("WINDIR");
+            forward_os_minimum("COMSPEC");
+            forward_os_minimum("PATHEXT");
+        }
+        out
     }
 
     pub fn workspace_root(&self) -> &Path {
@@ -56,14 +120,29 @@ impl PermissionPolicy {
                 }
                 self.check_path(path, Capability::FilesystemWrite)
             }
-            Action::RunShell { program, .. } => {
+            Action::RunShell { program, args } => {
                 if !self.capabilities.contains(&Capability::ShellExecute) {
                     return PermissionDecision::Deny("shell.execute capability is disabled".into());
                 }
-                if program.contains('/') || !self.shell_allowlist.contains(program) {
+                if program.is_empty()
+                    || program.contains('/')
+                    || program.contains('\\')
+                    || program.contains(':')
+                    || !self.shell_allowlist.contains(program)
+                {
                     return PermissionDecision::Deny(format!(
                         "executable '{program}' is outside the milestone allowlist"
                     ));
+                }
+                if let Some(prefixes) = self.shell_arg_grants.get(program) {
+                    let allowed = prefixes.iter().any(|prefix| {
+                        args.len() >= prefix.len() && args[..prefix.len()] == prefix[..]
+                    });
+                    if !allowed {
+                        return PermissionDecision::Deny(format!(
+                            "argv for '{program}' is outside the granted argument prefixes"
+                        ));
+                    }
                 }
                 PermissionDecision::Allow
             }

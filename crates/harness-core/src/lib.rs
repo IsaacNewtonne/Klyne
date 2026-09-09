@@ -13,5 +13,8 @@ pub use agent::{AgentRuntime, RunOutcome};
 pub use event_store::FileEventStore;
 pub use model::{HeuristicModel, Model};
 pub use permissions::{Capability, PermissionDecision, PermissionPolicy};
-pub use tools::{ToolRegistry, WorkspaceFsTool, WorkspaceShellTool};
+pub use tools::{
+    ActionDescriptor, ProcessLimits, Tool, ToolDescriptor, ToolRegistry, WorkspaceFsTool,
+    WorkspaceShellTool,
+};
 pub use types::{Action, Event, Objective, Observation, StepDecision, Verification};

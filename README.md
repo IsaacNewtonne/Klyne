@@ -14,7 +14,8 @@ A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions
 - Explicit `--reconcile` inspects interrupted file actions without replaying writes; action audit records carry stable run-scoped IDs.
 - Persisted tool-call reservations (32 by default), including verification and reconciliation; filesystem reads/writes capped at 1 MiB per operation.
 - Typed range reads, streaming SHA-256, and digest-guarded patches for larger files; see [large-file operations](docs/large-files.md).
-- Negative security tests, actual process-kill recovery test, checkpoint-boundary tests.
+- Structured tool descriptors and discovery (`--tools`); supervised argv process execution with explicit grants, timeout, output bounds, and Windows tree kill; see [process supervision](docs/process-supervision.md).
+- Negative security tests, actual process-kill recovery test, checkpoint-boundary tests, supervised-process tests (nonzero exit, timeout, output bounds, denials, env grants, tree kill).
 
 ## Run
 
@@ -25,6 +26,7 @@ cargo run -p harness-cli -- --workspace workspace/example --objective "create fi
 cargo run -p harness-cli -- --workspace workspace/example --resume
 cargo run -p harness-cli -- --workspace workspace/example --reconcile
 cargo run -p harness-cli -- --workspace workspace/example --events
+cargo run -p harness-cli -- --workspace workspace/example --tools
 ```
 
 One run per database, defaulting to `<workspace>/.harness/run.sqlite3`. Use a fresh workspace or explicit `--database <path>` for another run. Terminal resume returns the historical result without new actions or fresh verification. The legacy text store remains available to library callers without recovery support.
@@ -49,7 +51,7 @@ The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cas
 ## PARTIAL / limitations
 
 - Path checks reject traversal, reserved runtime paths, existing symlinks and Windows reparse points. They are **not an OS sandbox**: concurrent path replacement, hard links and hostile workspace mutation remain unresolved. Use trusted isolated workspaces. Writes are not atomic.
-- Shell source is retained, but default policy denies execution. Argument scopes, timeouts, output bounds and isolation must precede enabling it.
+- Shell execution defaults to denied and requires explicit per-executable (optionally argument-prefix) grants. Supervised runs use argv only, a workspace-fixed cwd, a cleared environment with explicit grants, a 30 s timeout, 64 KiB per-stream output caps, and Windows `taskkill /T` tree cleanup. This is authorization, not OS isolation: no job objects, cgroups, or sandbox exist yet, and Unix tree cleanup is best-effort.
 - Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Reconciliation audit attempts may repeat after a crash; consumers should group them by action ID. IDs are scoped to a run/database, not globally unique idempotency keys. No exactly-once or host-power-loss guarantee.
 - Recovery assumes a stateless model. One database handles one run. Cognitive-step and tool-call budgets exist; time, token and monetary budgets remain planned.
 - Objectives, observations and checkpoints contain task data. Secret redaction is absent: do not supply secrets.
