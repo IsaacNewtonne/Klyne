@@ -7,6 +7,7 @@ A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions
 - Two-crate workspace: harness-core and harness-cli.
 - Replaceable model trait and deterministic file-objective adapter.
 - Typed file actions, permission checks, independent runtime read-back verification.
+- Serializable success criteria and a verifier trait independent of the model adapter.
 - SQLite migrations, versioned events, transactional checkpoints, process-exclusion lock.
 - Durable objective, history, step budget, pending action, and terminal outcome.
 - Resume between actions after process termination; refuse uncertain interrupted actions.

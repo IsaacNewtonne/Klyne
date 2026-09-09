@@ -13,7 +13,7 @@ The original environment report described a previous Linux environment. This ses
 - An OS file lock is held for the store lifetime and releases after process kill. It excludes cooperating executors using the same database path, not hostile processes or alternate hard-link aliases.
 - Persist pending action before invocation; persist observation/history before another decision. Refuse replay of pending actions on restart. No exactly-once side-effect claim.
 - Persist step consumption before model invocation. A crash can consume a step without an action; restart never resets the budget.
-- Runtime independently reads and compares requested file contents before accepting model completion. Criteria still use a narrow objective grammar; a general verifier interface remains planned.
+- Runtime independently reads and compares requested file contents before accepting model completion. A serializable `SuccessCriterion` and `Verifier` trait now separate claims and evidence from the model adapter. Only the file-content criterion is implemented; broader verification strategies remain planned.
 - Default shell capability revoked: executable allowlisting alone permitted reads outside the workspace. The shell implementation remains for future supervised execution.
 
 ## Evidence
@@ -40,6 +40,6 @@ Single measured sample, not a throughput guarantee or intelligence comparison. C
 
 ## Remaining work
 
-Phase 1 is a tested file-action subset; usable supervised shell execution is partial. Phase 2 is a checkpoint subset, not a complete durable scheduler. Next: typed success criteria independent of the adapter, stable action IDs and reconciliation, bounded process supervisor, goal/task DAG, atomic file writes and filesystem capability handles. Real providers and autonomous coding follow those boundaries.
+Phase 1 is a tested file-action subset; usable supervised shell execution is partial. Phase 2 is a checkpoint subset, not a complete durable scheduler. Next: stable action IDs and reconciliation, bounded process supervisor, goal/task DAG, atomic file writes and filesystem capability handles. Real providers and autonomous coding follow those boundaries.
 
 No model-provider, GUI, browser, host reboot, or general coding benchmark success is claimed.

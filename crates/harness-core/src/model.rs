@@ -10,41 +10,17 @@ pub trait Model: Send {
 #[derive(Default)]
 pub struct HeuristicModel;
 
-impl HeuristicModel {
-    pub(crate) fn parse_create(text: &str) -> Option<(String, String)> {
-        // Accepted forms:
-        //   create file hello.txt with content hello world
-        //   write file hello.txt :: hello world
-        let trimmed = text.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("create file ") {
-            let marker = " with content ";
-            let idx = rest.find(marker)?;
-            let path_start = "create file ".len();
-            let path_end = path_start + idx;
-            let content_start = path_end + marker.len();
-            return Some((
-                trimmed[path_start..path_end].trim().to_string(),
-                trimmed[content_start..].to_string(),
-            ));
-        }
-        if lower.starts_with("write file ") {
-            let sep = trimmed.find("::")?;
-            let path = trimmed["write file ".len()..sep].trim().to_string();
-            let contents = trimmed[sep + 2..].trim().to_string();
-            return Some((path, contents));
-        }
-        None
-    }
-}
-
 impl Model for HeuristicModel {
     fn name(&self) -> &str {
         "heuristic-milestone-model"
     }
 
     fn decide(&mut self, objective: &Objective, history: &[(Action, Observation)]) -> StepDecision {
-        let Some((path, contents)) = Self::parse_create(&objective.text) else {
+        let Some(crate::verification::SuccessCriterion::FileContents {
+            path,
+            expected: contents,
+        }) = crate::verification::SuccessCriterion::from_objective(&objective.text)
+        else {
             return StepDecision::Fail(
                 "milestone model supports: 'create file <relative-path> with content <text>' or 'write file <relative-path> :: <text>'".into(),
             );

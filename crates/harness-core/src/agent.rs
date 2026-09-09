@@ -3,6 +3,7 @@ use crate::model::Model;
 use crate::permissions::{PermissionDecision, PermissionPolicy};
 use crate::tools::ToolRegistry;
 use crate::types::{Action, Objective, Observation, StepDecision};
+use crate::verification::{FileContentsVerifier, SuccessCriterion, Verifier};
 use std::io;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -162,33 +163,33 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
                         return Ok(outcome);
                     }
                 }
-                StepDecision::Complete(summary) => {
+                StepDecision::Complete(_) => {
                     self.events.append("VerificationStarted", &objective.id)?;
-                    let Some((path, expected)) =
-                        crate::model::HeuristicModel::parse_create(&objective.text)
-                    else {
+                    let Some(criterion) = SuccessCriterion::from_objective(&objective.text) else {
                         let reason = "objective has no supported success criterion";
                         self.events.append("VerificationFailed", reason)?;
                         self.events.append("GoalFailed", reason)?;
                         return Ok(RunOutcome::Failed(reason.into()));
                     };
                     if let Some(outcome) = self.execute_action(
-                        Action::ReadFile { path },
+                        criterion.observation_action(),
                         "independent_verification",
                         state,
                     )? {
                         return Ok(outcome);
                     }
-                    if !state
+                    let (action, observation) = state
                         .history
                         .last()
-                        .is_some_and(|(_, obs)| obs.ok && obs.data == expected)
-                    {
+                        .ok_or_else(|| io::Error::other("missing verification observation"))?;
+                    let verification = FileContentsVerifier.verify(&criterion, action, observation);
+                    if !verification.passed {
                         let reason = "independent file-content verification failed";
                         self.events.append("VerificationFailed", reason)?;
                         self.events.append("GoalFailed", reason)?;
                         return Ok(RunOutcome::Failed(reason.into()));
                     }
+                    let summary = verification.evidence;
                     self.events.append("VerificationPassed", &summary)?;
                     self.events.append("GoalCompleted", &summary)?;
                     return Ok(RunOutcome::Completed(summary));

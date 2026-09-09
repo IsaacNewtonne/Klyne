@@ -5,6 +5,7 @@ pub mod permissions;
 pub mod sqlite_store;
 pub mod tools;
 pub mod types;
+pub mod verification;
 pub use sqlite_store::SqliteEventStore;
 
 pub use agent::{AgentRuntime, RunOutcome};
