@@ -1,35 +1,50 @@
-# Rust Agent Harness v0.1
+﻿# Rust Agent Harness
 
-A local-first autonomous-agent runtime research project. Milestone 1 implements a narrow but complete vertical slice:
+A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions; the runtime owns permissions, evidence, budgets, and persistence.
 
-`objective -> model decision -> permission check -> tool action -> observation -> verification -> append-only persistence`
+## IMPLEMENTED and tested
 
-## Current executable capability
-
-The dependency-free milestone model understands:
-
-```text
-create file <relative-path> with content <text>
-write file <relative-path> :: <text>
-```
-
-It writes the file inside a configured workspace, reads it back as independent evidence, verifies exact contents, and records each state transition/tool call in an append-only event log.
+- Two-crate workspace: harness-core and harness-cli.
+- Replaceable model trait and deterministic file-objective adapter.
+- Typed file actions, permission checks, independent runtime read-back verification.
+- SQLite migrations, versioned events, transactional checkpoints, process-exclusion lock.
+- Durable objective, history, step budget, pending action, and terminal outcome.
+- Resume between actions after process termination; refuse uncertain interrupted actions.
+- Negative security tests, actual process-kill recovery test, checkpoint-boundary tests.
 
 ## Run
 
-Requires Rust 1.98.1+.
+Requires pinned Rust 1.98.1 and a native C compiler for bundled SQLite.
 
-```bash
-cargo test --workspace
-./scripts/demo.sh
+```sh
+cargo run -p harness-cli -- --workspace workspace/example --objective "create file hello.txt with content hello agent"
+cargo run -p harness-cli -- --workspace workspace/example --resume
+cargo run -p harness-cli -- --workspace workspace/example --events
 ```
 
-## Security posture of milestone 1
+One run per database, defaulting to `<workspace>/.harness/run.sqlite3`. Use a fresh workspace or explicit `--database <path>` for another run. Terminal resume returns the historical result without new actions or fresh verification. The legacy text store remains available to library callers without recovery support.
 
-- Filesystem actions are confined to relative paths under the selected workspace.
-- `..`, absolute paths, and path prefixes are denied.
-- Shell execution exists as a typed tool but is limited to a small executable allowlist.
-- No root/admin operations, secrets, browser, GUI, network, package installation, or external side effects are granted.
-- Execution success is not accepted as task success: the write action is followed by a read-back verification step.
+The adapter accepts `create file <relative-path> with content <text>` or `write file <relative-path> :: <text>`. It is not an LLM and cannot solve general coding tasks.
 
-See `docs/architecture-v0.1.md` for the complete design and roadmap.
+## Verify and benchmark
+
+```sh
+cargo fmt --all -- --check
+cargo check --workspace --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo run -p harness-core --example benchmark --locked
+```
+
+The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cases violate acceptance criteria. It has no external model calls, tokens, or model cost.
+
+## PARTIAL / limitations
+
+- Path checks reject traversal, reserved runtime paths, existing symlinks and Windows reparse points. They are **not an OS sandbox**: concurrent path replacement, hard links and hostile workspace mutation remain unresolved. Use trusted isolated workspaces. Writes are not atomic.
+- Shell source is retained, but default policy denies execution. Argument scopes, timeouts, output bounds and isolation must precede enabling it.
+- Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Uncertain actions need reconciliation. No exactly-once or host-power-loss guarantee.
+- Recovery assumes a stateless model. One database handles one run. Only cognitive-step budgets exist.
+- Objectives, observations and checkpoints contain task data. Secret redaction is absent: do not supply secrets.
+- Goal DAGs, planners, real providers, general coding, memory, browser, GUI, delegation and self-improvement are **PLANNED**.
+
+See [implementation evidence](docs/milestone-durable-core.md) and [historical architecture](docs/architecture-v0.1.md).

@@ -11,7 +11,7 @@ pub trait Model: Send {
 pub struct HeuristicModel;
 
 impl HeuristicModel {
-    fn parse_create(text: &str) -> Option<(String, String)> {
+    pub(crate) fn parse_create(text: &str) -> Option<(String, String)> {
         // Accepted forms:
         //   create file hello.txt with content hello world
         //   write file hello.txt :: hello world
@@ -23,7 +23,10 @@ impl HeuristicModel {
             let path_start = "create file ".len();
             let path_end = path_start + idx;
             let content_start = path_end + marker.len();
-            return Some((trimmed[path_start..path_end].trim().to_string(), trimmed[content_start..].to_string()));
+            return Some((
+                trimmed[path_start..path_end].trim().to_string(),
+                trimmed[content_start..].to_string(),
+            ));
         }
         if lower.starts_with("write file ") {
             let sep = trimmed.find("::")?;
@@ -36,7 +39,9 @@ impl HeuristicModel {
 }
 
 impl Model for HeuristicModel {
-    fn name(&self) -> &str { "heuristic-milestone-model" }
+    fn name(&self) -> &str {
+        "heuristic-milestone-model"
+    }
 
     fn decide(&mut self, objective: &Objective, history: &[(Action, Observation)]) -> StepDecision {
         let Some((path, contents)) = Self::parse_create(&objective.text) else {
@@ -48,22 +53,43 @@ impl Model for HeuristicModel {
         match history {
             [] => StepDecision::Act(Action::WriteFile { path, contents }),
             [(Action::WriteFile { path: written, .. }, obs)] if obs.ok => {
-                StepDecision::Verify(Action::ReadFile { path: written.clone() })
+                StepDecision::Verify(Action::ReadFile {
+                    path: written.clone(),
+                })
             }
-            [(_, obs)] if !obs.ok => StepDecision::Fail(format!("action failed: {}: {}", obs.summary, obs.data)),
-            [
-                (Action::WriteFile { contents: expected, .. }, Observation { ok: true, .. }),
-                (Action::ReadFile { path, .. }, Observation { ok: true, data, .. }),
-            ] if data == expected => {
-                StepDecision::Complete(format!("verified file '{path}' contains the requested content"))
+            [(_, obs)] if !obs.ok => {
+                StepDecision::Fail(format!("action failed: {}: {}", obs.summary, obs.data))
             }
             [
-                (Action::WriteFile { contents: expected, .. }, Observation { ok: true, .. }),
+                (
+                    Action::WriteFile {
+                        contents: expected, ..
+                    },
+                    Observation { ok: true, .. },
+                ),
                 (Action::ReadFile { path, .. }, Observation { ok: true, data, .. }),
-            ] => {
-                StepDecision::Fail(format!("verification mismatch for '{path}': expected {} bytes, observed {} bytes", expected.len(), data.len()))
-            }
-            [_, (_, obs)] if !obs.ok => StepDecision::Fail(format!("verification action failed: {}: {}", obs.summary, obs.data)),
+                ..,
+            ] if data == expected => StepDecision::Complete(format!(
+                "verified file '{path}' contains the requested content"
+            )),
+            [
+                (
+                    Action::WriteFile {
+                        contents: expected, ..
+                    },
+                    Observation { ok: true, .. },
+                ),
+                (Action::ReadFile { path, .. }, Observation { ok: true, data, .. }),
+                ..,
+            ] => StepDecision::Fail(format!(
+                "verification mismatch for '{path}': expected {} bytes, observed {} bytes",
+                expected.len(),
+                data.len()
+            )),
+            [_, (_, obs)] if !obs.ok => StepDecision::Fail(format!(
+                "verification action failed: {}: {}",
+                obs.summary, obs.data
+            )),
             _ => StepDecision::Fail("unexpected runtime history shape".into()),
         }
     }

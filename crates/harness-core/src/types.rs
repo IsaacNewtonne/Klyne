@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Objective {
     pub id: String,
     pub text: String,
@@ -14,11 +15,14 @@ impl Objective {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        Self { id: format!("goal-{now}"), text }
+        Self {
+            id: format!("goal-{now}"),
+            text,
+        }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
     WriteFile { path: String, contents: String },
     ReadFile { path: String },
@@ -44,7 +48,7 @@ pub enum StepDecision {
     Fail(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Observation {
     pub ok: bool,
     pub summary: String,

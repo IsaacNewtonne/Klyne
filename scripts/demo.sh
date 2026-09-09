@@ -10,4 +10,4 @@ cargo run -p harness-cli -- \
 printf '\n--- resulting file ---\n'
 cat workspace/demo/hello.txt
 printf '\n--- event log ---\n'
-cat workspace/demo/.harness/events.log
+cargo run -p harness-cli -- --workspace workspace/demo --events

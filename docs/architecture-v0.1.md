@@ -1,5 +1,7 @@
 # System Architecture v0.1
 
+> Historical proposal from the bootstrap commit. Its environment and milestone status describe that earlier session. See [current implementation evidence](milestone-durable-core.md) and [README](../README.md) for verified implementation and limitations.
+
 Status legend: **IMPLEMENTED**, **PARTIAL**, **EXPERIMENTAL**, **PLANNED**, **BLOCKED**.
 
 ## 0. Environment baseline
