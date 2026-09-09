@@ -27,6 +27,7 @@ fn spec(name: &str, bug: &str, fix_first: &str, fix_final: &str) -> TaskSpec {
         fix_first: fix_first.into(),
         fix_final: fix_final.into(),
         test_name: format!("{}_is_fixed", name.replace('-', "_")),
+        shape: "wrong-constant".into(),
     }
 }
 
@@ -80,6 +81,7 @@ fn bench_crash_worker() {
         fix_first: std::env::var("HARNESS_BENCH_FIRST").unwrap(),
         fix_final: std::env::var("HARNESS_BENCH_FINAL").unwrap(),
         test_name: std::env::var("HARNESS_BENCH_TEST").unwrap(),
+        shape: std::env::var("HARNESS_BENCH_SHAPE").unwrap_or_else(|_| "wrong-constant".into()),
     };
     struct PauseAfterPatch<M: Model> {
         inner: M,

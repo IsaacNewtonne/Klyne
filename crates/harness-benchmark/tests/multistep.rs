@@ -23,6 +23,7 @@ fn specs() -> Vec<TaskSpec> {
             fix_first: "42".into(),
             fix_final: "42".into(),
             test_name: "plan_first_is_fixed".into(),
+            shape: "wrong-constant".into(),
         },
         TaskSpec {
             name: "plan-second".into(),
@@ -30,6 +31,7 @@ fn specs() -> Vec<TaskSpec> {
             fix_first: "44".into(),
             fix_final: "44".into(),
             test_name: "plan_second_is_fixed".into(),
+            shape: "wrong-constant".into(),
         },
     ]
 }

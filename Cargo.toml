@@ -4,5 +4,6 @@ members = [
   "crates/harness-core",
   "crates/harness-provider",
   "crates/harness-benchmark",
+  "crates/harness-memory",
   "apps/cli",
 ]

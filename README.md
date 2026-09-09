@@ -19,6 +19,7 @@ A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions
 - First real model provider: OpenAI-compatible chat-completions adapter with strict validated decisions, credential hygiene, timeouts, response caps, bounded retries, and usage accounting, plus CLI opt-in via `--openai-compat`; see [model provider](docs/model-provider.md).
 - First autonomous coding benchmark: scripted repair of controlled Rust bugs through inspect → patch → `cargo test` → failure-driven repair → restart, with an independent compiler/test oracle and metric reports; see [coding benchmark](docs/coding-benchmark.md).
 - Durable goals and plans: persisted goal/task graphs with dependencies, blocked/abandoned states, evidence-driven repair, lifecycle states, and recorded budget amendments; multi-task plans survive kills without duplicating tasks; see [durable plans](docs/durable-plans.md).
+- Memory and context selection: SQLite-backed project/episodic/procedural/failure memory with confidence, provenance, explained retrieval, retention, and consolidation; recalled experience improves repeated benchmarks without blind replay; see [memory](docs/memory.md).
 - Negative security tests, actual process-kill recovery test, checkpoint-boundary tests, supervised-process tests (nonzero exit, timeout, output bounds, denials, env grants, tree kill).
 
 ## Run
@@ -59,7 +60,7 @@ The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cas
 - Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Reconciliation audit attempts may repeat after a crash; consumers should group them by action ID. IDs are scoped to a run/database, not globally unique idempotency keys. No exactly-once or host-power-loss guarantee.
 - Recovery assumes a stateless model. One database handles one run. Cognitive-step and tool-call budgets exist; time, token and monetary budgets remain planned.
 - Objectives, observations and checkpoints contain task data. Secret redaction is absent: do not supply secrets.
-- General planners, model routing, general coding intelligence, memory, browser, GUI, delegation and self-improvement are **PLANNED**. One OpenAI-compatible provider, one scripted repair benchmark, and durable plan state are implemented; provider usage is not yet persisted or cost-bounded.
+- General planners, model routing, general coding intelligence, vector memory, browser, GUI, delegation and self-improvement are **PLANNED**. Provider, scripted repair benchmark, durable plans, and lexical memory are implemented; provider usage is not yet persisted or cost-bounded.
 
 See [implementation evidence](docs/milestone-durable-core.md) and [historical architecture](docs/architecture-v0.1.md).
 

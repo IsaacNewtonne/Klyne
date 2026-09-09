@@ -33,6 +33,9 @@ pub struct TaskSpec {
     pub fix_final: String,
     /// Expected unit test name in the fixture.
     pub test_name: String,
+    /// Bug family tag used to match procedural memories, e.g.
+    /// `wrong-constant`. Values, not shapes, still decide each patch.
+    pub shape: String,
 }
 
 impl TaskSpec {
@@ -626,6 +629,99 @@ pub fn run_plan(
             }
         }
     }
+}
+
+/// A recalled fix proposal with its audit trail. The fix is a suggestion:
+/// callers still patch through the runtime and verify through tests.
+#[derive(Clone, Debug)]
+pub struct FixHint {
+    pub fix: String,
+    pub confidence: f64,
+    pub memory_id: i64,
+    pub reasons: Vec<String>,
+}
+
+/// Procedural fix encoding. JSON keeps the convention parseable and
+/// strict: unparseable rows are ignored, never applied.
+fn encode_fix(shape: &str, bug: &str, fix: &str) -> String {
+    serde_json::json!({"shape": shape, "bug": bug, "fix": fix}).to_string()
+}
+
+/// Record verified repair experience: one episodic outcome plus one
+/// procedural fix mapping. Refuses to record unverified reports, so only
+/// proven experience becomes memory.
+pub fn record_repair(
+    memory_db: &Path,
+    spec: &TaskSpec,
+    report: &TaskReport,
+    provenance: &str,
+) -> io::Result<()> {
+    use harness_memory::{MemoryKind, NewMemory};
+    if !(matches!(report.outcome, TaskOutcome::Completed) && report.verified) {
+        return Err(io::Error::other("only verified repairs become memory"));
+    }
+    let mut store = harness_memory::MemoryStore::open(memory_db)?;
+    store.write(NewMemory::new(
+        MemoryKind::Episodic,
+        format!(
+            "repaired {}: replaced {} with {}; cargo test passed in {:.1}s",
+            spec.name, spec.bug, spec.fix_final, report.seconds
+        ),
+        0.8,
+        provenance,
+        0.6,
+    ))?;
+    store.write(NewMemory::new(
+        MemoryKind::Procedural,
+        encode_fix(&spec.shape, &spec.bug, &spec.fix_final),
+        0.9,
+        provenance,
+        0.8,
+    ))?;
+    Ok(())
+}
+
+/// Recall the best procedural fix for this shape and bug value. Matches on
+/// parsed shape and bug (not on score alone), requires `min_confidence`,
+/// and returns the retrieval reasons so the selection stays explainable.
+/// Distractors for other shapes or bugs never match, however confident.
+pub fn recall_fix(
+    memory_db: &Path,
+    spec: &TaskSpec,
+    min_confidence: f64,
+) -> io::Result<Option<FixHint>> {
+    use harness_memory::{MemoryKind, MemoryQuery};
+    let store = harness_memory::MemoryStore::open(memory_db)?;
+    let hits = store.retrieve(&MemoryQuery::new(
+        vec![MemoryKind::Procedural],
+        vec![spec.shape.clone(), spec.bug.clone()],
+        5,
+    ))?;
+    for hit in hits {
+        let value: serde_json::Value = match serde_json::from_str(&hit.record.content) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let shape = value.get("shape").and_then(|field| field.as_str());
+        let bug = value.get("bug").and_then(|field| field.as_str());
+        let fix = value.get("fix").and_then(|field| field.as_str());
+        match (shape, bug, fix) {
+            (Some(shape), Some(bug), Some(fix))
+                if shape == spec.shape
+                    && bug == spec.bug
+                    && hit.record.confidence >= min_confidence =>
+            {
+                return Ok(Some(FixHint {
+                    fix: fix.into(),
+                    confidence: hit.record.confidence,
+                    memory_id: hit.record.id,
+                    reasons: hit.reasons,
+                }));
+            }
+            _ => continue,
+        }
+    }
+    Ok(None)
 }
 
 /// Score a terminal outcome with oracle evidence and persisted metrics.
