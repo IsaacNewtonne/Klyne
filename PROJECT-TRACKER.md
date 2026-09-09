@@ -3,7 +3,7 @@
 > Living file. Update it on every checkpoint: move rows, refresh counts,
 > record the new hash. Status legend: **IMPLEMENTED**, **PARTIAL**,
 > **EXPERIMENTAL**, **PLANNED**, **BLOCKED**.
-> Living file: update it with every feature checkpoint below. Suite **125 passing** as of 2026-09-09.
+> Living file: update it with every feature checkpoint below. Suite **130 passing** as of 2026-09-09.
 
 ## Checkpoint log
 
@@ -88,8 +88,8 @@ cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verif
 | --- | --- | --- |
 | Scoped multi-agent delegation | **IMPLEMENTED** | `tests/delegation.rs` (10) + benchmark e2e (1), `docs/delegation.md`, `479ba9a` |
 | Supervised network fetch + repo radar | **IMPLEMENTED** | URL gating matrix, `tests/fetch.rs` (6), CLI `--radar`, `docs/network-fetch.md`, `6093be7` |
-| Controlled self-improvement | **PLANNED** | Next: isolated worktrees, benchmark gates, rollback |
-| Browser control | **PLANNED** | After self-improvement |
+| Controlled self-improvement | **IMPLEMENTED** | Worktree isolation, baseline/candidate gates, promote/rollback, records; `harness-experiment` (1 unit + 4 e2e), `docs/self-improvement.md` |
+| Browser control | **PLANNED** | Next in user order |
 | GUI control | **PLANNED** | Last; heaviest platform work |
 
 ## Next up
