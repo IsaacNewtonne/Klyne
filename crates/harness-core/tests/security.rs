@@ -110,6 +110,52 @@ fn denies_symlink_escape() {
     assert!(!outside.0.join("escaped").exists());
 }
 
+#[test]
+fn file_byte_limits_are_exact_and_do_not_return_partial_evidence() {
+    use harness_core::tools::MAX_FILE_BYTES;
+    let root = Workspace::new();
+    let policy = PermissionPolicy::milestone_default(&root.0);
+    let tools = ToolRegistry::milestone_default();
+    let exact = "x".repeat(MAX_FILE_BYTES);
+    fs::write(root.0.join("data"), &exact).unwrap();
+    let read = Action::ReadFile {
+        path: "data".into(),
+    };
+    let observation = tools.execute(&read, &policy);
+    assert!(observation.ok);
+    assert_eq!(observation.data, exact);
+    fs::write(root.0.join("data"), format!("{exact}x")).unwrap();
+    let observation = tools.execute(&read, &policy);
+    assert!(!observation.ok);
+    assert!(observation.data.len() < 128);
+    let observation = tools.execute(
+        &Action::WriteFile {
+            path: "data".into(),
+            contents: "y".repeat(MAX_FILE_BYTES + 1),
+        },
+        &policy,
+    );
+    assert!(!observation.ok);
+    assert_eq!(
+        fs::read(root.0.join("data")).unwrap().len(),
+        MAX_FILE_BYTES + 1
+    );
+    assert_eq!(fs::read(root.0.join("data")).unwrap()[0], b'x');
+    fs::write(root.0.join("data"), [0xff]).unwrap();
+    assert!(!tools.execute(&read, &policy).ok);
+    fs::create_dir(root.0.join("directory")).unwrap();
+    assert!(
+        !tools
+            .execute(
+                &Action::ReadFile {
+                    path: "directory".into()
+                },
+                &policy
+            )
+            .ok
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn denies_directory_junction_escape() {

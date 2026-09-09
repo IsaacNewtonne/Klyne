@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: harness-cli --workspace <dir> [--objective <text> | --resume | --reconcile | --events] [--database <path>]"
+        "Usage: harness-cli --workspace <dir> [--objective <text> | --resume | --reconcile | --events] [--database <path>] [--max-tool-calls <integer> (new runs only)]"
     );
     eprintln!(
         "Example: harness-cli --workspace ./workspace --objective 'create file hello.txt with content hello agent'"
@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut objective: Option<String> = None;
     let mut database: Option<PathBuf> = None;
     let mut resume = false;
+    let mut max_tool_calls: Option<u64> = None;
     let mut reconcile = false;
     let mut show_events = false;
     while let Some(arg) = args.next() {
@@ -34,6 +35,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ))
             }
             "--resume" => resume = true,
+            "--max-tool-calls" => {
+                max_tool_calls = Some(
+                    args.next()
+                        .ok_or("--max-tool-calls requires an integer")?
+                        .parse()?,
+                )
+            }
             "--reconcile" => reconcile = true,
             "--events" => show_events = true,
             "-h" | "--help" => usage(),
@@ -41,6 +49,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let workspace = workspace.unwrap_or_else(|| PathBuf::from("./workspace"));
+    if max_tool_calls.is_some() && objective.is_none() {
+        return Err("--max-tool-calls only applies to a new objective".into());
+    }
     if usize::from(objective.is_some())
         + usize::from(resume)
         + usize::from(reconcile)
@@ -65,6 +76,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         policy,
         events,
     );
+    if let Some(limit) = max_tool_calls {
+        runtime = runtime.with_max_tool_calls(limit);
+    }
 
     let outcome = if reconcile {
         runtime.reconcile_and_resume()?

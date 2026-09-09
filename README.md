@@ -12,6 +12,7 @@ A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions
 - Durable objective, history, step budget, pending action, and terminal outcome.
 - Resume between actions after process termination; refuse uncertain interrupted actions.
 - Explicit `--reconcile` inspects interrupted file actions without replaying writes; action audit records carry stable run-scoped IDs.
+- Persisted tool-call reservations (32 by default), including verification and reconciliation; filesystem reads/writes capped at 1 MiB per operation.
 - Negative security tests, actual process-kill recovery test, checkpoint-boundary tests.
 
 ## Run
@@ -48,8 +49,12 @@ The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cas
 - Path checks reject traversal, reserved runtime paths, existing symlinks and Windows reparse points. They are **not an OS sandbox**: concurrent path replacement, hard links and hostile workspace mutation remain unresolved. Use trusted isolated workspaces. Writes are not atomic.
 - Shell source is retained, but default policy denies execution. Argument scopes, timeouts, output bounds and isolation must precede enabling it.
 - Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Reconciliation audit attempts may repeat after a crash; consumers should group them by action ID. IDs are scoped to a run/database, not globally unique idempotency keys. No exactly-once or host-power-loss guarantee.
-- Recovery assumes a stateless model. One database handles one run. Only cognitive-step budgets exist.
+- Recovery assumes a stateless model. One database handles one run. Cognitive-step and tool-call budgets exist; time, token and monetary budgets remain planned.
 - Objectives, observations and checkpoints contain task data. Secret redaction is absent: do not supply secrets.
 - Goal DAGs, planners, real providers, general coding, memory, browser, GUI, delegation and self-improvement are **PLANNED**.
 
 See [implementation evidence](docs/milestone-durable-core.md) and [historical architecture](docs/architecture-v0.1.md).
+
+New objectives accept `--max-tool-calls <integer>` (default 32). This cannot override a resumed run's persisted budget. Reservations commit before invocation; failed reads count, and a crash can consume credit without executing a call. Budget exhaustion returns an error and leaves the checkpoint for inspection. It does not mark the goal complete. Active legacy checkpoints without accounting refuse continuation because prior reconciliation usage cannot be reconstructed reliably; terminal legacy results remain readable. No automatic budget replenishment or migration is implemented.
+
+Filesystem reads accept only regular UTF-8 files. Reads consume at most 1 MiB plus one detection byte and reject oversized input without returning a truncated success. Oversized writes fail before touching the target. These limits do not bound model output, total history, checkpoint size or elapsed I/O time.

@@ -22,6 +22,20 @@ pub struct RunState {
     pub max_steps: usize,
     pub pending: Option<Action>,
     pub outcome: Option<RunOutcome>,
+    #[serde(default)]
+    pub tool_budget: Option<ToolBudget>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ToolBudget {
+    pub used: u64,
+    pub limit: u64,
+}
+
+impl Default for ToolBudget {
+    fn default() -> Self {
+        Self { used: 0, limit: 32 }
+    }
 }
 
 impl RunState {
@@ -37,6 +51,7 @@ pub struct AgentRuntime<M: Model, E: EventStore> {
     policy: PermissionPolicy,
     events: E,
     max_steps: usize,
+    max_tool_calls: u64,
 }
 
 impl<M: Model, E: EventStore> AgentRuntime<M, E> {
@@ -47,7 +62,31 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
             policy,
             events,
             max_steps: 8,
+            max_tool_calls: ToolBudget::default().limit,
         }
+    }
+
+    /// Applies only to new runs; resume always uses persisted accounting.
+    pub fn with_max_tool_calls(mut self, limit: u64) -> Self {
+        self.max_tool_calls = limit;
+        self
+    }
+
+    fn reserve_tool_call(&mut self, state: &mut RunState) -> io::Result<()> {
+        let budget = state.tool_budget.as_mut().ok_or_else(|| {
+            io::Error::other(
+                "legacy checkpoint lacks tool accounting; automatic continuation refused",
+            )
+        })?;
+        if budget.used >= budget.limit {
+            self.events
+                .append("BudgetExhausted", "tool-call budget exhausted")?;
+            return Err(io::Error::other("tool-call budget exhausted"));
+        }
+        budget.used += 1;
+        // Reserve before any invocation, even a failing reconciliation read.
+        // A failed commit prevents invocation; a crash can consume unused credit.
+        self.events.checkpoint(state)
     }
 
     fn execute_action(
@@ -75,9 +114,9 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
                 ))));
             }
         }
-        self.events.append("ToolCalled", &action.to_string())?;
         state.pending = Some(action.clone());
-        self.events.checkpoint(state)?;
+        self.reserve_tool_call(state)?;
+        self.events.append("ToolCalled", &action.to_string())?;
         self.action_event("ActionPrepared", state, &action, None)?;
         let obs = self.tools.execute(&action, &self.policy);
         self.action_event("ActionObserved", state, &action, Some(&obs))?;
@@ -108,6 +147,10 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
             max_steps: self.max_steps,
             pending: None,
             outcome: None,
+            tool_budget: Some(ToolBudget {
+                used: 0,
+                limit: self.max_tool_calls,
+            }),
         };
         self.events.checkpoint(&state)?;
         let objective = &state.objective;
@@ -164,6 +207,7 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
             }
         }
+        self.reserve_tool_call(state)?;
         let observed = self.tools.execute(&read, &self.policy);
         self.action_event("ReconciliationObserved", state, &read, Some(&observed))?;
         if !observed.ok
@@ -200,6 +244,11 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
         }
         if let Some(outcome) = state.outcome {
             return Ok(outcome);
+        }
+        if state.tool_budget.is_none() {
+            return Err(io::Error::other(
+                "legacy checkpoint lacks tool accounting; automatic continuation refused",
+            ));
         }
         if reconcile {
             self.reconcile_pending(&mut state)?;

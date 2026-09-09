@@ -34,6 +34,7 @@ impl Workspace {
             max_steps: 8,
             pending: None,
             outcome: None,
+            tool_budget: Some(Default::default()),
         }
     }
     fn runtime(&self) -> AgentRuntime<HeuristicModel, SqliteEventStore> {
@@ -257,8 +258,12 @@ fn failed_reconciliation_checkpoint_can_be_retried_without_write() {
         fn load(&mut self) -> std::io::Result<Option<RunState>> {
             self.0.load()
         }
-        fn checkpoint(&mut self, _: &RunState) -> std::io::Result<()> {
-            Err(std::io::Error::other("injected checkpoint failure"))
+        fn checkpoint(&mut self, state: &RunState) -> std::io::Result<()> {
+            if state.pending.is_some() {
+                self.0.checkpoint(state)
+            } else {
+                Err(std::io::Error::other("injected checkpoint failure"))
+            }
         }
     }
     let w = Workspace::new();
@@ -299,6 +304,193 @@ fn failed_reconciliation_checkpoint_can_be_retried_without_write() {
             .iter()
             .any(|e| e.kind == "ToolCalled" && e.detail == "write_file:result.txt")
     );
+}
+
+#[test]
+fn failed_reconciliation_reads_consume_persisted_budget() {
+    let w = Workspace::new();
+    let mut state = w.state();
+    state.tool_budget = Some(harness_core::agent::ToolBudget { used: 0, limit: 2 });
+    state.pending = Some(harness_core::Action::WriteFile {
+        path: "result.txt".into(),
+        contents: "durable".into(),
+    });
+    SqliteEventStore::open(w.db())
+        .unwrap()
+        .checkpoint(&state)
+        .unwrap();
+    for used in 1..=2 {
+        assert!(w.runtime().reconcile_and_resume().is_err());
+        let saved = SqliteEventStore::open(w.db())
+            .unwrap()
+            .load()
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.tool_budget.unwrap().used, used);
+    }
+    fs::write(w.0.join("result.txt"), "durable").unwrap();
+    assert!(
+        w.runtime()
+            .reconcile_and_resume()
+            .unwrap_err()
+            .to_string()
+            .contains("budget exhausted")
+    );
+    let mut store = SqliteEventStore::open(w.db()).unwrap();
+    assert!(store.load().unwrap().unwrap().pending.is_some());
+    assert_eq!(
+        store
+            .events()
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "ReconciliationObserved")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn zero_budget_prevents_write_and_restart_does_not_reset_it() {
+    let w = Workspace::new();
+    assert!(
+        w.runtime()
+            .with_max_tool_calls(0)
+            .run(w.state().objective)
+            .is_err()
+    );
+    assert!(!w.0.join("result.txt").exists());
+    assert!(w.runtime().with_max_tool_calls(99).resume().is_err());
+    let mut store = SqliteEventStore::open(w.db()).unwrap();
+    let budget = store.load().unwrap().unwrap().tool_budget.unwrap();
+    assert_eq!(budget.limit, 0);
+    assert_eq!(budget.used, 0);
+    assert!(
+        !store
+            .events()
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "ToolCalled")
+    );
+}
+
+#[test]
+fn verification_consumes_tool_budget() {
+    let w = Workspace::new();
+    assert!(
+        w.runtime()
+            .with_max_tool_calls(2)
+            .run(w.state().objective)
+            .is_err()
+    );
+    let mut store = SqliteEventStore::open(w.db()).unwrap();
+    assert_eq!(store.load().unwrap().unwrap().tool_budget.unwrap().used, 2);
+    assert!(
+        !store
+            .events()
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "GoalCompleted")
+    );
+}
+
+#[test]
+fn legacy_active_accounting_is_not_invented() {
+    let w = Workspace::new();
+    let mut state = w.state();
+    let mut legacy = serde_json::to_value(&state).unwrap();
+    legacy.as_object_mut().unwrap().remove("tool_budget");
+    state = serde_json::from_value(legacy).unwrap();
+    assert!(state.tool_budget.is_none());
+    SqliteEventStore::open(w.db())
+        .unwrap()
+        .checkpoint(&state)
+        .unwrap();
+    assert!(
+        w.runtime()
+            .resume()
+            .unwrap_err()
+            .to_string()
+            .contains("legacy checkpoint")
+    );
+    state.outcome = Some(RunOutcome::Completed("historical".into()));
+    SqliteEventStore::open(w.db())
+        .unwrap()
+        .checkpoint(&state)
+        .unwrap();
+    assert_eq!(
+        w.runtime().resume().unwrap(),
+        RunOutcome::Completed("historical".into())
+    );
+}
+
+#[test]
+fn reservation_commit_failure_prevents_invocation() {
+    struct RejectReservation(SqliteEventStore);
+    impl EventStore for RejectReservation {
+        fn append(&mut self, kind: &str, detail: &str) -> std::io::Result<harness_core::Event> {
+            self.0.append(kind, detail)
+        }
+        fn load(&mut self) -> std::io::Result<Option<RunState>> {
+            self.0.load()
+        }
+        fn checkpoint(&mut self, state: &RunState) -> std::io::Result<()> {
+            if state.pending.is_some() {
+                Err(std::io::Error::other("reservation commit failed"))
+            } else {
+                self.0.checkpoint(state)
+            }
+        }
+    }
+    let w = Workspace::new();
+    let store = RejectReservation(SqliteEventStore::open(w.db()).unwrap());
+    let mut runtime = AgentRuntime::new(
+        HeuristicModel,
+        ToolRegistry::milestone_default(),
+        PermissionPolicy::milestone_default(&w.0),
+        store,
+    );
+    assert!(runtime.run(w.state().objective).is_err());
+    drop(runtime);
+    assert!(!w.0.join("result.txt").exists());
+    let mut store = SqliteEventStore::open(w.db()).unwrap();
+    assert_eq!(store.load().unwrap().unwrap().tool_budget.unwrap().used, 0);
+    assert!(
+        !store
+            .events()
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "ToolCalled")
+    );
+}
+
+#[test]
+fn oversized_reconciliation_read_is_charged_and_remains_pending() {
+    let w = Workspace::new();
+    let mut state = w.state();
+    state.pending = Some(harness_core::Action::WriteFile {
+        path: "result.txt".into(),
+        contents: "durable".into(),
+    });
+    fs::write(
+        w.0.join("result.txt"),
+        vec![b'x'; harness_core::tools::MAX_FILE_BYTES + 1],
+    )
+    .unwrap();
+    SqliteEventStore::open(w.db())
+        .unwrap()
+        .checkpoint(&state)
+        .unwrap();
+    assert!(w.runtime().reconcile_and_resume().is_err());
+    let mut store = SqliteEventStore::open(w.db()).unwrap();
+    let saved = store.load().unwrap().unwrap();
+    assert_eq!(saved.pending, state.pending);
+    assert_eq!(saved.tool_budget.unwrap().used, 1);
+    let events = store.events().unwrap();
+    let evidence = events
+        .iter()
+        .find(|e| e.kind == "ReconciliationObserved")
+        .unwrap();
+    assert!(evidence.detail.len() < 512);
 }
 
 #[test]
@@ -422,6 +614,7 @@ fn kill_after_write_before_checkpoint_then_reconcile() {
         .unwrap();
     assert!(state.pending.is_some());
     assert!(state.history.is_empty());
+    assert_eq!(state.tool_budget.as_ref().unwrap().used, 1);
     let action_id = state.next_action_id();
     assert!(w.runtime().resume().is_err());
     assert!(matches!(

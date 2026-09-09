@@ -1,6 +1,7 @@
 use crate::permissions::{PermissionDecision, PermissionPolicy};
 use crate::types::{Action, Observation};
 use std::fs;
+use std::io::{self, Read};
 use std::process::Command;
 
 pub trait Tool: Send + Sync {
@@ -10,6 +11,29 @@ pub trait Tool: Send + Sync {
 
 #[derive(Default)]
 pub struct WorkspaceFsTool;
+
+/// Hard per-operation ceiling, including recovery reads. Not a total memory cap.
+pub const MAX_FILE_BYTES: usize = 1024 * 1024;
+
+fn bounded_read(path: &std::path::Path) -> io::Result<String> {
+    // Check before opening to reject known special files; concurrent hostile
+    // replacement remains outside the current workspace threat model.
+    if !fs::metadata(path)?.is_file() {
+        return Err(io::Error::other("only regular files can be read"));
+    }
+    let file = fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("only regular files can be read"));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(io::Error::other("file exceeds byte limit"));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "file is not UTF-8"))
+}
 
 impl Tool for WorkspaceFsTool {
     fn name(&self) -> &'static str {
@@ -28,6 +52,13 @@ impl Tool for WorkspaceFsTool {
         }
         match action {
             Action::WriteFile { path, contents } => {
+                if contents.len() > MAX_FILE_BYTES {
+                    return Observation {
+                        ok: false,
+                        summary: "write exceeds byte limit".into(),
+                        data: String::new(),
+                    };
+                }
                 let full = match policy.resolve_workspace_path(path) {
                     Ok(v) => v,
                     Err(e) => {
@@ -71,7 +102,7 @@ impl Tool for WorkspaceFsTool {
                         };
                     }
                 };
-                match fs::read_to_string(&full) {
+                match bounded_read(&full) {
                     Ok(data) => Observation {
                         ok: true,
                         summary: format!("read {path}"),
