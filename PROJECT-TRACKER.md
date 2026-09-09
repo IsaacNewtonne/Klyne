@@ -1,9 +1,9 @@
 # Project Tracker — Local-first Autonomous AI Agent Harness
 
-> Living file. Update it on every checkpoint: move rows, refresh counts,
-> record the new hash. Status legend: **IMPLEMENTED**, **PARTIAL**,
-> **EXPERIMENTAL**, **PLANNED**, **BLOCKED**.
-> Living file: update it with every feature checkpoint below. Suite **130 passing** as of 2026-09-09.
+> Living file: update it on every feature checkpoint below. Status legend:
+> **IMPLEMENTED**, **PARTIAL**, **EXPERIMENTAL**, **PLANNED**, **BLOCKED**.
+> Suite **138 passing** as of 2026-09-09. Handover state: everything below
+> is verified on Windows/MSVC, Rust 1.98.1.
 
 ## Checkpoint log
 
@@ -23,6 +23,10 @@
 | `6f0782e` | Living project tracker |
 | `8d35740` | `harness-memory`: SQLite project/episodic/procedural/failure memory, explained retrieval, retention, consolidation, primed benchmark recall |
 | `3819cfe` | Resource budgets (wall/token/cost), repeated-error trip, shutdown, heartbeats, `inspect` module + CLI `--inspect`, provider pricing |
+| `eeced66` | Gap closure: `UsageRecorded` events, mid-flight `run_task` resume, priority scheduling, Unix process-group kill (experimental) |
+| `479ba9a` | Scoped delegation: policy narrowing, budget firewall, verifier children, artifact mailbox |
+| `6093be7` | Supervised network fetch (allowlist, strict URLs) + repo radar (`--radar`) |
+| `0295fce` | Gated self-improvement: worktree isolation, baseline/candidate gates, promote/rollback, records |
 
 ## Roadmap milestones
 
@@ -35,7 +39,7 @@
 | 5 | Durable goals and plans (DAG, repair, lifecycle, amendments) | **IMPLEMENTED** | `tests/plan.rs` (7) + plan units (3), `tests/multistep.rs` (2), `docs/durable-plans.md`, `280e68e` |
 | 6 | Memory and context selection (SQLite project/episodic/procedural/failure memory) | **IMPLEMENTED** | `harness-memory/tests/memory.rs` (5), `harness-benchmark/tests/recall.rs` (3), `docs/memory.md`, `8d35740` |
 | 7 | Long-running reliability (time/token/cost budgets, watchdogs, tracing) | **IMPLEMENTED** | `tests/reliability.rs` (11), provider pricing, CLI inspect test, `docs/reliability.md`, `3819cfe` |
-| 8 | Expansion only after reliability (browser, delegation, GUI, self-improvement) | **PLANNED** | Gated on 1–7 |
+| 8 | Expansion: delegation, fetch/radar, self-improvement, browser | **IMPLEMENTED** | See milestone-8 table; only GUI control remains |
 
 ## Capability register
 
@@ -49,24 +53,28 @@
 | Restart recovery, conservative reconciliation | **IMPLEMENTED** | writes + read-only actions; patches/shell refused |
 | Stable run-scoped action IDs | **IMPLEMENTED** | `next_action_id`, preserved across reconcile |
 | 1 MiB whole-file caps; range/hash/patch/search bounds | **IMPLEMENTED** | `tools.rs`, `large_files.rs` |
-| Supervised argv processes, tree kill (Windows-first) | **IMPLEMENTED** | Not isolation; Unix tree cleanup best-effort |
-| OpenAI-compatible provider, CLI opt-in | **IMPLEMENTED** | Secrets header-only, never persisted |
-| Scripted repair benchmark + oracle | **IMPLEMENTED** | Agent is a script, not intelligence |
-| Goal/task DAG, repair, lifecycle, amendments | **IMPLEMENTED** | No inventing planner; sequential driver |
+| Supervised argv processes, tree kill | **IMPLEMENTED** | taskkill /T on Windows; group SIGKILL on Unix (**EXPERIMENTAL**, host-unverified) |
+| OpenAI-compatible provider, CLI opt-in | **IMPLEMENTED** | Secrets header-only, never persisted; priced usage |
+| Scripted repair benchmark + oracle | **IMPLEMENTED** | Agent is a script, not intelligence; resumes mid-flight |
+| Goal/task DAG, repair, lifecycle, amendments | **IMPLEMENTED** | No inventing planner; sequential driver; priority-ordered scheduling |
 | Lexical memory (4 kinds, retention, consolidation) | **IMPLEMENTED** | `crates/harness-memory`, `docs/memory.md` |
 | Reliability budgets, shutdown, heartbeats, inspection | **IMPLEMENTED** | `src/inspect.rs`, `tests/reliability.rs`, `docs/reliability.md` |
+| Scoped delegation + verifier children | **IMPLEMENTED** | `src/delegation.rs`, narrowing/re-grant firewall, `docs/delegation.md` |
+| Supervised fetch + repo radar | **IMPLEMENTED** | Allowlist + strict URLs, no redirects/auth; fetched bytes are untrusted data |
+| Gated self-improvement | **IMPLEMENTED** | `harness-experiment`; human merges, harness never does |
+| Chrome control (isolated/personal/attach) | **IMPLEMENTED** | `harness-browser`; attach never kills the user browser; personal mode is explicit opt-in |
 | Shell reconciliation | **BLOCKED** | Effects indistinguishable; refused by design |
 | Patch reconciliation | **BLOCKED** | Before/after/conflict indistinguishable; refused by design |
-| Mid-flight child-run resume | **PLANNED** | Interrupted child tasks restart from scratch |
-| Memory engine, goal planner, provider router | **PLANNED** | Milestones 6–8 |
+| GUI control | **PLANNED** | Last remaining item; needs OS accessibility backends |
+| Provider router, vector memory, goal planner | **PLANNED** | Beyond current scope |
 | OS sandbox / isolation | **PLANNED** | Permission checks are not a sandbox; investigate separately |
 
-## Verification (last green, `280e68e`)
+## Verification (last green: 138 passing)
 
 ```sh
 cargo fmt --all -- --check
 cargo check --workspace --locked
-cargo test --workspace --locked        # 80 passing
+cargo test --workspace --locked        # 138 passing, 0 failed
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo run -p harness-core --example benchmark --locked        # file-core-v1 10/10
 cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verified
@@ -89,12 +97,26 @@ cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verif
 | Scoped multi-agent delegation | **IMPLEMENTED** | `tests/delegation.rs` (10) + benchmark e2e (1), `docs/delegation.md`, `479ba9a` |
 | Supervised network fetch + repo radar | **IMPLEMENTED** | URL gating matrix, `tests/fetch.rs` (6), CLI `--radar`, `docs/network-fetch.md`, `6093be7` |
 | Controlled self-improvement | **IMPLEMENTED** | Worktree isolation, baseline/candidate gates, promote/rollback, records; `harness-experiment` (1 unit + 4 e2e), `docs/self-improvement.md`, `0295fce` |
-| Browser control | **PLANNED** | Next in user order |
-| GUI control | **PLANNED** | Last; heaviest platform work |
+| Browser control (isolated/personal/attach) | **IMPLEMENTED** | `harness-browser` (8 tests), CLI `--browse-profiles/tabs/read`, `docs/browser.md`; live-verified against Chrome 150 |
+| GUI control | **PLANNED** | Last remaining item; needs OS accessibility backends |
 
-## Next up
+## Handover notes (read before touching anything)
 
-1. Controlled self-improvement in isolated Git worktrees with benchmark
-   comparison, regression gates, and rollback.
-2. Keep `scripts/demo.sh` executable-mode change uncommitted and intact
-   (predates implementation work; do not commit or discard it).
+1. Only remaining roadmap item: **GUI control** (Windows UI Automation
+   backend). Everything else is implemented and green.
+2. Environment quirks, all verified the hard way:
+   - Outside this repo the default `stable` toolchain has a broken cargo.
+     Fixtures pin `rust-toolchain.toml` 1.98.1; keep doing that.
+   - Cleared child environments cannot link MSVC: builds need the
+     documented `BUILD_ENV_GRANTS` re-granted explicitly.
+   - Chrome's DevTools server rejects HTTP/1.0: speak 1.1 with
+     Content-Length framing.
+   - Personal browsing requires the user to start Chrome with
+     `--remote-debugging-port` (their explicit consent) or to close
+     Chrome for profile launch. Never kill or restart their browser.
+   - Fetched web content and page DOM are **untrusted data** everywhere.
+3. `scripts/demo.sh` executable-mode change predates all implementation
+   work: do not commit or discard it.
+4. Workflow per change: inspect → small vertical slice → `cargo fmt`,
+   `check`, `test`, `clippy -D warnings` → independent verification →
+   docs → update this file → recoverable commit.

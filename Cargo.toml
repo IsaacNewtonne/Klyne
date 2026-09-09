@@ -6,5 +6,6 @@ members = [
   "crates/harness-benchmark",
   "crates/harness-memory",
   "crates/harness-experiment",
+  "crates/harness-browser",
   "apps/cli",
 ]

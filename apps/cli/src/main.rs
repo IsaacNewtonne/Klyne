@@ -35,6 +35,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut radar = false;
     let mut radar_query: Option<String> = None;
     let mut radar_limit: u8 = 10;
+    let mut browse_profiles = false;
+    let mut browse_tabs = false;
+    let mut browse_read: Option<String> = None;
+    let mut browse_endpoint: Option<String> = None;
     let mut openai_compat = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -65,6 +69,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("--radar-limit requires an integer")?
                     .parse()?
             }
+            "--browse-profiles" => browse_profiles = true,
+            "--browse-tabs" => browse_tabs = true,
+            "--browse-read" => browse_read = args.next(),
+            "--browse-endpoint" => browse_endpoint = args.next(),
             "--openai-compat" => openai_compat = true,
             "-h" | "--help" => usage(),
             other => return Err(format!("unknown argument: {other}").into()),
@@ -81,6 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         + usize::from(show_tools)
         + usize::from(show_inspect)
         + usize::from(radar)
+        + usize::from(browse_profiles)
+        + usize::from(browse_tabs)
+        + usize::from(browse_read.is_some())
         != 1
     {
         usage();
@@ -124,6 +135,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             radar::render_digest(&body, usize::from(radar_limit)).map_err(|e| e.to_string())?
         );
+        return Ok(());
+    }
+    if browse_profiles {
+        for profile in harness_browser::list_profiles().map_err(|e| e.to_string())? {
+            println!("{}\t{}", profile.name, profile.directory);
+        }
+        return Ok(());
+    }
+    if browse_tabs || browse_read.is_some() {
+        // Attach-only: the user starts Chrome with --remote-debugging-port
+        // themselves, which is the explicit consent for personal browsing.
+        // Attached sessions never terminate the browser.
+        let endpoint = browse_endpoint
+            .or_else(|| env::var("HARNESS_BROWSER_ENDPOINT").ok())
+            .unwrap_or_else(|| "http://127.0.0.1:9222".into());
+        let addr = endpoint
+            .strip_prefix("http://")
+            .ok_or("browser endpoint must be http://127.0.0.1:PORT")?;
+        if browse_tabs {
+            for (id, title, url) in harness_browser::ControlledBrowser::list_tabs(
+                addr,
+                std::time::Duration::from_secs(10),
+            )
+            .map_err(|e| e.to_string())?
+            {
+                println!("{id}\t{title}\t{url}");
+            }
+            return Ok(());
+        }
+        let filter = browse_read.ok_or("missing filter")?;
+        let mut browser = harness_browser::ControlledBrowser::attach(
+            addr,
+            Some(filter.as_str()),
+            harness_browser::BrowserLimits::default(),
+        )
+        .map_err(|e| e.to_string())?;
+        println!("# {}", browser.title().map_err(|e| e.to_string())?);
+        println!("{}", browser.text().map_err(|e| e.to_string())?);
+        browser.close();
         return Ok(());
     }
     let model: Box<dyn Model> = if openai_compat {

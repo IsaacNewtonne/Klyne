@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+harness-browser = { path = "../../crates/harness-browser" }
 harness-core = { path = "../../crates/harness-core" }
 harness-provider = { path = "../../crates/harness-provider" }
 serde_json = "1.0.151"

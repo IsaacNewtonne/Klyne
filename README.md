@@ -24,6 +24,7 @@ A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions
 - Scoped delegation: fenced child runs with narrowed scope, inherited limits, budget firewall, read-only verifiers, and artifact collection; see [delegation](docs/delegation.md).
 - Supervised network fetch and repo radar: allowlisted read-only HTTPS GET with strict URL validation, plus a GitHub trending digest (`--radar`); fetched bytes are untrusted data; see [network fetch](docs/network-fetch.md).
 - Controlled self-improvement: isolated worktree experiments with baseline/candidate gates, promotion to a kept branch, rollback on regression, and decision records; see [self-improvement](docs/self-improvement.md).
+- Structured browser control: Chrome over CDP with isolated profiles, named-profile launch, attach-to-live-instance (never kills your browser), and CLI one-shots; see [browser](docs/browser.md).
 - Negative security tests, actual process-kill recovery test, checkpoint-boundary tests, supervised-process tests (nonzero exit, timeout, output bounds, denials, env grants, tree kill).
 
 ## Run
@@ -64,7 +65,7 @@ The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cas
 - Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Reconciliation audit attempts may repeat after a crash; consumers should group them by action ID. IDs are scoped to a run/database, not globally unique idempotency keys. No exactly-once or host-power-loss guarantee.
 - Recovery assumes a stateless model. One database handles one run. Cognitive-step and tool-call budgets exist; time, token and monetary budgets remain planned.
 - Objectives, observations and checkpoints contain task data. Secret redaction is absent: do not supply secrets.
-- General planners, model routing, general coding intelligence, vector memory, full browser control, and GUI control are **PLANNED**. Provider, scripted repair benchmark, durable plans, lexical memory, reliability budgets, scoped delegation, supervised fetch/radar, and gated self-improvement experiments are implemented; OS isolation is investigated but not built.
+- General planners, model routing, general coding intelligence, vector memory, and GUI control are **PLANNED**. Everything else on the roadmap is implemented; OS isolation is investigated but not built.
 
 See [implementation evidence](docs/milestone-durable-core.md) and [historical architecture](docs/architecture-v0.1.md).
 

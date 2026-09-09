@@ -270,9 +270,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-browser"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "harness-cli"
 version = "0.1.0"
 dependencies = [
+ "harness-browser",
  "harness-core",
  "harness-provider",
  "serde_json",
