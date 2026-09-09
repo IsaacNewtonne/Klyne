@@ -96,6 +96,21 @@ pub struct Verification {
     pub evidence: String,
 }
 
+/// Cumulative provider-side spend for one model instance. The runtime
+/// accrues deltas into the checkpoint and enforces token/cost limits.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModelUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cost_usd: f64,
+}
+
+impl ModelUsage {
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens.saturating_add(self.completion_tokens)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     pub seq: u64,

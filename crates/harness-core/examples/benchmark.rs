@@ -1,4 +1,5 @@
 //! Deterministic file-task benchmark; measures harness execution, not model intelligence.
+use harness_core::event_store::EventStore;
 use harness_core::{
     AgentRuntime, HeuristicModel, Objective, PermissionPolicy, RunOutcome, SqliteEventStore,
     ToolRegistry,

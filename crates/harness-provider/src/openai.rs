@@ -8,7 +8,15 @@
 //! executed action.
 
 use crate::{ProviderLimits, Usage};
-use harness_core::{Action, Model, Objective, Observation, StepDecision};
+use harness_core::{Action, Model, ModelUsage, Objective, Observation, StepDecision};
+
+/// Optional per-1k-token rates used to price metered spend. Absent rates
+/// mean spend is counted in tokens only and cost stays zero.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pricing {
+    pub usd_per_1k_prompt_tokens: f64,
+    pub usd_per_1k_completion_tokens: f64,
+}
 
 /// Endpoint configuration. Holds no secrets: `api_key_env` names an
 /// environment variable whose value is read per HTTP call and sent only as
@@ -21,6 +29,7 @@ pub struct ProviderConfig {
     pub model: String,
     pub api_key_env: Option<String>,
     pub limits: ProviderLimits,
+    pub pricing: Option<Pricing>,
 }
 
 impl ProviderConfig {
@@ -30,11 +39,17 @@ impl ProviderConfig {
             model: model.into(),
             api_key_env: None,
             limits: ProviderLimits::default(),
+            pricing: None,
         }
     }
 
     pub fn with_api_key_env(mut self, env_var: impl Into<String>) -> Self {
         self.api_key_env = Some(env_var.into());
+        self
+    }
+
+    pub fn with_pricing(mut self, pricing: Pricing) -> Self {
+        self.pricing = Some(pricing);
         self
     }
 
@@ -53,8 +68,9 @@ The action object has {"tool":<name>, ...fields} where tool is one of:
 write_file {path, contents}, read_file {path}, read_range {path, offset, length}, hash_file {path}, patch_file {path, offset, expected, replacement, expected_sha256}, search_file {path, needle, max_matches}.
 Paths are workspace-relative. Offsets and lengths are byte counts. patch_file requires the current whole-file SHA-256 hex digest. Never propose anything else; the runtime validates, authorizes, and executes."#;
 
-/// Adapter state. Usage accumulates across `decide` calls; read it with
-/// [`OpenAiCompat::usage`] for token and call accounting.
+/// Adapter state. Usage accumulates across `decide` calls; read transport
+/// telemetry with [`OpenAiCompat::telemetry`] and metered spend through the
+/// [`Model`] trait.
 pub struct OpenAiCompat {
     config: ProviderConfig,
     client: reqwest::blocking::Client,
@@ -85,7 +101,10 @@ impl OpenAiCompat {
         })
     }
 
-    pub fn usage(&self) -> Usage {
+    /// Transport telemetry: HTTP calls, retries, raw token counts.
+    /// Metered spend for budget enforcement lives behind the [`Model`]
+    /// trait as [`harness_core::ModelUsage`].
+    pub fn telemetry(&self) -> Usage {
         self.usage.clone()
     }
 
@@ -335,6 +354,21 @@ fn map_action(action: &serde_json::Value) -> Result<Action, String> {
 impl Model for OpenAiCompat {
     fn name(&self) -> &str {
         "openai-compatible-provider"
+    }
+
+    /// Cumulative metered spend. Cost needs configured pricing; without it
+    /// only tokens accrue and cost stays zero.
+    fn usage(&self) -> ModelUsage {
+        let cost_usd = self.config.pricing.as_ref().map_or(0.0, |pricing| {
+            self.usage.prompt_tokens as f64 / 1000.0 * pricing.usd_per_1k_prompt_tokens
+                + self.usage.completion_tokens as f64 / 1000.0
+                    * pricing.usd_per_1k_completion_tokens
+        });
+        ModelUsage {
+            prompt_tokens: self.usage.prompt_tokens,
+            completion_tokens: self.usage.completion_tokens,
+            cost_usd,
+        }
     }
 
     fn decide(&mut self, objective: &Objective, history: &[(Action, Observation)]) -> StepDecision {

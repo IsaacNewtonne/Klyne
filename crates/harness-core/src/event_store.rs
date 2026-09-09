@@ -11,6 +11,11 @@ pub trait EventStore: Send {
     fn load(&mut self) -> io::Result<Option<crate::agent::RunState>> {
         Ok(None)
     }
+    /// Full event log for inspection. Stores without an event log report
+    /// empty; the checkpoint alone still inspects.
+    fn events(&self) -> io::Result<Vec<Event>> {
+        Ok(Vec::new())
+    }
 }
 
 pub struct FileEventStore {

@@ -8,7 +8,7 @@
 
 pub mod openai;
 
-pub use openai::{OpenAiCompat, ProviderConfig};
+pub use openai::{OpenAiCompat, Pricing, ProviderConfig};
 
 use std::time::Duration;
 

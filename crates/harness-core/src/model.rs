@@ -1,8 +1,15 @@
-use crate::types::{Action, Objective, Observation, StepDecision};
+use crate::types::{Action, ModelUsage, Objective, Observation, StepDecision};
 
 pub trait Model: Send {
     fn name(&self) -> &str;
     fn decide(&mut self, objective: &Objective, history: &[(Action, Observation)]) -> StepDecision;
+
+    /// Cumulative spend so far. The default (no metering) keeps every
+    /// existing model compiling; metered providers override it and the
+    /// runtime accrues deltas into the persisted checkpoint.
+    fn usage(&self) -> ModelUsage {
+        ModelUsage::default()
+    }
 }
 
 impl<M: Model + ?Sized> Model for Box<M> {

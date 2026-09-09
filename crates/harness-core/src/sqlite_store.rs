@@ -52,8 +52,10 @@ impl SqliteEventStore {
             _lease: lease,
         })
     }
+}
 
-    pub fn events(&self) -> io::Result<Vec<Event>> {
+impl EventStore for SqliteEventStore {
+    fn events(&self) -> io::Result<Vec<Event>> {
         let mut query = self
             .connection
             .prepare("SELECT seq, kind, detail FROM events ORDER BY seq")
@@ -73,9 +75,7 @@ impl SqliteEventStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)
     }
-}
 
-impl EventStore for SqliteEventStore {
     fn append(&mut self, kind: &str, detail: &str) -> io::Result<Event> {
         self.connection
             .execute(

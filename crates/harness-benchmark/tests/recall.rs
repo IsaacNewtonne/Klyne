@@ -22,6 +22,7 @@ fn memory_db(root: &std::path::Path) -> PathBuf {
 }
 
 fn patch_replacements(db: &std::path::Path) -> Vec<String> {
+    use harness_core::event_store::EventStore;
     let store = harness_core::SqliteEventStore::open(db).unwrap();
     store
         .events()

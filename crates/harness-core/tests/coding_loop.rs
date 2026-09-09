@@ -37,6 +37,10 @@ impl Workspace {
             tool_budget: Some(Default::default()),
             success_criterion: None,
             plan: Default::default(),
+            started_at_ms: None,
+            used_tokens: 0,
+            used_cost_usd: 0.0,
+            resource_limits: Default::default(),
         }
     }
 }

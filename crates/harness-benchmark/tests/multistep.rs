@@ -98,6 +98,7 @@ fn multi_step_plan_survives_kill_without_duplicating_tasks() {
 }
 
 fn task_events(db: &std::path::Path) -> Vec<(String, String)> {
+    use harness_core::event_store::EventStore;
     let store = harness_core::SqliteEventStore::open(db).unwrap();
     store
         .events()

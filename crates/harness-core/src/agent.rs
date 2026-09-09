@@ -34,6 +34,17 @@ pub struct RunState {
     /// in legacy checkpoints, which decode to an empty active plan.
     #[serde(default)]
     pub plan: PlanState,
+    /// Wall-clock origin in unix millis. Set once at creation and never
+    /// reset by resume, so time budgets survive restarts. Legacy `None`
+    /// backfills on first drive and is documented as a fresh clock.
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub used_tokens: u64,
+    #[serde(default)]
+    pub used_cost_usd: f64,
+    #[serde(default)]
+    pub resource_limits: ResourceLimits,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -45,6 +56,52 @@ pub struct ToolBudget {
 impl Default for ToolBudget {
     fn default() -> Self {
         Self { used: 0, limit: 32 }
+    }
+}
+
+/// Cumulative resource bounds. `None` disables that dimension;
+/// `max_consecutive_failures: 0` disables the failure trip.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ResourceLimits {
+    pub wall_clock_secs: Option<u64>,
+    pub token_limit: Option<u64>,
+    pub cost_limit_usd: Option<f64>,
+    pub max_consecutive_failures: u64,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            wall_clock_secs: None,
+            token_limit: None,
+            cost_limit_usd: None,
+            max_consecutive_failures: 3,
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Process-local shutdown switch. The flag lives outside the checkpoint:
+/// requesting shutdown stops the loop after persisting progress, and a
+/// later resume continues. Clone it before driving.
+#[derive(Clone, Debug, Default)]
+pub struct ShutdownHandle {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ShutdownHandle {
+    pub fn request(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_requested(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -62,6 +119,7 @@ pub struct AgentRuntime<M: Model, E: EventStore> {
     events: E,
     max_steps: usize,
     max_tool_calls: u64,
+    shutdown: ShutdownHandle,
 }
 
 impl<M: Model, E: EventStore> AgentRuntime<M, E> {
@@ -73,7 +131,15 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
             events,
             max_steps: 8,
             max_tool_calls: ToolBudget::default().limit,
+            shutdown: ShutdownHandle::default(),
         }
+    }
+
+    /// Process-local graceful-shutdown switch. When requested, the drive
+    /// loop checkpoints progress and stops without settling an outcome, so
+    /// a later resume continues where it left off.
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        self.shutdown.clone()
     }
 
     /// Applies only to new runs; resume always uses persisted accounting.
@@ -87,6 +153,44 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
     pub fn with_max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = max_steps;
         self
+    }
+
+    /// Heartbeat cadence in cognitive steps. Heartbeats carry the current
+    /// budget snapshot for watchdogs and run inspection.
+    pub const HEARTBEAT_EVERY: usize = 10;
+
+    /// Accrue the model's metered spend into the checkpoint and enforce
+    /// token/cost limits. Spend already happened, so exhaustion fails the
+    /// run closed rather than rewinding it.
+    fn accrue_usage(&mut self, state: &mut RunState) -> io::Result<Option<RunOutcome>> {
+        let usage = self.model.usage();
+        // High-water mark: providers report cumulative spend.
+        if usage.total_tokens() > state.used_tokens {
+            state.used_tokens = usage.total_tokens();
+        }
+        if usage.cost_usd > state.used_cost_usd {
+            state.used_cost_usd = usage.cost_usd;
+        }
+        if let Some(limit) = state.resource_limits.token_limit
+            && state.used_tokens > limit
+        {
+            let reason = format!("token budget exhausted: {} of {limit}", state.used_tokens);
+            self.events.append("TokenExhausted", &reason)?;
+            self.events.append("GoalFailed", &reason)?;
+            return Ok(Some(RunOutcome::Failed(reason)));
+        }
+        if let Some(limit) = state.resource_limits.cost_limit_usd
+            && state.used_cost_usd > limit
+        {
+            let reason = format!(
+                "cost budget exhausted: ${:.6} of ${limit:.6}",
+                state.used_cost_usd
+            );
+            self.events.append("CostExhausted", &reason)?;
+            self.events.append("GoalFailed", &reason)?;
+            return Ok(Some(RunOutcome::Failed(reason)));
+        }
+        Ok(None)
     }
 
     fn reserve_tool_call(&mut self, state: &mut RunState) -> io::Result<()> {
@@ -218,6 +322,10 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
             }),
             success_criterion: criterion,
             plan,
+            started_at_ms: Some(now_ms()),
+            used_tokens: 0,
+            used_cost_usd: 0.0,
+            resource_limits: ResourceLimits::default(),
         };
         self.events.checkpoint(&state)?;
         let objective = &state.objective;
@@ -342,6 +450,21 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
         Ok(())
     }
 
+    /// Replace the whole resource-limits set with an audited reason. Like
+    /// tool-call amendments, this records rather than silently resets.
+    pub fn amend_resource_limits(
+        &mut self,
+        limits: ResourceLimits,
+        reason: impl Into<String>,
+    ) -> io::Result<()> {
+        let mut state = self.load_live()?;
+        state.resource_limits = limits;
+        self.events.checkpoint(&state)?;
+        self.events
+            .append("ResourceLimitsAmended", &reason.into())?;
+        Ok(())
+    }
+
     pub fn resume(&mut self) -> io::Result<RunOutcome> {
         self.resume_with_reconciliation(false)
     }
@@ -451,6 +574,9 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
 
     fn drive(&mut self, mut state: RunState) -> io::Result<RunOutcome> {
         let result = self.drive_inner(&mut state)?;
+        if matches!(result, RunOutcome::Completed(_)) {
+            state.plan.lifecycle = Lifecycle::Completed;
+        }
         state.outcome = Some(result.clone());
         self.events.checkpoint(&state)?;
         Ok(result)
@@ -471,7 +597,40 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
             Lifecycle::Active => {}
         }
 
+        if state.started_at_ms.is_none() {
+            state.started_at_ms = Some(now_ms());
+        }
         while state.steps < state.max_steps {
+            if self.shutdown.is_requested() {
+                self.events.checkpoint(state)?;
+                self.events
+                    .append("ShutdownRequested", &state.objective.id)?;
+                return Err(io::Error::other("shutdown requested; resume to continue"));
+            }
+            if let Some(limit) = state.resource_limits.wall_clock_secs {
+                let elapsed = now_ms().saturating_sub(state.started_at_ms.unwrap_or(0)) / 1000;
+                if elapsed > limit {
+                    let reason =
+                        format!("wall-clock budget exhausted after {elapsed}s of {limit}s");
+                    self.events.append("WallClockExhausted", &reason)?;
+                    self.events.append("GoalFailed", &reason)?;
+                    return Ok(RunOutcome::Failed(reason));
+                }
+            }
+            let trailing_failures = state
+                .history
+                .iter()
+                .rev()
+                .take_while(|(_, observation)| !observation.ok)
+                .count() as u64;
+            let trip = state.resource_limits.max_consecutive_failures;
+            if trip > 0 && trailing_failures >= trip {
+                let reason =
+                    format!("repeated errors: {trailing_failures} consecutive tool failures");
+                self.events.append("RepeatedFailures", &reason)?;
+                self.events.append("GoalFailed", &reason)?;
+                return Ok(RunOutcome::Failed(reason));
+            }
             let step = state.steps;
             state.steps += 1;
             self.events.checkpoint(state)?;
@@ -479,7 +638,31 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
                 "CognitiveStep",
                 &format!("step={step};phase=orient_recall_plan"),
             )?;
-            match self.model.decide(&objective, &state.history) {
+            if step > 0 && step.is_multiple_of(Self::HEARTBEAT_EVERY) {
+                self.events.append(
+                    "Heartbeat",
+                    &format!(
+                        "step={step};tools={}/{};tokens={};cost_usd={:.6}",
+                        state
+                            .tool_budget
+                            .as_ref()
+                            .map(|budget| budget.used)
+                            .unwrap_or(0),
+                        state
+                            .tool_budget
+                            .as_ref()
+                            .map(|budget| budget.limit)
+                            .unwrap_or(0),
+                        state.used_tokens,
+                        state.used_cost_usd,
+                    ),
+                )?;
+            }
+            let decision = self.model.decide(&objective, &state.history);
+            if let Some(outcome) = self.accrue_usage(state)? {
+                return Ok(outcome);
+            }
+            match decision {
                 StepDecision::Act(action) => {
                     if let Some(outcome) = self.execute_action(action, "act", state)? {
                         return Ok(outcome);

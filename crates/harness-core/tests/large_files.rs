@@ -259,6 +259,10 @@ fn pending_patch_is_not_replayed_after_restart() {
         tool_budget: Some(Default::default()),
         success_criterion: None,
         plan: Default::default(),
+        started_at_ms: None,
+        used_tokens: 0,
+        used_cost_usd: 0.0,
+        resource_limits: Default::default(),
     };
     let db = root.path().join(".harness/run.sqlite3");
     let mut store = SqliteEventStore::open(&db).unwrap();

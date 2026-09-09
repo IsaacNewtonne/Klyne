@@ -139,8 +139,55 @@ fn decide_once(
 ) -> (StepDecision, harness_provider::Usage) {
     let mut model = provider(url, mutate);
     let decision = model.decide(&Objective::new("test objective"), &[]);
-    let usage = model.usage();
+    let usage = model.telemetry();
     (decision, usage)
+}
+
+#[test]
+fn usage_reports_tokens_and_priced_cost() {
+    let body = serde_json::json!({
+        "choices": [{"message": {"content": serde_json::json!({"decision": "fail", "reason": "done"}).to_string()}}],
+        "usage": {"prompt_tokens": 2000, "completion_tokens": 1000},
+    })
+    .to_string();
+    let (url, _seen, handle) = serve(vec![MockResponse {
+        status: 200,
+        body,
+        delay_ms: 0,
+    }]);
+    let mut model = OpenAiCompat::new(ProviderConfig::new(&url, "mock-model").with_pricing(
+        harness_provider::Pricing {
+            usd_per_1k_prompt_tokens: 0.01,
+            usd_per_1k_completion_tokens: 0.03,
+        },
+    ))
+    .unwrap();
+    let (decision, _) = {
+        let decision = model.decide(&Objective::new("objective"), &[]);
+        let usage = model.usage();
+        (decision, usage)
+    };
+    assert!(matches!(decision, StepDecision::Fail(_)));
+    let usage = model.usage();
+    assert_eq!(usage.prompt_tokens, 2000);
+    assert_eq!(usage.completion_tokens, 1000);
+    assert!((usage.cost_usd - 0.05).abs() < 1e-9);
+    handle.join().unwrap();
+    // Without pricing, tokens accrue and cost stays zero.
+    let (url, _seen, handle) = serve(vec![MockResponse {
+        status: 200,
+        body: serde_json::json!({
+            "choices": [{"message": {"content": serde_json::json!({"decision": "fail", "reason": "done"}).to_string()}}],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 8},
+        })
+        .to_string(),
+        delay_ms: 0,
+    }]);
+    let mut plain = OpenAiCompat::new(ProviderConfig::new(&url, "mock-model")).unwrap();
+    plain.decide(&Objective::new("objective"), &[]);
+    assert_eq!(plain.usage().prompt_tokens, 7);
+    assert_eq!(plain.usage().cost_usd, 0.0);
+    handle.join().unwrap();
 }
 
 #[test]

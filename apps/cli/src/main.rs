@@ -1,3 +1,4 @@
+use harness_core::event_store::EventStore;
 use harness_core::{
     AgentRuntime, HeuristicModel, Model, Objective, PermissionPolicy, RunOutcome, SqliteEventStore,
     ToolRegistry,
@@ -9,7 +10,7 @@ use std::path::PathBuf;
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: harness-cli --workspace <dir> [--objective <text> | --resume | --reconcile | --events | --tools] [--database <path>] [--max-tool-calls <integer> (new runs only)] [--openai-compat]"
+        "Usage: harness-cli --workspace <dir> [--objective <text> | --resume | --reconcile | --events | --tools | --inspect] [--database <path>] [--max-tool-calls <integer> (new runs only)] [--openai-compat]"
     );
     eprintln!(
         "Example: harness-cli --workspace ./workspace --objective 'create file hello.txt with content hello agent'"
@@ -30,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut reconcile = false;
     let mut show_events = false;
     let mut show_tools = false;
+    let mut show_inspect = false;
     let mut openai_compat = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -51,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--reconcile" => reconcile = true,
             "--events" => show_events = true,
             "--tools" => show_tools = true,
+            "--inspect" => show_inspect = true,
             "--openai-compat" => openai_compat = true,
             "-h" | "--help" => usage(),
             other => return Err(format!("unknown argument: {other}").into()),
@@ -65,6 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         + usize::from(reconcile)
         + usize::from(show_events)
         + usize::from(show_tools)
+        + usize::from(show_inspect)
         != 1
     {
         usage();
@@ -84,6 +88,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for event in events.events()? {
             println!("{}\t{}\t{:?}", event.seq, event.kind, event.detail);
         }
+        return Ok(());
+    }
+    if show_inspect {
+        let mut events = events;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&harness_core::inspect::inspect_run(&mut events)?)
+                .map_err(|e| e.to_string())?
+        );
         return Ok(());
     }
     let model: Box<dyn Model> = if openai_compat {
