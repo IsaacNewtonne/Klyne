@@ -107,6 +107,109 @@ impl PermissionPolicy {
         &self.workspace_root
     }
 
+    /// Capabilities currently held, for intersection checks by delegating
+    /// parents. Children only ever receive a subset of these.
+    pub fn capabilities(&self) -> Vec<Capability> {
+        self.capabilities.iter().cloned().collect()
+    }
+
+    /// Whether this policy authorizes `program` for supervised execution.
+    pub fn allows_shell_program(&self, program: &str) -> bool {
+        self.capabilities.contains(&Capability::ShellExecute)
+            && self.shell_allowlist.contains(program)
+    }
+
+    /// Revoke one capability, e.g. write access for verifier children.
+    pub fn revoke_capability(&mut self, capability: Capability) {
+        self.capabilities.remove(&capability);
+        if capability == Capability::ShellExecute {
+            self.shell_allowlist.clear();
+            self.shell_arg_grants.clear();
+        }
+    }
+
+    /// Narrow this policy to a workspace subdirectory for a child agent.
+    /// The child keeps the file capabilities but loses every shell and env
+    /// grant; those need explicit re-granting through
+    /// [`PermissionPolicy::grant_shell_from`]. The scope must pass this
+    /// policy's own path checks, so a child can never be scoped outside
+    /// the parent's workspace, and an existing non-directory blocks reuse.
+    pub fn narrow_to_subdir(&self, subdir: &str) -> Result<PermissionPolicy, String> {
+        match self.check(&Action::ReadFile {
+            path: subdir.into(),
+        }) {
+            PermissionDecision::Allow => {}
+            PermissionDecision::Deny(reason) | PermissionDecision::Ask(reason) => {
+                return Err(format!("child scope denied: {reason}"));
+            }
+        }
+        let root = self.workspace_root.join(subdir);
+        match std::fs::symlink_metadata(&root) {
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err("child scope is an existing non-directory".into());
+            }
+            Ok(_) | Err(_) => {}
+        }
+        let mut capabilities = self.capabilities.clone();
+        capabilities.remove(&Capability::ShellExecute);
+        Ok(PermissionPolicy {
+            workspace_root: root,
+            capabilities,
+            shell_allowlist: BTreeSet::new(),
+            shell_arg_grants: Default::default(),
+            env_allowlist: BTreeSet::new(),
+        })
+    }
+
+    /// Re-grant one environment variable to a narrowed child policy. Fails
+    /// unless the parent holds the same grant: environment visibility also
+    /// shrinks down the delegation chain, never grows.
+    pub fn grant_env_from(&mut self, parent: &PermissionPolicy, name: &str) -> Result<(), String> {
+        if !parent.env_allowlist.contains(name) {
+            return Err(format!(
+                "parent does not grant env '{name}'; cannot delegate it"
+            ));
+        }
+        self.env_allowlist.insert(name.into());
+        Ok(())
+    }
+
+    /// Re-grant one supervised executable (with an argv prefix) to a
+    /// narrowed child policy. Fails unless the parent holds a covering
+    /// grant: privilege shrinks down the delegation chain, never grows.
+    /// A broad (prefix-free) parent grant covers any prefix; otherwise the
+    /// requested prefix must extend a parent-allowed one.
+    pub fn grant_shell_from(
+        &mut self,
+        parent: &PermissionPolicy,
+        program: &str,
+        arg_prefix: Vec<String>,
+    ) -> Result<(), String> {
+        if !parent.allows_shell_program(program) {
+            return Err(format!(
+                "parent does not grant '{program}'; cannot delegate it"
+            ));
+        }
+        let covered = match parent.shell_arg_grants.get(program) {
+            None => true,
+            Some(prefixes) => prefixes
+                .iter()
+                .any(|parent_prefix| arg_prefix.starts_with(&parent_prefix[..])),
+        };
+        if !covered {
+            return Err(format!(
+                "argv prefix for '{program}' exceeds the parent grant"
+            ));
+        }
+        self.capabilities.insert(Capability::ShellExecute);
+        self.shell_allowlist.insert(program.into());
+        self.shell_arg_grants
+            .entry(program.into())
+            .or_default()
+            .push(arg_prefix);
+        Ok(())
+    }
+
     pub fn check(&self, action: &Action) -> PermissionDecision {
         match action {
             Action::WriteFile { path, .. } => self.check_path(path, Capability::FilesystemWrite),

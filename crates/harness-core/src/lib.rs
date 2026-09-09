@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod delegation;
 pub mod event_store;
 pub mod inspect;
 pub mod large_files;
@@ -12,6 +13,7 @@ pub mod verification;
 pub use sqlite_store::SqliteEventStore;
 
 pub use agent::{AgentRuntime, ResourceLimits, RunOutcome, ShutdownHandle};
+pub use delegation::{ChildGrant, ChildReport, collect_artifacts, spawn_child};
 pub use event_store::FileEventStore;
 pub use model::{HeuristicModel, Model};
 pub use permissions::{Capability, PermissionDecision, PermissionPolicy};

@@ -3,7 +3,7 @@
 > Living file. Update it on every checkpoint: move rows, refresh counts,
 > record the new hash. Status legend: **IMPLEMENTED**, **PARTIAL**,
 > **EXPERIMENTAL**, **PLANNED**, **BLOCKED**.
-> Living file: update it with every feature checkpoint below. Suite **105 passing** as of 2026-09-09.
+> Living file: update it with every feature checkpoint below. Suite **116 passing** as of 2026-09-09.
 
 ## Checkpoint log
 
@@ -82,9 +82,18 @@ cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verif
 | Unix process-group tree kill | **EXPERIMENTAL** | `setsid` + group SIGKILL via `libc`; Unix test ships but this Windows box cannot execute it — verify on Unix before relying |
 | Mid-flight plan driver (Running tasks) | **IMPLEMENTED** | Adoption covers completed children; partial children re-run from scratch (documented) |
 
+## Milestone 8 expansion (user-ordered, in progress)
+
+| Item | Status | Evidence |
+| --- | --- | --- |
+| Scoped multi-agent delegation | **IMPLEMENTED** | `tests/delegation.rs` (10) + benchmark e2e (1), `docs/delegation.md` |
+| Controlled self-improvement | **PLANNED** | Next: isolated worktrees, benchmark gates, rollback |
+| Browser control | **PLANNED** | After self-improvement |
+| GUI control | **PLANNED** | Last; heaviest platform work |
+
 ## Next up
 
-1. Milestone 8 expansion, user-ordered: scoped multi-agent delegation, then
-   controlled self-improvement, then browser control, then GUI control.
+1. Controlled self-improvement in isolated Git worktrees with benchmark
+   comparison, regression gates, and rollback.
 2. Keep `scripts/demo.sh` executable-mode change uncommitted and intact
    (predates implementation work; do not commit or discard it).
