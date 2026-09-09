@@ -16,6 +16,7 @@ A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions
 - Typed range reads, streaming SHA-256, and digest-guarded patches for larger files; see [large-file operations](docs/large-files.md).
 - Structured tool descriptors and discovery (`--tools`); supervised argv process execution with explicit grants, timeout, output bounds, and Windows tree kill; see [process supervision](docs/process-supervision.md).
 - Bounded single-file substring search plus hash/range-based success criteria; a deterministic scripted agent can inspect, patch, and verify a controlled file through the runtime (`run_with_criterion`), with read-only recovery and blocked patch reconciliation; see [coding loop](docs/coding-loop.md).
+- First real model provider: OpenAI-compatible chat-completions adapter with strict validated decisions, credential hygiene, timeouts, response caps, bounded retries, and usage accounting, plus CLI opt-in via `--openai-compat`; see [model provider](docs/model-provider.md).
 - Negative security tests, actual process-kill recovery test, checkpoint-boundary tests, supervised-process tests (nonzero exit, timeout, output bounds, denials, env grants, tree kill).
 
 ## Run
@@ -56,7 +57,7 @@ The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cas
 - Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Reconciliation audit attempts may repeat after a crash; consumers should group them by action ID. IDs are scoped to a run/database, not globally unique idempotency keys. No exactly-once or host-power-loss guarantee.
 - Recovery assumes a stateless model. One database handles one run. Cognitive-step and tool-call budgets exist; time, token and monetary budgets remain planned.
 - Objectives, observations and checkpoints contain task data. Secret redaction is absent: do not supply secrets.
-- Goal DAGs, planners, real providers, general coding, memory, browser, GUI, delegation and self-improvement are **PLANNED**.
+- Goal DAGs, planners, model routing, general coding, memory, browser, GUI, delegation and self-improvement are **PLANNED**. One OpenAI-compatible provider is implemented; provider usage is not yet persisted or cost-bounded.
 
 See [implementation evidence](docs/milestone-durable-core.md) and [historical architecture](docs/architecture-v0.1.md).
 

@@ -5,6 +5,16 @@ pub trait Model: Send {
     fn decide(&mut self, objective: &Objective, history: &[(Action, Observation)]) -> StepDecision;
 }
 
+impl<M: Model + ?Sized> Model for Box<M> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn decide(&mut self, objective: &Objective, history: &[(Action, Observation)]) -> StepDecision {
+        (**self).decide(objective, history)
+    }
+}
+
 /// A dependency-free model used only for the first executable vertical slice.
 /// It demonstrates the runtime contract with a narrow, deterministic objective grammar.
 #[derive(Default)]
