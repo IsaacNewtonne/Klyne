@@ -1,6 +1,7 @@
 use crate::event_store::EventStore;
 use crate::model::Model;
 use crate::permissions::{PermissionDecision, PermissionPolicy};
+use crate::plan::{Lifecycle, PlanState};
 use crate::tools::ToolRegistry;
 use crate::types::{Action, Objective, Observation, StepDecision};
 use crate::verification::{FileEvidenceVerifier, SuccessCriterion, Verifier};
@@ -29,6 +30,10 @@ pub struct RunState {
     /// from the objective text, preserving legacy behavior.
     #[serde(default)]
     pub success_criterion: Option<SuccessCriterion>,
+    /// Durable goals, task graph, lifecycle, and budget amendments. Absent
+    /// in legacy checkpoints, which decode to an empty active plan.
+    #[serde(default)]
+    pub plan: PlanState,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -159,9 +164,45 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
         objective: Objective,
         criterion: Option<SuccessCriterion>,
     ) -> io::Result<RunOutcome> {
+        self.run_with_plan(objective, PlanState::default(), criterion)
+    }
+
+    /// Start a run with a durable goal/task plan attached. The plan is
+    /// checkpointed before the first step, so restarts and replans keep the
+    /// top-level goal.
+    pub fn run_with_plan(
+        &mut self,
+        objective: Objective,
+        plan: PlanState,
+        criterion: Option<SuccessCriterion>,
+    ) -> io::Result<RunOutcome> {
+        let state = self.begin(objective, plan, criterion)?;
+        self.events.append("AgentStarted", self.model.name())?;
+        self.drive(state)
+    }
+
+    /// Create a run without driving it. External schedulers use this to own
+    /// the orchestration loop while the runtime owns durable plan state.
+    pub fn create_run(
+        &mut self,
+        objective: Objective,
+        plan: PlanState,
+        criterion: Option<SuccessCriterion>,
+    ) -> io::Result<()> {
+        self.begin(objective, plan, criterion)?;
+        Ok(())
+    }
+
+    fn begin(
+        &mut self,
+        objective: Objective,
+        plan: PlanState,
+        criterion: Option<SuccessCriterion>,
+    ) -> io::Result<RunState> {
         if self.events.load()?.is_some() {
             return Err(io::Error::other("store already contains a run; use resume"));
         }
+        let announce_plan = !plan.goals.is_empty() || !plan.tasks.is_empty();
         let state = RunState {
             version: 1,
             objective,
@@ -176,6 +217,7 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
                 limit: self.max_tool_calls,
             }),
             success_criterion: criterion,
+            plan,
         };
         self.events.checkpoint(&state)?;
         let objective = &state.objective;
@@ -183,8 +225,121 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
             "GoalCreated",
             &format!("{}:{}", objective.id, objective.text),
         )?;
-        self.events.append("AgentStarted", self.model.name())?;
-        self.drive(state)
+        if announce_plan {
+            self.events.append(
+                "PlanCreated",
+                &format!(
+                    "goals={} tasks={}",
+                    state.plan.goals.len(),
+                    state.plan.tasks.len()
+                ),
+            )?;
+        }
+        Ok(state)
+    }
+
+    fn load_live(&mut self) -> io::Result<RunState> {
+        let state = self
+            .events
+            .load()?
+            .ok_or_else(|| io::Error::other("no checkpoint to resume"))?;
+        if state.version != 1
+            || state.workspace != std::fs::canonicalize(self.policy.workspace_root())?
+        {
+            return Err(io::Error::other("checkpoint version or workspace mismatch"));
+        }
+        if state.outcome.is_some() {
+            return Err(io::Error::other(
+                "run is terminal; no further transitions allowed",
+            ));
+        }
+        Ok(state)
+    }
+
+    /// Read the durable plan without changing it.
+    pub fn plan_snapshot(&mut self) -> io::Result<PlanState> {
+        Ok(self.load_live()?.plan)
+    }
+
+    /// Apply a plan transition durably: the mutation commits to the
+    /// checkpoint before returning, and a `PlanRevised` audit event records
+    /// what changed. Terminal runs refuse revision.
+    pub fn revise_plan(
+        &mut self,
+        what: &str,
+        edit: impl FnOnce(&mut PlanState) -> Result<(), String>,
+    ) -> io::Result<()> {
+        let mut state = self.load_live()?;
+        edit(&mut state.plan).map_err(io::Error::other)?;
+        self.events.checkpoint(&state)?;
+        self.events.append("PlanRevised", what)?;
+        Ok(())
+    }
+
+    /// Move the lifecycle durably. Paused runs refuse to drive until
+    /// resumed; cancelled and completed runs are terminal.
+    pub fn set_lifecycle(&mut self, lifecycle: Lifecycle) -> io::Result<()> {
+        let mut state = self.load_live()?;
+        state.plan.lifecycle = lifecycle.clone();
+        self.events.checkpoint(&state)?;
+        self.events
+            .append("LifecycleChanged", &format!("lifecycle={lifecycle:?}"))?;
+        Ok(())
+    }
+
+    /// Finish a driver-owned run. Requires every planned task to be
+    /// succeeded or abandoned; the top-level goal record stays attached to
+    /// the terminal checkpoint.
+    pub fn complete_run(&mut self, summary: impl Into<String>) -> io::Result<RunOutcome> {
+        let mut state = self.load_live()?;
+        if !state.plan.goals_complete() {
+            return Err(io::Error::other(
+                "plan goals are not complete; repair or abandon open tasks first",
+            ));
+        }
+        let outcome = RunOutcome::Completed(summary.into());
+        state.plan.lifecycle = Lifecycle::Completed;
+        state.outcome = Some(outcome.clone());
+        self.events.checkpoint(&state)?;
+        self.events.append("GoalCompleted", "plan goals complete")?;
+        Ok(outcome)
+    }
+
+    /// Cancel a live run. Terminal: the failure records the operator reason.
+    pub fn cancel_run(&mut self, reason: impl Into<String>) -> io::Result<RunOutcome> {
+        let mut state = self.load_live()?;
+        let outcome = RunOutcome::Failed(reason.into());
+        state.plan.lifecycle = Lifecycle::Cancelled;
+        state.outcome = Some(outcome.clone());
+        self.events.checkpoint(&state)?;
+        self.events.append("GoalFailed", "run cancelled")?;
+        Ok(outcome)
+    }
+
+    /// Controlled budget amendment. The previous limit, the new limit, and
+    /// the reason are recorded in the plan and in a `BudgetAmended` event;
+    /// limits are never silently reset or replenished.
+    pub fn amend_tool_budget(
+        &mut self,
+        new_limit: u64,
+        reason: impl Into<String>,
+    ) -> io::Result<()> {
+        let mut state = self.load_live()?;
+        let budget = state.tool_budget.as_mut().ok_or_else(|| {
+            io::Error::other(
+                "legacy checkpoint lacks tool accounting; automatic continuation refused",
+            )
+        })?;
+        let reason = reason.into();
+        state.plan.amendments.push(crate::plan::BudgetAmendment {
+            previous_limit: budget.limit,
+            new_limit,
+            reason: reason.clone(),
+        });
+        budget.limit = new_limit;
+        self.events.checkpoint(&state)?;
+        self.events.append("BudgetAmended", &reason)?;
+        Ok(())
     }
 
     pub fn resume(&mut self) -> io::Result<RunOutcome> {
@@ -303,6 +458,18 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
 
     fn drive_inner(&mut self, state: &mut RunState) -> io::Result<RunOutcome> {
         let objective = state.objective.clone();
+        match state.plan.lifecycle {
+            Lifecycle::Paused => {
+                return Err(io::Error::other("run is paused; resume it before driving"));
+            }
+            Lifecycle::Cancelled => return Ok(RunOutcome::Failed("run was cancelled".into())),
+            Lifecycle::Completed => {
+                return Ok(RunOutcome::Failed(
+                    "run is already completed; no further steps".into(),
+                ));
+            }
+            Lifecycle::Active => {}
+        }
 
         while state.steps < state.max_steps {
             let step = state.steps;

@@ -15,7 +15,7 @@ use harness_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// One controlled bug. The fixture crate asserts `answer() == fixed_value`;
@@ -417,6 +417,215 @@ pub fn run_task(workspace: &Path, database: &Path, spec: &TaskSpec) -> io::Resul
     // evidence plus the outside oracle decide verification below.
     drop(runtime);
     report_for(workspace, database, spec, &outcome, started)
+}
+
+/// Durable multi-task driver result. `adopted` counts tasks whose prior
+/// verified completion was reused instead of re-executed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanSummary {
+    pub goal: String,
+    pub completed: bool,
+    pub adopted: u64,
+    pub tasks: Vec<TaskReport>,
+}
+
+fn plan_task_db(workspace: &Path, task: &str) -> PathBuf {
+    workspace
+        .join(".harness")
+        .join("tasks")
+        .join(format!("{task}.sqlite3"))
+}
+
+/// Adopt a previously verified task completion without re-executing it.
+/// Returns `None` when no terminal completion exists or the oracle no
+/// longer passes, in which case the caller re-runs the task.
+fn adopt_task(workspace: &Path, spec: &TaskSpec) -> io::Result<Option<TaskReport>> {
+    let db = plan_task_db(workspace, &spec.name);
+    let mut store = match SqliteEventStore::open(&db) {
+        Ok(store) => store,
+        Err(_) => return Ok(None),
+    };
+    let completed = matches!(
+        store.load()?,
+        Some(state) if matches!(state.outcome, Some(RunOutcome::Completed(_)))
+    );
+    drop(store);
+    if !completed || oracle(workspace, spec).is_err() {
+        return Ok(None);
+    }
+    let started = Instant::now();
+    let outcome = RunOutcome::Completed("adopted verified completion".into());
+    let mut report = report_for(workspace, &db, spec, &outcome, started)?;
+    report.detail = format!("adopted without re-execution: {}", report.detail);
+    Ok(Some(report))
+}
+
+/// Run every task in a persisted plan to completion. The plan (goal plus
+/// chained tasks) is created once and checkpointed; each call resumes it:
+/// succeeded tasks are adopted from their own checkpoints, never
+/// re-executed. Set `HARNESS_PLAN_HANG_AFTER_TASK=<task>` to hang after a
+/// task commits, which crash tests use to kill the driver mid-plan.
+pub fn run_plan(
+    workspace: &Path,
+    plan_db: &Path,
+    goal: &str,
+    specs: &[TaskSpec],
+) -> io::Result<PlanSummary> {
+    use harness_core::plan::{Lifecycle, PlanState, TaskStatus};
+    let fresh = SqliteEventStore::open(plan_db)?.load()?.is_none();
+    if fresh {
+        let mut plan = PlanState::default();
+        plan.add_goal("top", goal, 1).map_err(io::Error::other)?;
+        let mut previous: Option<String> = None;
+        for spec in specs {
+            let deps = previous.clone().into_iter().collect();
+            plan.add_task(&spec.name, "top", format!("repair {}", spec.name), deps)
+                .map_err(io::Error::other)?;
+            previous = Some(spec.name.clone());
+        }
+        let mut seed = AgentRuntime::new(
+            RepairAgent::new(specs[0].clone()),
+            ToolRegistry::milestone_default(),
+            PermissionPolicy::milestone_default(workspace),
+            SqliteEventStore::open(plan_db)?,
+        );
+        seed.create_run(Objective::new(goal), plan, None)?;
+    }
+    let mut adopted = 0u64;
+    let mut tasks = Vec::new();
+    // Replays of a resumed plan re-adopt every recorded success first, so
+    // the summary always covers the whole plan, not just this call's work.
+    // A recorded success the oracle no longer confirms is a hard error:
+    // the plan must be repaired, not silently re-run.
+    {
+        let mut seeder = AgentRuntime::new(
+            RepairAgent::new(specs[0].clone()),
+            ToolRegistry::milestone_default(),
+            PermissionPolicy::milestone_default(workspace),
+            SqliteEventStore::open(plan_db)?,
+        );
+        let snapshot = seeder.plan_snapshot()?;
+        for task in snapshot
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Succeeded)
+        {
+            let spec = specs
+                .iter()
+                .find(|spec| spec.name == task.id)
+                .ok_or_else(|| io::Error::other(format!("plan task '{}' has no spec", task.id)))?;
+            match adopt_task(workspace, spec)? {
+                Some(report) => {
+                    adopted += 1;
+                    tasks.push(report);
+                }
+                None => {
+                    return Err(io::Error::other(format!(
+                        "recorded success for '{}' no longer verifies; repair the plan",
+                        task.id
+                    )));
+                }
+            }
+        }
+    }
+    loop {
+        let snapshot = {
+            let mut probe = AgentRuntime::new(
+                RepairAgent::new(specs[0].clone()),
+                ToolRegistry::milestone_default(),
+                PermissionPolicy::milestone_default(workspace),
+                SqliteEventStore::open(plan_db)?,
+            );
+            probe.plan_snapshot()?
+        };
+        if !matches!(snapshot.lifecycle, Lifecycle::Active) {
+            return Err(io::Error::other("plan is not active"));
+        }
+        let ready = snapshot.ready_tasks();
+        if ready.is_empty() {
+            let mut closer = AgentRuntime::new(
+                RepairAgent::new(specs[0].clone()),
+                ToolRegistry::milestone_default(),
+                PermissionPolicy::milestone_default(workspace),
+                SqliteEventStore::open(plan_db)?,
+            );
+            let outcome = closer.complete_run(format!("plan complete: {goal}"))?;
+            return Ok(PlanSummary {
+                goal: goal.into(),
+                completed: matches!(outcome, RunOutcome::Completed(_)),
+                adopted,
+                tasks,
+            });
+        }
+        let task_id = ready.into_iter().next().expect("ready is non-empty");
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name == task_id)
+            .ok_or_else(|| io::Error::other(format!("plan task '{task_id}' has no spec")))?
+            .clone();
+        // Kill window: the child run verified but the success was never
+        // recorded (killed between the two commits). Adopt the result
+        // instead of re-executing the task.
+        if let Some(report) = adopt_task(workspace, &spec)? {
+            let mut marker = AgentRuntime::new(
+                RepairAgent::new(spec.clone()),
+                ToolRegistry::milestone_default(),
+                PermissionPolicy::milestone_default(workspace),
+                SqliteEventStore::open(plan_db)?,
+            );
+            marker.revise_plan("task succeeded (adopted)", |plan| {
+                plan.mark_succeeded(&task_id, report.detail.clone())
+            })?;
+            adopted += 1;
+            tasks.push(report);
+            continue;
+        }
+        {
+            let mut marker = AgentRuntime::new(
+                RepairAgent::new(spec.clone()),
+                ToolRegistry::milestone_default(),
+                PermissionPolicy::milestone_default(workspace),
+                SqliteEventStore::open(plan_db)?,
+            );
+            marker.revise_plan("task running", |plan| plan.mark_running(&task_id))?;
+        }
+        let db = plan_task_db(workspace, &spec.name);
+        let report = run_task(workspace, &db, &spec)?;
+        if !matches!(report.outcome, TaskOutcome::Completed) {
+            let mut marker = AgentRuntime::new(
+                RepairAgent::new(spec.clone()),
+                ToolRegistry::milestone_default(),
+                PermissionPolicy::milestone_default(workspace),
+                SqliteEventStore::open(plan_db)?,
+            );
+            marker.revise_plan("task failed", |plan| {
+                plan.mark_failed(&task_id, report.detail.clone())
+            })?;
+            return Err(io::Error::other(format!(
+                "plan task '{}' failed: {}",
+                spec.name, report.detail
+            )));
+        }
+        {
+            let mut marker = AgentRuntime::new(
+                RepairAgent::new(spec.clone()),
+                ToolRegistry::milestone_default(),
+                PermissionPolicy::milestone_default(workspace),
+                SqliteEventStore::open(plan_db)?,
+            );
+            marker.revise_plan("task succeeded", |plan| {
+                plan.mark_succeeded(&task_id, report.detail.clone())
+            })?;
+        }
+        tasks.push(report);
+        if std::env::var("HARNESS_PLAN_HANG_AFTER_TASK").as_deref() == Ok(task_id.as_str()) {
+            std::fs::write(workspace.join("ready"), b"task checkpointed")
+                .map_err(io::Error::other)?;
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
 }
 
 /// Score a terminal outcome with oracle evidence and persisted metrics.

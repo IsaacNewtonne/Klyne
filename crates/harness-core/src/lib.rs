@@ -3,6 +3,7 @@ pub mod event_store;
 pub mod large_files;
 pub mod model;
 pub mod permissions;
+pub mod plan;
 pub mod sqlite_store;
 pub mod tools;
 pub mod types;

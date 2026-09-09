@@ -36,6 +36,7 @@ impl Workspace {
             outcome: None,
             tool_budget: Some(Default::default()),
             success_criterion: None,
+            plan: Default::default(),
         }
     }
 }
