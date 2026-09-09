@@ -3,7 +3,7 @@
 > Living file. Update it on every checkpoint: move rows, refresh counts,
 > record the new hash. Status legend: **IMPLEMENTED**, **PARTIAL**,
 > **EXPERIMENTAL**, **PLANNED**, **BLOCKED**.
-> Last updated: 2026-09-09 · HEAD `280e68e` · suite **80 passing**.
+> Living file: update it with every feature checkpoint below. Suite **88 passing** as of 2026-09-09.
 
 ## Checkpoint log
 
@@ -20,6 +20,8 @@
 | `7c122fb` | `harness-provider`: OpenAI-compatible adapter, strict decisions, secret hygiene, retries, usage accounting, CLI `--openai-compat` |
 | `02be314` | `harness-benchmark`: scripted cargo repair tasks, compiler/test oracle, failure-driven repair, restart |
 | `280e68e` | Durable goal/task plans, lifecycle, budget amendments, hierarchical scheduling without duplicated effects |
+| `6f0782e` | Living project tracker |
+| `8d35740` | `harness-memory`: SQLite project/episodic/procedural/failure memory, explained retrieval, retention, consolidation, primed benchmark recall |
 
 ## Roadmap milestones
 
@@ -30,7 +32,7 @@
 | 3 | One real model provider (OpenAI-compatible, strict, hygienic) | **IMPLEMENTED** | `crates/harness-provider/tests/provider.rs` (10), `docs/model-provider.md`, `7c122fb` |
 | 4 | First autonomous coding benchmark (controlled bugs, oracle, restart) | **IMPLEMENTED** | `crates/harness-benchmark/tests/autonomous.rs` (4), `docs/coding-benchmark.md`, `02be314` |
 | 5 | Durable goals and plans (DAG, repair, lifecycle, amendments) | **IMPLEMENTED** | `tests/plan.rs` (7) + plan units (3), `tests/multistep.rs` (2), `docs/durable-plans.md`, `280e68e` |
-| 6 | Memory and context selection (SQLite project/episodic/procedural/failure memory) | **PLANNED** | Next up |
+| 6 | Memory and context selection (SQLite project/episodic/procedural/failure memory) | **IMPLEMENTED** | `harness-memory/tests/memory.rs` (5), `harness-benchmark/tests/recall.rs` (3), `docs/memory.md`, `8d35740` |
 | 7 | Long-running reliability (time/token/cost budgets, watchdogs, tracing) | **PLANNED** | Provider usage still client-side; process timeout is the only backstop |
 | 8 | Expansion only after reliability (browser, delegation, GUI, self-improvement) | **PLANNED** | Gated on 1–7 |
 
@@ -50,6 +52,7 @@
 | OpenAI-compatible provider, CLI opt-in | **IMPLEMENTED** | Secrets header-only, never persisted |
 | Scripted repair benchmark + oracle | **IMPLEMENTED** | Agent is a script, not intelligence |
 | Goal/task DAG, repair, lifecycle, amendments | **IMPLEMENTED** | No inventing planner; sequential driver |
+| Lexical memory (4 kinds, retention, consolidation) | **IMPLEMENTED** | `crates/harness-memory`, `docs/memory.md` |
 | Shell reconciliation | **BLOCKED** | Effects indistinguishable; refused by design |
 | Patch reconciliation | **BLOCKED** | Before/after/conflict indistinguishable; refused by design |
 | Mid-flight child-run resume | **PLANNED** | Interrupted child tasks restart from scratch |
@@ -69,8 +72,9 @@ cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verif
 
 ## Next up
 
-1. Milestone 6: SQLite-backed memory (project, episodic, procedural, failure)
-   with confidence/provenance/timestamps, explained retrieval, retention
-   rules, measured recall on the existing benchmark.
+1. Milestone 7: long-running reliability — wall-clock/token/monetary budgets,
+   heartbeats, watchdogs, repeated-error detection, graceful shutdown,
+   structured tracing, machine-readable run inspection. Prove with hundreds
+   of actions, injected failures, and repeated restarts.
 2. Keep `scripts/demo.sh` executable-mode change uncommitted and intact
    (predates implementation work; do not commit or discard it).
