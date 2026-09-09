@@ -97,7 +97,7 @@ cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verif
 | Scoped multi-agent delegation | **IMPLEMENTED** | `tests/delegation.rs` (10) + benchmark e2e (1), `docs/delegation.md`, `479ba9a` |
 | Supervised network fetch + repo radar | **IMPLEMENTED** | URL gating matrix, `tests/fetch.rs` (6), CLI `--radar`, `docs/network-fetch.md`, `6093be7` |
 | Controlled self-improvement | **IMPLEMENTED** | Worktree isolation, baseline/candidate gates, promote/rollback, records; `harness-experiment` (1 unit + 4 e2e), `docs/self-improvement.md`, `0295fce` |
-| Browser control (isolated/personal/attach) | **IMPLEMENTED** | `harness-browser` (8 tests), CLI `--browse-profiles/tabs/read`, `docs/browser.md`; live-verified against Chrome 150 |
+| Browser control (isolated/personal/attach) | **IMPLEMENTED** | `harness-browser` (8 tests), CLI `--browse-profiles/tabs/read`, `docs/browser.md`, `2c1cade`; live-verified against Chrome 150 |
 | GUI control | **PLANNED** | Last remaining item; needs OS accessibility backends |
 
 ## Handover notes (read before touching anything)
