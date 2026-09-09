@@ -51,6 +51,20 @@ impl Tool for WorkspaceFsTool {
             };
         }
         match action {
+            Action::ReadFileRange { .. } | Action::HashFile { .. } | Action::PatchFile { .. } => {
+                match crate::large_files::execute(action, policy) {
+                    Ok(data) => Observation {
+                        ok: true,
+                        summary: format!("completed {action}"),
+                        data,
+                    },
+                    Err(error) => Observation {
+                        ok: false,
+                        summary: format!("failed {action}"),
+                        data: error.to_string(),
+                    },
+                }
+            }
             Action::WriteFile { path, contents } => {
                 if contents.len() > MAX_FILE_BYTES {
                     return Observation {

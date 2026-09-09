@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod event_store;
+pub mod large_files;
 pub mod model;
 pub mod permissions;
 pub mod sqlite_store;

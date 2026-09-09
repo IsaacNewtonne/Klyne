@@ -24,16 +24,45 @@ impl Objective {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
-    WriteFile { path: String, contents: String },
-    ReadFile { path: String },
-    RunShell { program: String, args: Vec<String> },
-    Finish { summary: String },
+    WriteFile {
+        path: String,
+        contents: String,
+    },
+    ReadFile {
+        path: String,
+    },
+    ReadFileRange {
+        path: String,
+        offset: u64,
+        length: u64,
+    },
+    HashFile {
+        path: String,
+    },
+    PatchFile {
+        path: String,
+        offset: u64,
+        expected: String,
+        replacement: String,
+        expected_sha256: String,
+    },
+    RunShell {
+        program: String,
+        args: Vec<String>,
+    },
+    Finish {
+        summary: String,
+    },
 }
 
 impl Action {
     pub fn tool_name(&self) -> &'static str {
         match self {
-            Self::WriteFile { .. } | Self::ReadFile { .. } => "workspace_fs",
+            Self::WriteFile { .. }
+            | Self::ReadFile { .. }
+            | Self::ReadFileRange { .. }
+            | Self::HashFile { .. }
+            | Self::PatchFile { .. } => "workspace_fs",
             Self::RunShell { .. } => "workspace_shell",
             Self::Finish { .. } => "runtime",
         }
@@ -73,6 +102,13 @@ impl fmt::Display for Action {
         match self {
             Action::WriteFile { path, .. } => write!(f, "write_file:{path}"),
             Action::ReadFile { path } => write!(f, "read_file:{path}"),
+            Action::ReadFileRange {
+                path,
+                offset,
+                length,
+            } => write!(f, "read_range:{path}:{offset}:{length}"),
+            Action::HashFile { path } => write!(f, "hash_file:{path}"),
+            Action::PatchFile { path, offset, .. } => write!(f, "patch_file:{path}:{offset}"),
             Action::RunShell { program, args } => write!(f, "shell:{} {}", program, args.join(" ")),
             Action::Finish { summary } => write!(f, "finish:{summary}"),
         }

@@ -13,6 +13,7 @@ A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions
 - Resume between actions after process termination; refuse uncertain interrupted actions.
 - Explicit `--reconcile` inspects interrupted file actions without replaying writes; action audit records carry stable run-scoped IDs.
 - Persisted tool-call reservations (32 by default), including verification and reconciliation; filesystem reads/writes capped at 1 MiB per operation.
+- Typed range reads, streaming SHA-256, and digest-guarded patches for larger files; see [large-file operations](docs/large-files.md).
 - Negative security tests, actual process-kill recovery test, checkpoint-boundary tests.
 
 ## Run
@@ -40,6 +41,7 @@ cargo check --workspace --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo run -p harness-core --example benchmark --locked
+cargo run -p harness-core --example large_file_benchmark --locked
 ```
 
 The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cases violate acceptance criteria. It has no external model calls, tokens, or model cost.
@@ -57,4 +59,4 @@ See [implementation evidence](docs/milestone-durable-core.md) and [historical ar
 
 New objectives accept `--max-tool-calls <integer>` (default 32). This cannot override a resumed run's persisted budget. Reservations commit before invocation; failed reads count, and a crash can consume credit without executing a call. Budget exhaustion returns an error and leaves the checkpoint for inspection. It does not mark the goal complete. Active legacy checkpoints without accounting refuse continuation because prior reconciliation usage cannot be reconstructed reliably; terminal legacy results remain readable. No automatic budget replenishment or migration is implemented.
 
-Filesystem reads accept only regular UTF-8 files. Reads consume at most 1 MiB plus one detection byte and reject oversized input without returning a truncated success. Oversized writes fail before touching the target. These limits do not bound model output, total history, checkpoint size or elapsed I/O time.
+Whole-file text reads accept only regular UTF-8 files and consume at most 1 MiB plus one detection byte. Oversized input is rejected without truncated success. Whole-file writes retain the 1 MiB limit. Range reads select up to 1 MiB; streaming hashes and targeted patches operate on files up to 64 MiB. These limits do not bound model output, total history, checkpoint size or elapsed I/O time.

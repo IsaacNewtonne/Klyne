@@ -46,7 +46,16 @@ impl PermissionPolicy {
     pub fn check(&self, action: &Action) -> PermissionDecision {
         match action {
             Action::WriteFile { path, .. } => self.check_path(path, Capability::FilesystemWrite),
-            Action::ReadFile { path } => self.check_path(path, Capability::FilesystemRead),
+            Action::ReadFile { path }
+            | Action::ReadFileRange { path, .. }
+            | Action::HashFile { path } => self.check_path(path, Capability::FilesystemRead),
+            Action::PatchFile { path, .. } => {
+                let read = self.check_path(path, Capability::FilesystemRead);
+                if read != PermissionDecision::Allow {
+                    return read;
+                }
+                self.check_path(path, Capability::FilesystemWrite)
+            }
             Action::RunShell { program, .. } => {
                 if !self.capabilities.contains(&Capability::ShellExecute) {
                     return PermissionDecision::Deny("shell.execute capability is disabled".into());

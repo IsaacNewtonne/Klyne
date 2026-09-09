@@ -1,5 +1,7 @@
 # Tool-call and file-size limits
 
+The 1 MiB read/write limits below describe whole-file text operations. New [large-file operations](large-files.md) provide range reads, streaming hashes and targeted patches with separate explicit ceilings; they retain the same persisted tool-call accounting.
+
 **IMPLEMENTED:** New runs persist a tool budget with `used` and `limit` counters. Default limit is 32; CLI `--max-tool-calls` and the runtime builder configure new runs only. Resumption uses persisted accounting. Verification and reconciliation share the same budget.
 
 Before invocation, the runtime increments used credit and commits a checkpoint. Normal actions commit their pending intent with this reservation. No tool runs after a failed reservation commit. Reads that fail or cannot reconcile a write still consume credit. A crash between reservation and invocation may consume unused credit; credits are never refunded automatically. Exhaustion emits `BudgetExhausted` and returns an error while retaining recoverable state. This is not a terminal success or automatic budget extension.
