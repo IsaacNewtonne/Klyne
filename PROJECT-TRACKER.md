@@ -86,7 +86,7 @@ cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verif
 
 | Item | Status | Evidence |
 | --- | --- | --- |
-| Scoped multi-agent delegation | **IMPLEMENTED** | `tests/delegation.rs` (10) + benchmark e2e (1), `docs/delegation.md` |
+| Scoped multi-agent delegation | **IMPLEMENTED** | `tests/delegation.rs` (10) + benchmark e2e (1), `docs/delegation.md`, `479ba9a` |
 | Controlled self-improvement | **PLANNED** | Next: isolated worktrees, benchmark gates, rollback |
 | Browser control | **PLANNED** | After self-improvement |
 | GUI control | **PLANNED** | Last; heaviest platform work |
