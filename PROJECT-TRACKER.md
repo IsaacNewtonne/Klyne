@@ -3,7 +3,7 @@
 > Living file. Update it on every checkpoint: move rows, refresh counts,
 > record the new hash. Status legend: **IMPLEMENTED**, **PARTIAL**,
 > **EXPERIMENTAL**, **PLANNED**, **BLOCKED**.
-> Living file: update it with every feature checkpoint below. Suite **101 passing** as of 2026-09-09.
+> Living file: update it with every feature checkpoint below. Suite **105 passing** as of 2026-09-09.
 
 ## Checkpoint log
 
@@ -72,10 +72,19 @@ cargo run -p harness-core --example benchmark --locked        # file-core-v1 10/
 cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verified
 ```
 
+## Gap-closure round (in progress, user-directed)
+
+| Gap | Status | Evidence |
+| --- | --- | --- |
+| Per-decision usage in the event log | **IMPLEMENTED** | `UsageRecorded` events, asserted in reliability tests |
+| Mid-flight child-run resume | **IMPLEMENTED** | `run_task` resumes partial checkpoints; crafted + real-kill tests, exactly-once patch asserted |
+| Priority-aware scheduling | **IMPLEMENTED** | `ready_tasks` orders by goal priority, unit tested |
+| Unix process-group tree kill | **EXPERIMENTAL** | `setsid` + group SIGKILL via `libc`; Unix test ships but this Windows box cannot execute it — verify on Unix before relying |
+| Mid-flight plan driver (Running tasks) | **IMPLEMENTED** | Adoption covers completed children; partial children re-run from scratch (documented) |
+
 ## Next up
 
-1. Milestone 8 (gated): expansion only after reliability — structured browser
-   control, scoped delegation, GUI control, isolated self-improvement, each
-   with benchmarks and rollback gates. Do not start without explicit direction.
+1. Milestone 8 expansion, user-ordered: scoped multi-agent delegation, then
+   controlled self-improvement, then browser control, then GUI control.
 2. Keep `scripts/demo.sh` executable-mode change uncommitted and intact
    (predates implementation work; do not commit or discard it).

@@ -174,13 +174,17 @@ impl PlanState {
         Ok(&mut self.tasks[index])
     }
 
-    /// Tasks whose dependencies all succeeded and which are still pending,
-    /// in registration order. Blocked, abandoned, and failed tasks never
-    /// schedule; repair them explicitly with [`PlanState::repair`].
+    /// Tasks whose dependencies all succeeded and which are still pending.
+    /// Ordered by goal priority first, then registration order, so the
+    /// scheduler prefers important goals without starving declared order.
+    /// Blocked, abandoned, and failed tasks never schedule; repair them
+    /// explicitly with [`PlanState::repair`].
     pub fn ready_tasks(&self) -> Vec<String> {
-        self.tasks
+        let mut ready: Vec<(u32, usize, String)> = self
+            .tasks
             .iter()
-            .filter(|task| {
+            .enumerate()
+            .filter(|(_, task)| {
                 matches!(task.status, TaskStatus::Pending)
                     && task.deps.iter().all(|dep| {
                         self.tasks.iter().any(|other| {
@@ -188,8 +192,18 @@ impl PlanState {
                         })
                     })
             })
-            .map(|task| task.id.clone())
-            .collect()
+            .map(|(index, task)| {
+                let priority = self
+                    .goals
+                    .iter()
+                    .find(|goal| goal.id == task.goal_id)
+                    .map(|goal| goal.priority)
+                    .unwrap_or(u32::MAX);
+                (priority, index, task.id.clone())
+            })
+            .collect();
+        ready.sort();
+        ready.into_iter().map(|(_, _, id)| id).collect()
     }
 
     pub fn mark_running(&mut self, id: &str) -> Result<(), String> {
@@ -357,6 +371,24 @@ mod tests {
             .deps
             .push("c".into());
         assert!(plan.has_cycle());
+    }
+
+    #[test]
+    fn ready_tasks_prefer_goal_priority_then_order() {
+        let mut plan = PlanState::default();
+        plan.add_goal("urgent", "u", 1).unwrap();
+        plan.add_goal("later", "l", 9).unwrap();
+        plan.add_task("slow", "later", "x", vec![]).unwrap();
+        plan.add_task("also-slow", "later", "x", vec![]).unwrap();
+        plan.add_task("fast", "urgent", "y", vec![]).unwrap();
+        assert_eq!(
+            plan.ready_tasks(),
+            vec![
+                "fast".to_string(),
+                "slow".to_string(),
+                "also-slow".to_string()
+            ]
+        );
     }
 
     #[test]

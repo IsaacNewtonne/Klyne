@@ -22,8 +22,14 @@ Status: **IMPLEMENTED** as an authorized-but-not-isolated supervisor. OS isolati
   Timeout kills and reaps the child; excess output fails the call with bounded evidence.
   Partial output on timeout is truncated to the per-stream cap.
 - Windows-first tree cleanup: on timeout/supervision failure the runtime runs
-  `taskkill /PID <pid> /T /F` before `kill()`/`wait()`. Unix currently terminates
-  the direct child only; full process-group cleanup is planned.
+  `taskkill /PID <pid> /T /F` before `kill()`/`wait()`, covered by a
+  Windows kill test. Unix children start as process-group leaders
+  (`setsid` via `pre_exec`, `libc`) and timeouts send group SIGKILL with a
+  direct-kill fallback. The Unix path is **EXPERIMENTAL**: implemented but
+  never executed here — a Unix host must run
+  `cargo test -p harness-core --test process unix_tree_kill_reaps_background_grandchildren`
+  (spawns `sh`, backgrounds a marker-writing loop, and proves the
+  grandchild stops) before relying on it.
 
 ## Verified
 
@@ -51,7 +57,7 @@ Full suite after this change: 47 passing (38 prior + 9 new). `cargo fmt --check`
 - Authorization is not isolation: no job objects, cgroups, namespaces, or sandbox.
   Concurrent hostile workspace mutation, hard links, and device/DLL-planting style
   attacks are outside the threat model. Use trusted isolated workspaces.
-- Unix tree cleanup is best-effort (direct child only). Windows relies on `taskkill /T`,
+- Unix tree cleanup is group SIGKILL but host-unverified (see above). Windows relies on `taskkill /T`,
   tested for prompt return, not a proven descendant census.
 - No stdin interaction, no I/O deadlines below the wall-clock timeout, no CPU/memory caps.
 - Shell actions still cannot be reconciled after interruption (refused, as before).

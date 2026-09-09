@@ -291,6 +291,51 @@ fn windows_tree_kill_reaps_parent_and_child() {
     );
 }
 
+/// Unix-only: a background grandchild must die with the tree. Unverifiable
+/// on Windows hosts; run this target on Unix before relying on group kill.
+#[cfg(unix)]
+#[test]
+fn unix_tree_kill_reaps_background_grandchildren() {
+    use std::time::{Duration, Instant};
+    let root = Workspace::new();
+    let limits = ProcessLimits {
+        timeout: Duration::from_secs(2),
+        max_output_bytes: 64 * 1024,
+    };
+    let tools = ToolRegistry::milestone_with_shell_limits(limits);
+    let mut policy = root.policy();
+    policy.allow_shell_program("sh");
+    // The shell backgrounds a marker-writing loop, then waits; both share
+    // the child's process group, so the timeout must take both down. A
+    // surviving grandchild would keep rewriting the marker.
+    let start = Instant::now();
+    let marker = root.0.join("grandchild-alive");
+    let obs = tools.execute(
+        &Action::RunShell {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                format!(
+                    "while true; do date +%s%N > {}; sleep 0.2; done & wait",
+                    marker.to_string_lossy()
+                ),
+            ],
+        },
+        &policy,
+    );
+    assert!(!obs.ok, "{}: {}", obs.summary, obs.data);
+    assert!(obs.summary.contains("timed out"), "{}", obs.summary);
+    assert!(start.elapsed() < Duration::from_secs(20));
+    let before = fs::metadata(&marker).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        fs::metadata(&marker).unwrap().modified().unwrap(),
+        before,
+        "grandchild survived the group kill and kept writing"
+    );
+    fs::remove_file(&marker).unwrap();
+}
+
 #[test]
 fn child_environment_is_cleared_except_explicit_grants() {
     let root = Workspace::new();

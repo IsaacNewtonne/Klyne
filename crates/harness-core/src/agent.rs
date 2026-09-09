@@ -165,11 +165,25 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
     fn accrue_usage(&mut self, state: &mut RunState) -> io::Result<Option<RunOutcome>> {
         let usage = self.model.usage();
         // High-water mark: providers report cumulative spend.
+        let tokens_before = state.used_tokens;
+        let cost_before = state.used_cost_usd;
         if usage.total_tokens() > state.used_tokens {
             state.used_tokens = usage.total_tokens();
         }
         if usage.cost_usd > state.used_cost_usd {
             state.used_cost_usd = usage.cost_usd;
+        }
+        if state.used_tokens > tokens_before || state.used_cost_usd > cost_before {
+            self.events.append(
+                "UsageRecorded",
+                &serde_json::json!({
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "cost_usd": usage.cost_usd,
+                    "total_tokens": state.used_tokens,
+                })
+                .to_string(),
+            )?;
         }
         if let Some(limit) = state.resource_limits.token_limit
             && state.used_tokens > limit
@@ -450,8 +464,19 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
         Ok(())
     }
 
+    /// Set (or repair) the explicit success claim on a live run. Audited;
+    /// used when resuming checkpoints that predate the claim.
+    pub fn set_success_criterion(&mut self, criterion: SuccessCriterion) -> io::Result<()> {
+        let mut state = self.load_live()?;
+        state.success_criterion = Some(criterion);
+        self.events.checkpoint(&state)?;
+        self.events
+            .append("SuccessCriterionRevised", "explicit claim set")?;
+        Ok(())
+    }
+
     /// Replace the whole resource-limits set with an audited reason. Like
-    /// tool-call amendments, this records rather than silently resets.
+    /// tool-call amendments, this never silently resets.
     pub fn amend_resource_limits(
         &mut self,
         limits: ResourceLimits,

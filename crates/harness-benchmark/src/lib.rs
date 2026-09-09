@@ -389,13 +389,15 @@ pub fn agent_runtime<M: Model>(
 }
 
 /// Independent range claim over the fixed span. Same-length fixes keep the
-/// bug offset stable from search to final verification.
+/// bug offset stable from search to final verification, so on a resumed
+/// run the already-applied fix marks the same span as the original bug.
 pub fn task_criterion(workspace: &Path, spec: &TaskSpec) -> io::Result<SuccessCriterion> {
     assert_eq!(spec.bug.len(), spec.fix_first.len());
     assert_eq!(spec.bug.len(), spec.fix_final.len());
     let source = std::fs::read_to_string(workspace.join(spec.file()))?;
     let offset = source
         .find(&spec.bug)
+        .or_else(|| source.find(&spec.fix_final))
         .ok_or_else(|| io::Error::other("fixture lacks the specified bug"))?
         as u64;
     Ok(SuccessCriterion::FileRange {
@@ -410,15 +412,35 @@ pub fn task_objective(spec: &TaskSpec) -> Objective {
 }
 
 /// Run one task end to end and prove the result with the oracle.
-/// The workspace must already contain the fixture; the database is fresh.
+/// The workspace must already contain the fixture. A non-terminal
+/// checkpoint resumes with the same history-driven model instead of
+/// erroring, so kills mid-flight continue rather than restart: completed
+/// effects are kept, pending file actions reconcile, and only missing work
+/// re-executes. Terminal checkpoints report without re-running.
 pub fn run_task(workspace: &Path, database: &Path, spec: &TaskSpec) -> io::Result<TaskReport> {
     let started = Instant::now();
-    let mut runtime = agent_runtime(workspace, database, RepairAgent::new(spec.clone()))?;
-    let outcome =
-        runtime.run_with_criterion(task_objective(spec), Some(task_criterion(workspace, spec)?))?;
+    let existing = SqliteEventStore::open(database)?.load()?;
+    let outcome = match existing {
+        None => {
+            let mut runtime = agent_runtime(workspace, database, RepairAgent::new(spec.clone()))?;
+            runtime
+                .run_with_criterion(task_objective(spec), Some(task_criterion(workspace, spec)?))?
+        }
+        Some(state) if state.outcome.is_some() => state.outcome.clone().expect("terminal"),
+        Some(state) => {
+            let mut runtime = agent_runtime(workspace, database, RepairAgent::new(spec.clone()))?;
+            if state.success_criterion.is_none() {
+                runtime.set_success_criterion(task_criterion(workspace, spec)?)?;
+            }
+            if state.pending.is_some() {
+                runtime.reconcile_and_resume()?
+            } else {
+                runtime.resume()?
+            }
+        }
+    };
     // The scripted agent's completion claim is advisory; runtime range
     // evidence plus the outside oracle decide verification below.
-    drop(runtime);
     report_for(workspace, database, spec, &outcome, started)
 }
 

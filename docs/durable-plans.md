@@ -12,6 +12,7 @@ remains **PLANNED**; the runtime durable keeps whatever graph it is given.
   with reasons), evidence notes, and supersede links. Registration validates
   duplicates, unknown goals/deps, self-deps, and cycles; violations are
   rejected, never stored. `ready_tasks()` schedules only pending tasks whose
+  deps all succeeded, ordered by goal priority then registration order.
   deps all succeeded. `repair()` abandons a failed/blocked task with its
   reason preserved and registers a replacement inheriting its dependencies;
   the goal and every attempt stay in the record.

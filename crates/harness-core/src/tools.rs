@@ -275,7 +275,22 @@ fn kill_process_tree(pid: u32) {
         .output();
 }
 
+/// Unix tree cleanup: the child starts as a process-group leader (see the
+/// spawn site), so a negative-pid SIGKILL reaches the whole tree.
+/// EXPERIMENTAL: implemented against libc but not yet executed on a Unix
+/// host; verify there before relying on it.
+#[cfg(unix)]
+fn kill_process_tree(pid: u32) {
+    // Negative pid targets the process group; fall back to the direct
+    // child below if the group kill reports an error.
+    let group = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+    if group != 0 {
+        // Best effort only; the caller reaps regardless.
+    }
+}
+
 #[cfg(not(windows))]
+#[cfg(not(unix))]
 fn kill_process_tree(_pid: u32) {}
 
 fn terminate_child(child: &mut Child) {
@@ -284,10 +299,14 @@ fn terminate_child(child: &mut Child) {
         kill_process_tree(child.id());
         let _ = child.kill();
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        // Best effort: terminate the direct child. Full process-group cleanup
-        // on Unix remains planned; use a trusted exclusive workspace.
+        kill_process_tree(child.id());
+        let _ = child.kill();
+    }
+    #[cfg(not(windows))]
+    #[cfg(not(unix))]
+    {
         let _ = child.kill();
     }
 }
@@ -312,7 +331,7 @@ impl Tool for WorkspaceShellTool {
         ToolDescriptor {
             tool: self.name().into(),
             description: format!(
-                "Supervised argv execution (no shell strings). Cwd fixed to workspace; env cleared except explicit grants. Timeout {}s; {} bytes per stream; Windows tree kill via taskkill /T.",
+                "Supervised argv execution (no shell strings). Cwd fixed to workspace; env cleared except explicit grants. Timeout {}s; {} bytes per stream; tree kill via taskkill /T on Windows, process-group SIGKILL on Unix.",
                 self.limits.timeout.as_secs(),
                 self.limits.max_output_bytes
             ),
@@ -344,6 +363,17 @@ impl Tool for WorkspaceShellTool {
         // Never concatenate a shell string: executable + argv only, cwd fixed
         // to the workspace, environment cleared except explicit grants.
         let mut command = Command::new(program);
+        #[cfg(unix)]
+        {
+            // Own process group per child so timeouts can signal the tree.
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                unsafe {
+                    libc::setsid();
+                }
+                Ok(())
+            });
+        }
         command
             .args(args)
             .current_dir(policy.workspace_root())

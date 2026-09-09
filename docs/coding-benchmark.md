@@ -26,6 +26,11 @@ quality.
 - Reports record tool calls (persisted budget), model calls (cognitive
   steps), test runs, failed-observation retries, denials, wall-clock seconds,
   tokens, and cost (0: scripted, no model spend).
+- `run_task` resumes: a non-terminal checkpoint continues with the same
+  history-driven model (missing success claims are repaired via an audited
+  `set_success_criterion`), and terminal checkpoints report through the
+  oracle without re-running. Kill mid-flight therefore continues rather
+  than restarts; exactly-once patching is asserted in tests.
 - Fixtures pin `rust-toolchain.toml` to 1.98.1 at the workspace root because
   rustup resolves the toolchain from the process working directory, and the
   machine default toolchain is broken. Fixture fixes are same-length so byte

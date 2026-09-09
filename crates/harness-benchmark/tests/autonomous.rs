@@ -2,6 +2,7 @@ use harness_benchmark::{
     TaskOutcome, TaskReport, TaskSpec, agent_runtime, oracle, report_for, run_task, task_criterion,
     task_objective, write_fixture,
 };
+use harness_core::event_store::EventStore;
 use harness_core::{Action, Model, Objective, Observation, StepDecision};
 use std::fs;
 use std::path::PathBuf;
@@ -64,6 +65,219 @@ fn first_patch_fails_then_failure_driven_repair() {
     // One passing run after at least one failing cargo test observation.
     assert!(report.test_runs >= 2, "{}", report.test_runs);
     assert!(report.retries >= 1, "{}", report.retries);
+    fs::remove_dir_all(&root).unwrap();
+}
+
+fn flight_spec() -> TaskSpec {
+    TaskSpec {
+        name: "flight-task".into(),
+        bug: "41".into(),
+        fix_first: "42".into(),
+        fix_final: "42".into(),
+        test_name: "flight_task_is_fixed".into(),
+        shape: "wrong-constant".into(),
+    }
+}
+
+/// Worker entry: runs a task, then hangs after the patch checkpoint so the
+/// parent kill deterministically lands mid-flight (patch committed, cargo
+/// test never started), unlike racing the compiler.
+#[test]
+fn bench_flight_worker() {
+    let Some(root) = std::env::var_os("HARNESS_FLIGHT_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    struct PauseBeforeTest<M: Model> {
+        inner: M,
+        root: PathBuf,
+    }
+    impl<M: Model> Model for PauseBeforeTest<M> {
+        fn name(&self) -> &str {
+            "pause-before-test"
+        }
+        fn decide(
+            &mut self,
+            objective: &Objective,
+            history: &[(Action, Observation)],
+        ) -> StepDecision {
+            let patched = history.iter().any(|(action, observation)| {
+                matches!(action, Action::PatchFile { .. }) && observation.ok
+            });
+            let tested = history
+                .iter()
+                .any(|(action, _)| matches!(action, Action::RunShell { .. }));
+            if patched && !tested {
+                fs::write(self.root.join("ready"), b"patch checkpointed").unwrap();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+            self.inner.decide(objective, history)
+        }
+    }
+    let task = flight_spec();
+    let db = root.join(".harness/flight.sqlite3");
+    let mut runtime = harness_benchmark::agent_runtime(
+        &root,
+        &db,
+        PauseBeforeTest {
+            inner: harness_benchmark::RepairAgent::new(task.clone()),
+            root: root.clone(),
+        },
+    )
+    .unwrap();
+    let criterion = harness_benchmark::task_criterion(&root, &task).unwrap();
+    runtime
+        .run_with_criterion(harness_benchmark::task_objective(&task), Some(criterion))
+        .unwrap();
+}
+
+#[test]
+fn crafted_partial_run_resumes_without_restarting() {
+    use harness_core::agent::RunState;
+    use harness_core::event_store::EventStore;
+    let root = workspace("crafted");
+    let task = flight_spec();
+    write_fixture(&root, &task).unwrap();
+    // Pre-apply the patch on disk, exactly as a killed run would leave it.
+    let path = root.join(task.file());
+    let source = fs::read_to_string(&path).unwrap().replace("41", "42");
+    fs::write(&path, source).unwrap();
+    let offset = fs::read_to_string(&path).unwrap().find("42").unwrap() as u64;
+    let ok = |summary: &str, data: &str| Observation {
+        ok: true,
+        summary: summary.into(),
+        data: data.into(),
+    };
+    let db = root.join(".harness/crafted.sqlite3");
+    let mut store = harness_core::SqliteEventStore::open(&db).unwrap();
+    store
+        .checkpoint(&RunState {
+            version: 1,
+            objective: task_objective(&task),
+            workspace: fs::canonicalize(&root).unwrap(),
+            history: vec![
+                (
+                    Action::SearchFile {
+                        path: task.file(),
+                        needle: "41".into(),
+                        max_matches: 10,
+                    },
+                    ok(
+                        "search",
+                        &format!("{{\"matches\":[{{\"offset\":{offset}}}]}}"),
+                    ),
+                ),
+                (
+                    Action::ReadFileRange {
+                        path: task.file(),
+                        offset,
+                        length: 2,
+                    },
+                    ok("range", r#"{"text":"41"}"#),
+                ),
+                (
+                    Action::HashFile { path: task.file() },
+                    ok("hash", r#"{"sha256":"abc"}"#),
+                ),
+                (
+                    Action::PatchFile {
+                        path: task.file(),
+                        offset,
+                        expected: "41".into(),
+                        replacement: "42".into(),
+                        expected_sha256: "abc".into(),
+                    },
+                    ok("patch", r#"{"after_sha256":"abc"}"#),
+                ),
+            ],
+            steps: 4,
+            max_steps: 16,
+            pending: None,
+            outcome: None,
+            tool_budget: Some(Default::default()),
+            success_criterion: None,
+            plan: Default::default(),
+            started_at_ms: None,
+            used_tokens: 0,
+            used_cost_usd: 0.0,
+            resource_limits: Default::default(),
+        })
+        .unwrap();
+    drop(store);
+    // No success criterion was ever persisted: run_task repairs it, then
+    // resumes into test and verification instead of erroring.
+    let report = run_task(&root, &db, &task).unwrap();
+    assert_repaired(&report);
+    assert_eq!(report.test_runs, 1);
+    let mut store = harness_core::SqliteEventStore::open(&db).unwrap();
+    let state = store.load().unwrap().unwrap();
+    assert_eq!(
+        state
+            .history
+            .iter()
+            .filter(|(action, _)| matches!(action, Action::PatchFile { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        store
+            .events()
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "SuccessCriterionRevised")
+    );
+    drop(store);
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn kill_mid_flight_resumes_without_duplicating_patch() {
+    let root = workspace("flight");
+    let task = flight_spec();
+    write_fixture(&root, &task).unwrap();
+    let db = root.join(".harness/flight.sqlite3");
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "bench_flight_worker", "--nocapture"])
+        .env("HARNESS_FLIGHT_ROOT", &root)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Deterministic interruption point: the worker hangs after the patch
+    // checkpoint, before ever invoking cargo.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !root.join("ready").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        root.join("ready").exists(),
+        "worker never reached the patch"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let report = run_task(&root, &db, &task).unwrap();
+    assert_repaired(&report);
+    let mut store = harness_core::SqliteEventStore::open(&db).unwrap();
+    let state = store.load().unwrap().unwrap();
+    assert_eq!(
+        state
+            .history
+            .iter()
+            .filter(|(action, _)| matches!(action, Action::PatchFile { .. }))
+            .count(),
+        1,
+        "resume must test, not re-patch"
+    );
+    assert!(
+        store
+            .events()
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "AgentResumed"),
+        "expected the resume path, not a fresh run"
+    );
+    drop(store);
     fs::remove_dir_all(&root).unwrap();
 }
 

@@ -182,6 +182,12 @@ fn token_budget_accrues_and_trips() {
     assert_eq!(state.history.len(), 1);
     let events = SqliteEventStore::open(w.db()).unwrap().events().unwrap();
     assert!(events.iter().any(|e| e.kind == "TokenExhausted"));
+    let recorded: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "UsageRecorded")
+        .collect();
+    assert_eq!(recorded.len(), 2);
+    assert!(recorded[0].detail.contains("\"total_tokens\":100"));
 }
 
 #[test]

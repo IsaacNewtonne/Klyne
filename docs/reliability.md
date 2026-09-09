@@ -13,7 +13,9 @@ see below).
     drive (documented fresh clock, not reconstructed history).
   - Token and cost spend accrues from `Model::usage()` deltas after every
     decision (high-water mark; providers report cumulative spend) and
-    persists as `used_tokens`/`used_cost_usd`. Limits fail closed with
+    persists as `used_tokens`/`used_cost_usd`. Each non-zero accrual also
+    appends a `UsageRecorded` event, so spend is visible in the event log
+    as well as the checkpoint. Limits fail closed with
     `TokenExhausted`/`CostExhausted`. Unmetered models report zero and are
     unaffected. Provider pricing (`Pricing`, per-1k rates) turns token
     counts into cost; without it cost stays zero.
