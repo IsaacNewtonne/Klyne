@@ -1,74 +1,67 @@
-﻿# Rust Agent Harness
+# Klyne
 
-A local-first Rust runtime prototype. **MODEL != AGENT**: models propose actions; the runtime owns permissions, evidence, budgets, and persistence.
+**A local-first AI workspace. A little spark. Something real.**
 
-## IMPLEMENTED and tested
+Give Klyne a task, watch the steps unfold, and inspect the result. Built in Rust with a simple browser interface, local model support, and mouse-responsive fire embers that grow while work is running.
 
-- Two-crate workspace: harness-core and harness-cli.
-- Replaceable model trait and deterministic file-objective adapter.
-- Typed file actions, permission checks, independent runtime read-back verification.
-- Serializable success criteria and a verifier trait independent of the model adapter.
-- SQLite migrations, versioned events, transactional checkpoints, process-exclusion lock.
-- Durable objective, history, step budget, pending action, and terminal outcome.
-- Resume between actions after process termination; refuse uncertain interrupted actions.
-- Explicit `--reconcile` inspects interrupted file actions without replaying writes; action audit records carry stable run-scoped IDs.
-- Persisted tool-call reservations (32 by default), including verification and reconciliation; filesystem reads/writes capped at 1 MiB per operation.
-- Typed range reads, streaming SHA-256, and digest-guarded patches for larger files; see [large-file operations](docs/large-files.md).
-- Structured tool descriptors and discovery (`--tools`); supervised argv process execution with explicit grants, timeout, output bounds, and Windows tree kill; see [process supervision](docs/process-supervision.md).
-- Bounded single-file substring search plus hash/range-based success criteria; a deterministic scripted agent can inspect, patch, and verify a controlled file through the runtime (`run_with_criterion`), with read-only recovery and blocked patch reconciliation; see [coding loop](docs/coding-loop.md).
-- First real model provider: OpenAI-compatible chat-completions adapter with strict validated decisions, credential hygiene, timeouts, response caps, bounded retries, and usage accounting, plus CLI opt-in via `--openai-compat`; see [model provider](docs/model-provider.md).
-- First autonomous coding benchmark: scripted repair of controlled Rust bugs through inspect → patch → `cargo test` → failure-driven repair → restart, with an independent compiler/test oracle and metric reports; see [coding benchmark](docs/coding-benchmark.md).
-- Durable goals and plans: persisted goal/task graphs with dependencies, blocked/abandoned states, evidence-driven repair, lifecycle states, and recorded budget amendments; multi-task plans survive kills without duplicating tasks; see [durable plans](docs/durable-plans.md).
-- Memory and context selection: SQLite-backed project/episodic/procedural/failure memory with confidence, provenance, explained retrieval, retention, and consolidation; recalled experience improves repeated benchmarks without blind replay; see [memory](docs/memory.md).
-- Long-running reliability: wall-clock/token/cost budgets, repeated-error detection, graceful shutdown, step heartbeats, and machine-readable run inspection (`--inspect`); see [reliability](docs/reliability.md).
-- Scoped delegation: fenced child runs with narrowed scope, inherited limits, budget firewall, read-only verifiers, and artifact collection; see [delegation](docs/delegation.md).
-- Supervised network fetch and repo radar: allowlisted read-only HTTPS GET with strict URL validation, plus a GitHub trending digest (`--radar`); fetched bytes are untrusted data; see [network fetch](docs/network-fetch.md).
-- Controlled self-improvement: isolated worktree experiments with baseline/candidate gates, promotion to a kept branch, rollback on regression, and decision records; see [self-improvement](docs/self-improvement.md).
-- Structured browser control: Chrome over CDP with isolated profiles, named-profile launch, attach-to-live-instance (never kills your browser), and CLI one-shots; see [browser](docs/browser.md).
-- Negative security tests, actual process-kill recovery test, checkpoint-boundary tests, supervised-process tests (nonzero exit, timeout, output bounds, denials, env grants, tree kill).
+[![Klyne workspace preview open the interactive demo](site/preview.png)](https://isaacnewtonne.github.io/Klyne/)
 
-## Run
+### [Open the interactive workspace](https://isaacnewtonne.github.io/Klyne/)
 
-Requires pinned Rust 1.98.1 and a native C compiler for bundled SQLite.
+Move your mouse through the embers, run a sample task, switch between conversation and workspace, or open Details. The demo uses the real presentation code with simulated task data. It makes no model calls and cannot access your computer. GitHub README files cannot run JavaScript; the live experience opens on GitHub Pages.
 
-```sh
-cargo run -p harness-cli -- --workspace workspace/example --objective "create file hello.txt with content hello agent"
-cargo run -p harness-cli -- --workspace workspace/example --resume
-cargo run -p harness-cli -- --workspace workspace/example --reconcile
-cargo run -p harness-cli -- --workspace workspace/example --events
-cargo run -p harness-cli -- --workspace workspace/example --tools
+## What Klyne does
+
+- **Work you can follow.** Persisted task dependencies, progress, evidence, and a readable final answer.
+- **Models you choose.** Ollama, Codex, and OpenCode connections; a separately configured fallback can handle model-request failures.
+- **Tools with explicit access.** Files, browser automation, desktop controls, terminal commands, saved APIs, and curated MCP integrations.
+- **Recovery grounded in evidence.** Completed steps survive restarts. Known pre-dispatch connection failures can switch to desktop observation. Uncertain actions are preserved instead of blindly repeated.
+- **Checks beyond a model's claim.** Caller-owned file contracts, supported desktop focus/field checks, and a first Notepad save-reconciliation adapter.
+- **A quieter interface.** Visual progress, compact steps, optional details, and responsive embers.
+
+Klyne is under active development. Desktop automation currently targets Windows. App coverage depends on available adapters, accessibility controls, and verifiable results; arbitrary message delivery, purchases, deletes, and every application's save behavior are not universally verified. A fallback model using the same Ollama service still shares that service's failure modes.
+
+## Run locally
+
+Install a current stable Rust toolchain with edition-2024 support and the platform's native build tools. On Windows, use the MSVC toolchain and Visual Studio C++ build tools. Install and start Ollama if you want local inference; choose a model that fits your hardware.
+
+```powershell
+git clone https://github.com/IsaacNewtonne/Klyne.git
+cd Klyne
+cargo build --locked -p klyne-studio --bins
+.\target\debug\klyne-supervisor.exe --root workspace/studio --port 4317
 ```
 
-One run per database, defaulting to `<workspace>/.harness/run.sqlite3`. Use a fresh workspace or explicit `--database <path>` for another run. Terminal resume returns the historical result without new actions or fresh verification. The legacy text store remains available to library callers without recovery support.
+Open **http://127.0.0.1:4317**, select your provider in Settings, and check the connection. Enable only the tools needed for your task. Terminal and desktop access can act on your real computer; the public demo has neither capability.
 
-Ordinary `--resume` refuses pending actions. `--reconcile` rechecks permissions and reads the target: matching interrupted writes are recorded as satisfied postconditions, pending reads receive fresh observations, and normal execution resumes. Missing or conflicting contents remain pending; no corrective write is attempted. Shell actions cannot be reconciled. Matching contents prove current state, not that the original process wrote them.
+The runtime stores local conversations and generated artifacts under `workspace/`, which is excluded from Git. No model weights are bundled. Chrome or Edge is needed for browser workflows; Node/npm is needed for the curated browser MCP adapter. See [provider setup](docs/studio-providers.md) and [app connections](docs/app-connections.md).
 
-The adapter accepts `create file <relative-path> with content <text>` or `write file <relative-path> :: <text>`. It is not an LLM and cannot solve general coding tasks. Hash/range criteria and `run_with_criterion` are available to typed model implementations through the library interface, not the CLI grammar.
+## Development
 
-## Verify and benchmark
-
-```sh
-cargo fmt --all -- --check
-cargo check --workspace --locked
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo run -p harness-core --example benchmark --locked
-cargo run -p harness-core --example large_file_benchmark --locked
+```powershell
+cargo test --locked -p harness-core
+cargo test --locked -p klyne-studio --bin klyne-studio --test chat --test runtime -- --test-threads=1
 ```
 
-The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cases violate acceptance criteria. It has no external model calls, tokens, or model cost.
+Studio browser tests require an installed browser. The optional live MCP test is ignored by default. Windows desktop fixture checks can be run with `powershell -MTA -NoProfile -File scripts/test_desktop_recovery.ps1`; they operate a disposable test window.
 
-## PARTIAL / limitations
+Build and preview the static demo without starting Klyne:
 
-- Path checks reject traversal, reserved runtime paths, existing symlinks and Windows reparse points. They are **not an OS sandbox**: concurrent path replacement, hard links and hostile workspace mutation remain unresolved. Use trusted isolated workspaces. Writes are not atomic.
-- Shell execution defaults to denied and requires explicit per-executable (optionally argument-prefix) grants. Supervised runs use argv only, a workspace-fixed cwd, a cleared environment with explicit grants, a 30 s timeout, 64 KiB per-stream output caps, and Windows `taskkill /T` tree cleanup. This is authorization, not OS isolation: no job objects, cgroups, or sandbox exist yet, and Unix tree cleanup is best-effort.
-- Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Reconciliation audit attempts may repeat after a crash; consumers should group them by action ID. IDs are scoped to a run/database, not globally unique idempotency keys. No exactly-once or host-power-loss guarantee.
-- Recovery assumes a stateless model. One database handles one run. Cognitive-step and tool-call budgets exist; time, token and monetary budgets remain planned.
-- Objectives, observations and checkpoints contain task data. Secret redaction is absent: do not supply secrets.
-- General planners, model routing, general coding intelligence, vector memory, and GUI control are **PLANNED**. Everything else on the roadmap is implemented; OS isolation is investigated but not built.
+```powershell
+python scripts/build_site.py
+python -m http.server 8080 --directory site
+```
 
-See [implementation evidence](docs/milestone-durable-core.md) and [historical architecture](docs/architecture-v0.1.md).
+Open **http://localhost:8080**. The Pages workflow rebuilds presentation assets from Studio when publishing. Configure GitHub Pages to use **GitHub Actions** for deployment.
 
-New objectives accept `--max-tool-calls <integer>` (default 32). This cannot override a resumed run's persisted budget. Reservations commit before invocation; failed reads count, and a crash can consume credit without executing a call. Budget exhaustion returns an error and leaves the checkpoint for inspection. It does not mark the goal complete. Active legacy checkpoints without accounting refuse continuation because prior reconciliation usage cannot be reconstructed reliably; terminal legacy results remain readable. No automatic budget replenishment or migration is implemented.
+## Explore the project
 
-Whole-file text reads accept only regular UTF-8 files and consume at most 1 MiB plus one detection byte. Oversized input is rejected without truncated success. Whole-file writes retain the 1 MiB limit. Range reads select up to 1 MiB; streaming hashes and targeted patches operate on files up to 64 MiB. These limits do not bound model output, total history, checkpoint size or elapsed I/O time.
+| Area | Guide |
+| --- | --- |
+| Studio and providers | [Workspace](docs/studio.md) ? [Providers](docs/studio-providers.md) |
+| App integrations | [MCP and desktop routes](docs/app-connections.md) |
+| Recovery | [Recovery service](docs/recovery.md) |
+| Architecture and next steps | [Autonomy roadmap](docs/autonomy-roadmap.md) |
+| Core runtime | [Harness overview](docs/harness-overview.md) |
+
+The Rust workspace includes the core runtime, providers, browser control, benchmarks, memory, experiments, CLI, and Studio. The model proposes actions; the host owns execution, permissions, persistence, and independent checks.

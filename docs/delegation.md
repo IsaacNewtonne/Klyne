@@ -60,3 +60,12 @@ budget pooling remain **PLANNED**.
   the oracle pattern from the benchmark instead.
 - Artifact collection is non-recursive and UTF-8 lossy; binary artifacts
   are out of scope.
+
+## Audit hardening (2026-09-09)
+
+Child IDs must contain 1–128 ASCII letters, digits, hyphens or underscores.
+The parent workspace argument must match the policy workspace. Both checks
+run before filesystem side effects. Read-only children reject all shell grants:
+argv permission alone cannot establish that a program will not write.
+Artifact collection bounds the actual read as well as checking metadata.
+See [audit findings and follow-up work](audit-2026-09-09.md).

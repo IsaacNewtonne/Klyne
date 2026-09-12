@@ -8,4 +8,5 @@ members = [
   "crates/harness-experiment",
   "crates/harness-browser",
   "apps/cli",
+  "apps/studio",
 ]

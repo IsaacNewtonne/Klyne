@@ -1,7 +1,7 @@
 # Controlled self-improvement
 
 Status: **IMPLEMENTED** as an experiment harness with isolation, gates, and
-rollback. Nothing here invents changes: a caller (script, and eventually a
+rollback. Nothing here invents changes: a caller (script, or a
 model) proposes exactly one mutation, and the harness decides its fate.
 
 ## What changed
@@ -14,7 +14,7 @@ model) proposes exactly one mutation, and the harness decides its fate.
   4. Mutate: apply the single candidate change in the worktree only.
   5. Candidate: run the same suite in the worktree (300 s backstop, kill
      on timeout, capped output, libtest summary parsing).
-  6. Gate: more failures than baseline → **rollback** (force-remove the
+  6. Gate: failed/empty baseline or candidate, or fewer passing tests → **rollback** (force-remove the
      worktree, delete the branch); otherwise **promote** (commit on the
      branch with a harness identity via `-c` flags, remove the worktree,
      keep the branch for human merge).
@@ -48,3 +48,26 @@ model) proposes exactly one mutation, and the harness decides its fate.
 - Suite runs are plain subprocesses with a kill timeout, not supervised
   tool calls: they inherit the ambient environment, so hermeticity depends
   on the suite itself (fixtures pin their toolchain for this reason).
+
+## Studio integration — 2026-09-10
+
+Studio workers can propose 1–16 implementation and test files with self_improve
+under the Terminal grant. Both suites must be nonempty and passing, and the
+candidate must retain the baseline pass count. Unparseable output fails closed.
+The cancellable runner checks Stop during suite supervision, stops the Windows
+process tree, skips further candidate work and records rollback. Failed baselines
+skip mutation too. See [local apps and capability improvement](local-apps.md).
+
+## Studio snapshots and runtime activation — 2026-09-11
+
+The core experiment API still requires a clean Git tree. Studio now snapshots
+tracked and nonignored untracked files from dirty projects into an isolated Git
+repository before invoking that API. In-progress edits stay in the original;
+reports identify both repositories. A passing branch belongs to the snapshot
+repository when this path is used.
+
+Versioned skills and executable tools activate in Studio's persistent capability
+registry. Compiled runtime changes can use `runtime_stage` under the supervisor,
+which checks the digest/protocol and new process health and rolls back failed
+startup. This does not establish semantic correctness or undo external side effects.
+See the [upgrade guide](harness-upgrade-2026-09-11.md).

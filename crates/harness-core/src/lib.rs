@@ -1,5 +1,9 @@
 pub mod agent;
+pub mod action_journal;
+pub mod operation_check;
+pub mod task_contract;
 pub mod delegation;
+pub mod delegation_budget;
 pub mod event_store;
 pub mod inspect;
 pub mod large_files;
@@ -22,3 +26,4 @@ pub use tools::{
     WorkspaceShellTool,
 };
 pub use types::{Action, Event, ModelUsage, Objective, Observation, StepDecision, Verification};
+pub mod process_job;

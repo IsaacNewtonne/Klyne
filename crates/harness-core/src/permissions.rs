@@ -368,9 +368,8 @@ impl PermissionPolicy {
                     return PermissionDecision::Deny("shell.execute capability is disabled".into());
                 }
                 if program.is_empty()
-                    || program.contains('/')
-                    || program.contains('\\')
-                    || program.contains(':')
+                    || ((program.contains('/') || program.contains('\\') || program.contains(':'))
+                        && !Path::new(program).is_absolute())
                     || !self.shell_allowlist.contains(program)
                 {
                     return PermissionDecision::Deny(format!(

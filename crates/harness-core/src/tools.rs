@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +248,7 @@ impl WorkspaceShellTool {
 fn precise_bounded_read(
     mut pipe: impl Read + Send + 'static,
     max: usize,
+    overflow: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
     std::thread::spawn(move || {
         let mut buf = Vec::with_capacity(max.min(8192));
@@ -253,7 +258,8 @@ fn precise_bounded_read(
                 Ok(0) => return (buf, false),
                 Ok(n) => {
                     if buf.len() + n > max {
-                        // Drain the rest so the child never blocks on a full pipe.
+                        overflow.store(true, Ordering::SeqCst);
+                        // Drain until the supervisor terminates the owned process.
                         let mut discard = [0u8; 8192];
                         while pipe.read(&mut discard).map(|m| m > 0).unwrap_or(false) {}
                         return (buf, true);
@@ -344,6 +350,16 @@ impl Tool for WorkspaceShellTool {
     }
 
     fn execute(&self, action: &Action, policy: &PermissionPolicy) -> Observation {
+        self.execute_cancellable(action, policy, &AtomicBool::new(false))
+    }
+}
+impl WorkspaceShellTool {
+    pub fn execute_cancellable(
+        &self,
+        action: &Action,
+        policy: &PermissionPolicy,
+        stop: &AtomicBool,
+    ) -> Observation {
         if let PermissionDecision::Deny(reason) | PermissionDecision::Ask(reason) =
             policy.check(action)
         {
@@ -392,81 +408,83 @@ impl Tool for WorkspaceShellTool {
                 };
             }
         };
+        let job = match crate::process_job::ProcessJob::attach(&child) {
+            Ok(job) => job,
+            Err(e) => {
+                terminate_child(&mut child);
+                return Observation {
+                    ok: false,
+                    summary: "Could not own process descendants; outcome may be uncertain".into(),
+                    data: e.to_string(),
+                };
+            }
+        };
         let max = self.limits.max_output_bytes;
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let stdout_handle = precise_bounded_read(stdout, max);
-        let stderr_handle = precise_bounded_read(stderr, max);
+        let overflow = Arc::new(AtomicBool::new(false));
+        let stdout_handle = precise_bounded_read(stdout, max, overflow.clone());
+        let stderr_handle = precise_bounded_read(stderr, max, overflow.clone());
         let start = Instant::now();
         loop {
+            if stop.load(Ordering::SeqCst)
+                || overflow.load(Ordering::SeqCst)
+                || start.elapsed() >= self.limits.timeout
+            {
+                job.terminate();
+                terminate_child(&mut child);
+                let _ = child.wait();
+                // A descendant can retain a pipe after its parent exits. Never join
+                // an unfinished reader: the deadline includes output collection.
+                let out = if stdout_handle.is_finished() {
+                    stdout_handle.join().unwrap_or_default().0
+                } else {
+                    Vec::new()
+                };
+                let err = if stderr_handle.is_finished() {
+                    stderr_handle.join().unwrap_or_default().0
+                } else {
+                    Vec::new()
+                };
+                let reason = if stop.load(Ordering::SeqCst) {
+                    "cancelled"
+                } else if overflow.load(Ordering::SeqCst) {
+                    "output exceeded per-stream byte limit"
+                } else {
+                    "timed out"
+                };
+                return Observation {
+                    ok: false,
+                    summary: format!(
+                        "{program} {reason}; process stopped; external outcome may be uncertain"
+                    ),
+                    data: format!("{}{}", bounded_text(&out, max), bounded_text(&err, max)),
+                };
+            }
             match child.try_wait() {
-                Ok(Some(status)) => {
+                Ok(Some(status)) if stdout_handle.is_finished() && stderr_handle.is_finished() => {
                     let (out, out_exceeded) = stdout_handle.join().unwrap_or_default();
                     let (err, err_exceeded) = stderr_handle.join().unwrap_or_default();
-                    if out_exceeded || err_exceeded {
-                        let mut data = bounded_text(&out, max);
-                        if !err.is_empty() {
-                            data.push_str("\n[stderr]\n");
-                            data.push_str(&bounded_text(&err, max));
-                        }
-                        data.push_str("\n[output exceeded per-stream byte limit]\n");
-                        return Observation {
-                            ok: false,
-                            summary: format!(
-                                "{program} output exceeded {max} bytes per stream and was terminated"
-                            ),
-                            data,
-                        };
-                    }
                     let mut data = String::from_utf8_lossy(&out).into_owned();
                     if !err.is_empty() {
                         data.push_str("\n[stderr]\n");
                         data.push_str(&String::from_utf8_lossy(&err));
                     }
                     return Observation {
-                        ok: status.success(),
+                        ok: status.success() && !out_exceeded && !err_exceeded,
                         summary: format!("{program} exited with {status}"),
                         data,
                     };
                 }
-                Ok(None) => {
-                    if start.elapsed() >= self.limits.timeout {
-                        let secs = self.limits.timeout.as_secs();
-                        terminate_child(&mut child);
-                        let _ = child.wait();
-                        let (out, _) = stdout_handle.join().unwrap_or_default();
-                        let (err, _) = stderr_handle.join().unwrap_or_default();
-                        let mut data = String::from_utf8_lossy(&out).into_owned();
-                        // Bound partial evidence even on timeout.
-                        if data.len() > max {
-                            data.truncate(max);
-                            data.push_str("\n[truncated]\n");
-                        }
-                        if !err.is_empty() {
-                            data.push_str("\n[stderr]\n");
-                            let mut e = String::from_utf8_lossy(&err).into_owned();
-                            if e.len() > max {
-                                e.truncate(max);
-                                e.push_str("\n[truncated]\n");
-                            }
-                            data.push_str(&e);
-                        }
-                        return Observation {
-                            ok: false,
-                            summary: format!(
-                                "{program} timed out after {secs}s and was terminated"
-                            ),
-                            data,
-                        };
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+                Ok(_) => std::thread::sleep(Duration::from_millis(10)),
                 Err(e) => {
+                    job.terminate();
                     terminate_child(&mut child);
-                    let _ = child.wait();
                     return Observation {
                         ok: false,
-                        summary: format!("failed to supervise {program}"),
+                        summary: format!(
+                            "failed to supervise {program}; external outcome may be uncertain"
+                        ),
                         data: e.to_string(),
                     };
                 }

@@ -63,6 +63,35 @@ pub struct ChildReport {
     pub workspace: PathBuf,
 }
 
+/// Concurrent callers should use a parent-owned durable pool instead of passing
+/// independently sampled budget counters to `spawn_child`.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_child_budgeted<M: Model>(
+    pool: &crate::delegation_budget::DelegationBudget,
+    parent_workspace: &Path,
+    parent_policy: &PermissionPolicy,
+    child_id: &str,
+    objective: Objective,
+    criterion: Option<SuccessCriterion>,
+    model: M,
+    grant: ChildGrant,
+) -> io::Result<ChildReport> {
+    let reservation = pool.reserve(child_id, grant.tool_call_limit)?;
+    let report = spawn_child(
+        parent_workspace,
+        parent_policy,
+        0,
+        grant.tool_call_limit,
+        child_id,
+        objective,
+        criterion,
+        model,
+        grant,
+    )?;
+    reservation.settle(report.tool_calls_used)?;
+    Ok(report)
+}
+
 /// Spawn a fenced child run and drive it to a terminal outcome.
 /// Fails closed before spawning when the grant exceeds the parent's
 /// remaining budget or escapes its authority.
@@ -78,6 +107,26 @@ pub fn spawn_child<M: Model>(
     model: M,
     grant: ChildGrant,
 ) -> io::Result<ChildReport> {
+    if child_id.is_empty()
+        || child_id.len() > 128
+        || !child_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(io::Error::other(
+            "child ID must contain 1-128 ASCII letters, digits, hyphens or underscores",
+        ));
+    }
+    if parent_workspace != parent_policy.workspace_root() {
+        return Err(io::Error::other(
+            "parent workspace must match policy workspace",
+        ));
+    }
+    if grant.read_only && !grant.shell_grants.is_empty() {
+        return Err(io::Error::other(
+            "read-only children cannot receive shell grants",
+        ));
+    }
     let remaining = parent_budget_limit.saturating_sub(parent_budget_used);
     if grant.tool_call_limit > remaining {
         return Err(io::Error::other(format!(
@@ -160,7 +209,16 @@ pub fn collect_artifacts(
                 "artifact '{name}' exceeds {max_bytes_per_file} bytes"
             )));
         }
-        let bytes = std::fs::read(entry.path())?;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(entry.path())?
+            .take(max_bytes_per_file.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_bytes_per_file {
+            return Err(io::Error::other(format!(
+                "artifact '{name}' exceeds {max_bytes_per_file} bytes"
+            )));
+        }
         artifacts.push((name, String::from_utf8_lossy(&bytes).into_owned()));
     }
     artifacts.sort_by(|left, right| left.0.cmp(&right.0));

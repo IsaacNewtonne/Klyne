@@ -493,3 +493,82 @@ fn delegation_composes_with_parent_runtime_checkpoints() {
             .any(|(name, data)| name == "delegated.txt" && data == "proof")
     );
 }
+
+#[test]
+fn unsafe_child_ids_are_rejected_before_side_effects() {
+    let w = Workspace::new();
+    let parent = parent_policy(&w.0);
+    for id in [
+        "",
+        "../escape",
+        "nested/id",
+        "nested\\id",
+        "C:\\escape",
+        "id:stream",
+        ".",
+        "..",
+        &"x".repeat(129),
+    ] {
+        let error = spawn_child(
+            &w.0,
+            &parent,
+            0,
+            32,
+            id,
+            Objective::new("create file ok.txt with content hi"),
+            None,
+            HeuristicModel,
+            ChildGrant::scoped("child", 32),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("child ID"), "{id}: {error}");
+    }
+    assert!(!w.0.join("child").exists());
+    assert!(!w.0.join(".harness").exists());
+}
+
+#[test]
+fn read_only_child_refuses_even_authorized_shell_grants() {
+    let w = Workspace::new();
+    let mut parent = parent_policy(&w.0);
+    parent.allow_shell_program("cargo");
+    let mut grant = ChildGrant::scoped("child", 32);
+    grant.read_only = true;
+    grant.shell_grants.push(("cargo".into(), vec![]));
+    let error = spawn_child(
+        &w.0,
+        &parent,
+        0,
+        32,
+        "verifier",
+        Objective::new("unused"),
+        None,
+        HeuristicModel,
+        grant,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("read-only"));
+    assert!(!w.0.join("child").exists());
+}
+
+#[test]
+fn database_root_must_match_parent_authority() {
+    let w = Workspace::new();
+    let other = Workspace::new();
+    let parent = parent_policy(&w.0);
+    let error = spawn_child(
+        &other.0,
+        &parent,
+        0,
+        32,
+        "worker",
+        Objective::new("unused"),
+        None,
+        HeuristicModel,
+        ChildGrant::scoped("child", 32),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("parent workspace"));
+    assert!(!w.0.join("child").exists());
+    assert!(!other.0.join(".harness").exists());
+}

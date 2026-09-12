@@ -20,6 +20,10 @@ impl<M: Model + ?Sized> Model for Box<M> {
     fn decide(&mut self, objective: &Objective, history: &[(Action, Observation)]) -> StepDecision {
         (**self).decide(objective, history)
     }
+
+    fn usage(&self) -> ModelUsage {
+        (**self).usage()
+    }
 }
 
 /// A dependency-free model used only for the first executable vertical slice.

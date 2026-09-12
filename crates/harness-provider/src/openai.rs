@@ -59,14 +59,14 @@ impl ProviderConfig {
     }
 }
 
-const SYSTEM_PROMPT: &str = r#"You are the cognition module of a file-scoped agent runtime. You propose exactly one decision per turn as a JSON object with one of these shapes:
+pub const SYSTEM_PROMPT: &str = r#"You are the cognition module of a file-scoped agent runtime. You propose exactly one decision per turn as a JSON object with one of these shapes:
 {"decision":"act","action":{...}}
 {"decision":"verify","action":{...}}
 {"decision":"complete","summary":"..."}
 {"decision":"fail","reason":"..."}
 The action object has {"tool":<name>, ...fields} where tool is one of:
 write_file {path, contents}, read_file {path}, read_range {path, offset, length}, hash_file {path}, patch_file {path, offset, expected, replacement, expected_sha256}, search_file {path, needle, max_matches}.
-Paths are workspace-relative. Offsets and lengths are byte counts. patch_file requires the current whole-file SHA-256 hex digest. Never propose anything else; the runtime validates, authorizes, and executes."#;
+Paths are workspace-relative: use the exact relative path from the objective (for example hello.txt), never /workspace/hello.txt or any absolute path. After writing, request verify with read_file and the same relative path, then complete after its observation matches. Offsets and lengths are byte counts. patch_file requires the current whole-file SHA-256 hex digest. Never propose anything else; the runtime validates, authorizes, and executes."#;
 
 /// Adapter state. Usage accumulates across `decide` calls; read transport
 /// telemetry with [`OpenAiCompat::telemetry`] and metered spend through the
@@ -278,7 +278,7 @@ fn bounded_text(value: String, field: &str) -> Result<String, String> {
 
 /// Map a validated decision object to a runtime step. Anything outside the
 /// closed schema is a failure, never an executed action.
-fn map_decision(decision: &serde_json::Value) -> StepDecision {
+pub fn map_decision(decision: &serde_json::Value) -> StepDecision {
     let kind = decision
         .get("decision")
         .and_then(serde_json::Value::as_str)

@@ -1,9 +1,6 @@
 //! Minimal synchronous WebSocket client for CDP, dependency-free.
 //!
-//! Client role only, loopback only: masked text sends, fragmented receives,
-//! ping/pong, and close handshake. The `Sec-WebSocket-Accept` hash is not
-//! re-verified (that needs SHA-1); the connection is local either way, and
-//! every subsequent message is JSON-validated by the CDP layer.
+//! Masked client frames with bounded messages and a verified upgrade handshake.
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -96,6 +93,9 @@ fn read_http_response(stream: &mut TcpStream, deadline: Instant) -> io::Result<S
             Ok(0) => return Err(io::Error::other("handshake closed early")),
             Ok(_) => {
                 raw.push(byte[0]);
+                if raw.len() > 16 * 1024 {
+                    return Err(io::Error::other("handshake headers exceed size bound"));
+                }
                 if raw.ends_with(b"\r\n\r\n") {
                     return String::from_utf8(raw).map_err(|_| {
                         io::Error::new(io::ErrorKind::InvalidData, "handshake not UTF-8")
@@ -127,10 +127,12 @@ impl WsClient {
         )?;
         stream.set_nodelay(true)?;
         let mut client = Self { stream };
+        let key = random_key();
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n\r\n",
-            random_key()
+            key
         );
+        client.stream.set_write_timeout(Some(timeout))?;
         client.stream.write_all(request.as_bytes())?;
         let response = read_http_response(&mut client.stream, deadline)?;
         if !response.starts_with("HTTP/1.1 101") {
@@ -138,6 +140,26 @@ impl WsClient {
                 "websocket upgrade refused: {}",
                 response.lines().next().unwrap_or("")
             )));
+        }
+        use sha1::{Digest, Sha1};
+        let expected = base64_encode(&Sha1::digest(format!(
+            "{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        )));
+        let header = |name: &str| {
+            response
+                .lines()
+                .filter_map(|l| l.split_once(':'))
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.trim())
+        };
+        if header("sec-websocket-accept") != Some(expected.as_str())
+            || !header("upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+            || !header("connection").is_some_and(|v| {
+                v.split(',')
+                    .any(|v| v.trim().eq_ignore_ascii_case("upgrade"))
+            })
+        {
+            return Err(io::Error::other("Invalid WebSocket upgrade handshake"));
         }
         Ok(client)
     }
@@ -232,6 +254,11 @@ impl WsClient {
             if length > max_bytes as u64 {
                 return Err(io::Error::other("message exceeds size bound"));
             }
+            if matches!(opcode, 0x0..=0x2)
+                && length > max_bytes.saturating_sub(message.len()) as u64
+            {
+                return Err(io::Error::other("message exceeds size bound"));
+            }
             let mut payload = vec![0u8; length as usize];
             self.read_exact_into(&mut payload, deadline)?;
             if let Some(key) = mask {
@@ -271,5 +298,54 @@ impl WsClient {
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "message not UTF-8"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn pair() -> (WsClient, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        (WsClient { stream }, peer)
+    }
+
+    #[test]
+    fn fragmented_message_rejected_before_overflow_payload_is_read() {
+        let (mut client, mut peer) = pair();
+        // No final fragment or second payload: reject from its length alone.
+        peer.write_all(&[0x01, 3, b'a', b'b', b'c', 0x00, 3])
+            .unwrap();
+        let error = client
+            .recv_text(Instant::now() + Duration::from_secs(2), 5)
+            .unwrap_err();
+        assert!(error.to_string().contains("size bound"), "{error}");
+    }
+
+    #[test]
+    fn fragmented_message_at_limit_survives_interleaved_ping() {
+        let (mut client, mut peer) = pair();
+        peer.write_all(&[
+            0x01, 2, b'a', b'b', 0x89, 1, b'?', 0x80, 3, b'c', b'd', b'e',
+        ])
+        .unwrap();
+        assert_eq!(
+            client
+                .recv_text(Instant::now() + Duration::from_secs(2), 5)
+                .unwrap(),
+            "abcde"
+        );
+    }
+
+    #[test]
+    fn upgrade_headers_are_bounded_without_waiting_for_terminator() {
+        let (mut client, mut peer) = pair();
+        peer.write_all(&vec![b'x'; 16 * 1024 + 1]).unwrap();
+        let error = read_http_response(&mut client.stream, Instant::now() + Duration::from_secs(2))
+            .unwrap_err();
+        assert!(error.to_string().contains("size bound"), "{error}");
     }
 }

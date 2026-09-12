@@ -3,7 +3,7 @@
 
 use crate::ws::WsClient;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -18,7 +18,11 @@ pub(crate) fn http_request(
     let socket: std::net::SocketAddr = addr
         .parse()
         .map_err(|e| io::Error::other(format!("bad debugger address: {e}")))?;
+    if !socket.ip().is_loopback() {
+        return Err(io::Error::other("Debugger must be loopback"));
+    }
     let mut stream = TcpStream::connect_timeout(&socket, timeout)?;
+    stream.set_write_timeout(Some(timeout))?;
     stream.set_read_timeout(Some(timeout))?;
     // Chrome 150+ refuses HTTP/1.0 outright; speak 1.1 and frame the
     // body by Content-Length instead of waiting for close.
@@ -30,12 +34,20 @@ pub(crate) fn http_request(
         if Instant::now() > deadline {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "http timed out"));
         }
+        stream.set_read_timeout(Some(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1)),
+        ))?;
         match stream.read(&mut chunk) {
             Ok(0) => {
                 return Err(io::Error::other("http closed before headers"));
             }
             Ok(count) => {
                 raw.extend_from_slice(&chunk[..count]);
+                if raw.len() > 16 * 1024 && !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                    return Err(io::Error::other("Debugger headers exceed 16 KiB"));
+                }
                 if let Some(position) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
                     break position + 4;
                 }
@@ -43,6 +55,9 @@ pub(crate) fn http_request(
             Err(e) => return Err(e),
         }
     };
+    if header_end > 16 * 1024 {
+        return Err(io::Error::other("Debugger headers exceed 16 KiB"));
+    }
     let head = String::from_utf8_lossy(&raw[..header_end]).into_owned();
     if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
         return Err(io::Error::other(format!(
@@ -58,12 +73,20 @@ pub(crate) fn http_request(
                 .eq_ignore_ascii_case("content-length")
                 .then(|| value.trim().parse().ok())?
         })
-        .unwrap_or(0);
+        .ok_or_else(|| io::Error::other("Missing or invalid Content-Length"))?;
+    if length > 8 * 1024 * 1024 {
+        return Err(io::Error::other("Debugger body exceeds 8 MiB"));
+    }
     let mut body = raw[header_end..].to_vec();
     while body.len() < length {
         if Instant::now() > deadline {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "http timed out"));
         }
+        stream.set_read_timeout(Some(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1)),
+        ))?;
         match stream.read(&mut chunk) {
             Ok(0) => return Err(io::Error::other("http closed mid-body")),
             Ok(count) => body.extend_from_slice(&chunk[..count]),
@@ -110,6 +133,12 @@ pub(crate) fn split_ws_url(url: &str) -> io::Result<(String, String, String)> {
         Some(index) => (rest[..index].to_string(), rest[index..].to_string()),
         None => (rest.to_string(), "/".to_string()),
     };
+    let socket: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|_| io::Error::other("Invalid debugger address"))?;
+    if !socket.ip().is_loopback() || path.contains(['\r', '\n']) {
+        return Err(io::Error::other("Debugger must use a loopback address"));
+    }
     let host = addr.clone();
     Ok((addr, path, host))
 }
@@ -117,7 +146,7 @@ pub(crate) fn split_ws_url(url: &str) -> io::Result<(String, String, String)> {
 pub(crate) struct CdpSession {
     ws: WsClient,
     next_id: u64,
-    parked: HashMap<u64, Value>,
+    events: VecDeque<Value>,
     max_message_bytes: usize,
 }
 
@@ -131,7 +160,7 @@ impl CdpSession {
         Ok(Self {
             ws: WsClient::connect(&addr, &path, &host, timeout)?,
             next_id: 1,
-            parked: HashMap::new(),
+            events: VecDeque::new(),
             max_message_bytes,
         })
     }
@@ -145,9 +174,6 @@ impl CdpSession {
     ) -> Result<Value, String> {
         let id = self.next_id;
         self.next_id += 1;
-        if let Some(parked) = self.parked.remove(&id) {
-            return Self::unwrap_response(id, &parked);
-        }
         let deadline = Instant::now() + timeout;
         let request = serde_json::json!({"id": id, "method": method, "params": params}).to_string();
         self.ws.send_text(&request).map_err(|e| e.to_string())?;
@@ -164,8 +190,14 @@ impl CdpSession {
             if message.get("id").and_then(Value::as_u64) == Some(id) {
                 return Self::unwrap_response(id, &message);
             }
-            if let Some(other) = message.get("id").and_then(Value::as_u64) {
-                self.parked.insert(other, message);
+            if message.get("id").is_some() {
+                return Err("Unexpected CDP response ID".into());
+            }
+            if message.get("method").is_some() {
+                if self.events.len() >= 256 {
+                    self.events.pop_front();
+                }
+                self.events.push_back(message);
             }
             // Domain events without interest here are dropped by the caller
             // pattern below; responses addressed to others are parked.
@@ -184,6 +216,9 @@ impl CdpSession {
 
     /// Wait for a domain event such as `Page.loadEventFired`.
     pub(crate) fn wait_event(&mut self, method: &str, timeout: Duration) -> Result<Value, String> {
+        if let Some(index) = self.events.iter().position(|e| e["method"] == method) {
+            return Ok(self.events.remove(index).unwrap()["params"].clone());
+        }
         let deadline = Instant::now() + timeout;
         loop {
             if Instant::now() > deadline {
@@ -198,8 +233,14 @@ impl CdpSession {
             if message.get("method").and_then(Value::as_str) == Some(method) {
                 return Ok(message.get("params").cloned().unwrap_or(Value::Null));
             }
-            if let Some(other) = message.get("id").and_then(Value::as_u64) {
-                self.parked.insert(other, message);
+            if message.get("id").is_some() {
+                return Err("Unexpected CDP response ID".into());
+            }
+            if message.get("method").is_some() {
+                if self.events.len() >= 256 {
+                    self.events.pop_front();
+                }
+                self.events.push_back(message);
             }
         }
     }

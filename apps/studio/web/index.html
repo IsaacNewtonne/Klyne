@@ -1,0 +1,63 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0c0c0d">
+<title>Klyne Studio</title>
+<link rel="stylesheet" href="/style.css">
+<script defer src="/app.js"></script>
+</head>
+<body>
+<header class="topbar">
+<a class="brand" href="/" aria-label="Klyne Studio home"><span class="brand-mark" aria-hidden="true">k</span>Klyne<span class="brand-label">STUDIO</span></a>
+<div class="header-actions"><p id="connection" role="status">Connecting…</p><button id="refresh" class="quiet" type="button">Refresh</button><button id="new-run" type="button">＋ New run</button></div>
+</header>
+<main>
+<div class="intro"><div><p class="eyebrow">YOUR LOCAL WORKSPACE</p><h1>A little intent.<br><span>Something real.</span></h1><p class="intro-copy">Create a file. Watch it take shape. See the proof.</p></div><div class="kinetic" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="seed"><svg width="1em" height="1em" viewBox="0 0 60 60" style="vertical-align:-0.12em"><rect x="2" y="2" width="56" height="56" rx="17" fill="#382318"/><text x="28.5" y="42" text-anchor="middle" font-family="Georgia,'Times New Roman',serif" font-style="italic" font-size="34" fill="#ff793e">k</text><circle cx="45" cy="15" r="3.4" fill="#ffab70"/></svg></div><span class="orbit-dot"></span><span class="art-caption">SMALL STEPS. REAL PROGRESS.</span></div></div>
+<div class="workspace-grid">
+<section class="composer" aria-labelledby="new-heading">
+<div class="section-heading"><h2 id="new-heading">Make something</h2><span class="section-index">01 / CREATE</span></div>
+<form id="run-form">
+<div class="starter-row" aria-label="Starter examples"><span>Start with an idea</span><button type="button" data-starter="note">A quick note</button><button type="button" data-starter="checklist">A checklist</button></div>
+<div class="provider-picker">
+<label for="provider-kind">Run with</label>
+<select id="provider-kind"><option value="demo">Built-in file agent</option><option value="ollama">Ollama · local</option><option value="opencode">OpenCode · local server</option><option value="codex">Codex · CLI account</option></select>
+<details id="provider-settings" hidden><summary>Connection <span id="provider-summary">Configure</span></summary>
+<div id="endpoint-field"><label for="provider-endpoint">Local server address</label><input id="provider-endpoint" type="url" placeholder="http://127.0.0.1:11434" autocomplete="off"></div>
+<label for="provider-model">Model <span id="model-optional"></span></label><input id="provider-model" list="provider-models" placeholder="Check connection to find models" maxlength="240" autocomplete="off"><datalist id="provider-models"></datalist>
+<div class="provider-check-row"><button id="check-provider" type="button">Check connection</button><span id="provider-status" role="status">Not checked</span></div>
+<p id="provider-help"></p>
+</details>
+</div>
+<label for="file-path">Name your file</label><input id="file-path" value="hello.txt" required maxlength="200" autocomplete="off" placeholder="notes/hello.txt" aria-describedby="path-help"><p id="path-help" class="field-help">Use a name like hello.txt, or notes/hello.txt for a folder.</p>
+<label for="file-contents">What goes inside?</label><textarea id="file-contents" rows="5" required maxlength="6000" placeholder="What should the file contain?">Hello from Klyne.</textarea>
+<details class="settings"><summary>Run settings <span>Tool-call budget</span></summary><label for="budget">Maximum tool calls</label><input id="budget" type="number" min="0" max="128" value="32" required></details>
+<p id="form-error" role="alert"></p>
+<div class="launch-row"><span class="local-note"><i></i>Files saved in this workspace.</span><button id="launch-button" type="submit">Create file <span aria-hidden="true">↗</span></button></div>
+</form>
+</section>
+<section class="activity" aria-labelledby="detail-heading">
+<div class="section-heading"><h2 id="detail-heading">Your result</h2><span class="section-index">02 / OBSERVE</span></div>
+<p id="result-loading" role="status" hidden>Opening your run…</p>
+<div id="empty-state"><div class="empty-symbol" aria-hidden="true"><svg width="1em" height="1em" viewBox="0 0 60 60" style="vertical-align:-0.12em"><rect x="2" y="2" width="56" height="56" rx="17" fill="#382318"/><text x="28.5" y="42" text-anchor="middle" font-family="Georgia,'Times New Roman',serif" font-style="italic" font-size="34" fill="#ff793e">k</text><circle cx="45" cy="15" r="3.4" fill="#ffab70"/></svg></div><h3>Ready when you are.</h3><p>Your next small creation starts on the left.<br>Its progress and proof will appear here.</p><span class="empty-caption">AN IDEA → A FILE → VERIFIED</span></div>
+<div id="run-content" hidden>
+<div class="run-heading"><strong id="run-title"></strong><span id="status-badge" role="status"></span></div>
+<p id="status-description" class="status-description"></p>
+<details class="run-metadata"><summary>Run details</summary><p id="run-id" class="run-id"></p>
+<p id="run-provider" class="run-id"></p>
+<div class="budget-line"><span>Tool calls</span><span><b id="tool-used">0</b><span id="tool-limit"> / 32</span></span></div><progress id="budget-progress" max="32" value="0" aria-label="Tool calls used"></progress>
+</details>
+<div class="run-actions"><button class="text-button" id="stop" type="button" hidden>Stop</button><button class="text-button" id="resume" type="button" hidden>Resume</button><button class="text-button" id="export" type="button">Export evidence ↗</button></div>
+<p id="run-error" role="alert" hidden></p>
+<h3 class="evidence-heading">The proof <span>TOOL OBSERVATIONS</span></h3><div id="evidence-list"></div>
+<details class="events-panel"><summary>Event log <span>Look a little closer ↗</span></summary><label for="event-search" class="sr-only">Filter events</label><input id="event-search" placeholder="Filter events…" aria-label="Filter events"><div id="event-ledger"></div></details>
+</div>
+</section>
+<section class="history" aria-labelledby="runs-heading"><div class="history-heading"><h2 id="runs-heading">Your runs <span id="run-count">0</span></h2><label class="sr-only" for="run-search">Find a run</label><input id="run-search" placeholder="Find a run…" aria-label="Filter runs"></div><div id="run-list"></div></section>
+</div>
+<footer><span>Built on small, verifiable steps.</span><span>KLYNE / LOCAL FIRST</span></footer>
+</main>
+<p id="toast" role="status" hidden></p>
+</body>
+</html>

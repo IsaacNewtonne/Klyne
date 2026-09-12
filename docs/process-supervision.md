@@ -11,8 +11,8 @@ Status: **IMPLEMENTED** as an authorized-but-not-isolated supervisor. OS isolati
   Working directory is fixed to the workspace root; there is no caller-controlled cwd.
 - Explicit grants: the shell capability defaults to disabled. `allow_shell_program()`
   grants one executable with unrestricted argv; `allow_shell_with_arg_prefix()` restricts
-  argv to registered prefixes. Program names containing `/`, `\`, or `:` are denied,
-  as are unknown executables.
+  argv to registered prefixes. Explicitly granted absolute executable paths are
+  accepted; relative path forms and unknown executables are denied.
 - Environment is cleared (`env_clear`) and only explicit `allow_env()` grants are
   forwarded, plus non-secret OS-minimum entries required for process creation and
   executable lookup (`PATH` everywhere; `SYSTEMROOT`/`WINDIR`/`COMSPEC`/`PATHEXT` on
@@ -21,7 +21,9 @@ Status: **IMPLEMENTED** as an authorized-but-not-isolated supervisor. OS isolati
   (`ProcessLimits`, configurable per registry via `milestone_with_shell_limits`).
   Timeout kills and reaps the child; excess output fails the call with bounded evidence.
   Partial output on timeout is truncated to the per-stream cap.
-- Windows-first tree cleanup: on timeout/supervision failure the runtime runs
+- Windows Job Objects own descendants and terminate them on timeout, cancellation
+  or owner exit. Output-reader supervision continues after the direct child exits,
+  so inherited pipes cannot bypass the deadline. The cleanup fallback runs
   `taskkill /PID <pid> /T /F` before `kill()`/`wait()`, covered by a
   Windows kill test. Unix children start as process-group leaders
   (`setsid` via `pre_exec`, `libc`) and timeouts send group SIGKILL with a
@@ -54,11 +56,13 @@ Full suite after this change: 47 passing (38 prior + 9 new). `cargo fmt --check`
 
 ## Limits (honest)
 
-- Authorization is not isolation: no job objects, cgroups, namespaces, or sandbox.
+- Authorization is not isolation: Job Objects manage process lifetime, but no
+  cgroups, namespaces, or OS sandbox are supplied.
   Concurrent hostile workspace mutation, hard links, and device/DLL-planting style
   attacks are outside the threat model. Use trusted isolated workspaces.
-- Unix tree cleanup is group SIGKILL but host-unverified (see above). Windows relies on `taskkill /T`,
-  tested for prompt return, not a proven descendant census.
+- Unix tree cleanup is group SIGKILL but host-unverified (see above). Windows uses
+  Job Objects with `taskkill /T` fallback. A short spawn-to-job-assignment race
+  remains; tests do not establish an adversarial descendant-containment guarantee.
 - No stdin interaction, no I/O deadlines below the wall-clock timeout, no CPU/memory caps.
 - Shell actions still cannot be reconciled after interruption (refused, as before).
 - The deterministic CLI model still only understands file-creation objectives; shell

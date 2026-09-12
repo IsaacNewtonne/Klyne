@@ -5,6 +5,65 @@ use std::time::Duration;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+#[ignore = "subprocess fixture"]
+fn inherited_pipe_child() {
+    std::thread::sleep(Duration::from_secs(4));
+}
+
+#[test]
+#[ignore = "subprocess fixture"]
+fn inherited_pipe_parent() {
+    let _child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "inherited_pipe_child",
+            "--nocapture",
+        ])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(60));
+    std::process::exit(0);
+}
+
+#[test]
+fn deadline_covers_pipes_retained_after_parent_exit() {
+    use harness_core::{Tool, WorkspaceShellTool};
+    let root = Workspace::new();
+    let mut policy = root.policy();
+    let program = std::env::current_exe()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    policy.allow_shell_program(&program);
+    let tool = WorkspaceShellTool::new(ProcessLimits {
+        timeout: Duration::from_millis(300),
+        max_output_bytes: 65536,
+    });
+    let start = std::time::Instant::now();
+    let result = tool.execute(
+        &Action::RunShell {
+            program,
+            args: vec![
+                "--ignored".into(),
+                "--exact".into(),
+                "inherited_pipe_parent".into(),
+                "--nocapture".into(),
+            ],
+        },
+        &policy,
+    );
+    assert!(!result.ok, "{}", result.summary);
+    assert!(
+        result.summary.contains("timed out"),
+        "{} {}",
+        result.summary,
+        result.data
+    );
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
 struct Workspace(std::path::PathBuf);
 impl Workspace {
     fn new() -> Self {

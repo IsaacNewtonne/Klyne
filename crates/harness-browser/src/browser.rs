@@ -150,6 +150,7 @@ impl ControlledBrowser {
         if let Err(e) = wait_debugger(&debugger_addr, limits.launch_timeout) {
             let mut child = child;
             terminate_tree(&mut child);
+            let _ = child.wait();
             return Err(e);
         }
         Ok((child, debugger_addr))
@@ -169,8 +170,23 @@ impl ControlledBrowser {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&profile_dir)?;
-        let (child, debugger_addr) = Self::spawn(&binary, profile_dir.clone(), &[], &limits)?;
-        let session = Self::connect_page(&debugger_addr, &limits, None)?;
+        let (mut child, debugger_addr) =
+            match Self::spawn(&binary, profile_dir.clone(), &[], &limits) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&profile_dir);
+                    return Err(e);
+                }
+            };
+        let session = match Self::connect_page(&debugger_addr, &limits, None) {
+            Ok(v) => v,
+            Err(e) => {
+                terminate_tree(&mut child);
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&profile_dir);
+                return Err(e);
+            }
+        };
         Ok(Self {
             handle: Handle::Owned {
                 child,
@@ -198,13 +214,20 @@ impl ControlledBrowser {
             .find(|info| info.name == profile || info.directory == profile)
             .map(|info| info.directory)
             .ok_or_else(|| io::Error::other(format!("unknown Chrome profile '{profile}'")))?;
-        let (child, debugger_addr) = Self::spawn(
+        let (mut child, debugger_addr) = Self::spawn(
             &binary,
             data_dir,
             &[format!("--profile-directory={directory}")],
             &limits,
         )?;
-        let session = Self::connect_page(&debugger_addr, &limits, None)?;
+        let session = match Self::connect_page(&debugger_addr, &limits, None) {
+            Ok(session) => session,
+            Err(error) => {
+                terminate_tree(&mut child);
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         Ok(Self {
             handle: Handle::Owned {
                 child,
@@ -252,6 +275,74 @@ impl ControlledBrowser {
 
     pub fn debugger_addr(&self) -> &str {
         &self.debugger_addr
+    }
+
+    /// Set a bounded CSS viewport for responsive UI inspection.
+    pub fn set_viewport(&mut self, width: u32, height: u32) -> Result<(), String> {
+        if !(240..=3840).contains(&width) || !(240..=2160).contains(&height) {
+            return Err("viewport must be 240–3840 wide and 240–2160 high".into());
+        }
+        self.session.call(
+            "Emulation.setDeviceMetricsOverride",
+            serde_json::json!({"width":width,"height":height,"deviceScaleFactor":1,"mobile":false}),
+            self.limits.command_timeout,
+        )?;
+        Ok(())
+    }
+
+    /// Dispatch a keyboard shortcut through Chrome's input pipeline.
+    /// Modifiers use CDP bits: Alt=1, Control=2, Meta=4, Shift=8.
+    pub fn press_key(&mut self, key: &str, modifiers: u8) -> Result<(), String> {
+        let code = match key {
+            "Enter" => 13,
+            "Escape" => 27,
+            "Tab" => 9,
+            "ArrowLeft" => 37,
+            "ArrowUp" => 38,
+            "ArrowRight" => 39,
+            "ArrowDown" => 40,
+            "Home" => 36,
+            "End" => 35,
+            "/" | "?" => 191,
+            value if value.len() == 1 && value.as_bytes()[0].is_ascii_alphabetic() => {
+                u32::from(value.as_bytes()[0].to_ascii_uppercase())
+            }
+            _ => return Err("unsupported shortcut key".into()),
+        };
+        if modifiers > 15 {
+            return Err("invalid keyboard modifiers".into());
+        }
+        for kind in ["rawKeyDown", "keyUp"] {
+            self.session.call(
+                "Input.dispatchKeyEvent",
+                serde_json::json!({"type":kind,"key":key,"windowsVirtualKeyCode":code,"modifiers":modifiers}),
+                self.limits.command_timeout,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Emulate the operating system's reduced-motion preference for UI QA.
+    pub fn set_reduced_motion(&mut self, reduce: bool) -> Result<(), String> {
+        self.session.call(
+            "Emulation.setEmulatedMedia",
+            serde_json::json!({"features":[{"name":"prefers-reduced-motion","value":if reduce {"reduce"} else {"no-preference"}}]}),
+            self.limits.command_timeout,
+        )?;
+        Ok(())
+    }
+
+    /// Allow downloads into an existing directory for controlled artifact QA.
+    pub fn set_download_directory(&mut self, directory: &std::path::Path) -> Result<(), String> {
+        if !directory.is_absolute() || !directory.is_dir() {
+            return Err("download directory must be an existing absolute directory".into());
+        }
+        self.session.call(
+            "Browser.setDownloadBehavior",
+            serde_json::json!({"behavior":"allow","downloadPath":directory.to_string_lossy()}),
+            self.limits.command_timeout,
+        )?;
+        Ok(())
     }
 
     fn evaluate_value(&mut self, expression: &str) -> Result<Value, String> {
@@ -361,8 +452,13 @@ impl ControlledBrowser {
     /// sessions only disconnect — the user's browser keeps running.
     pub fn close(&mut self) {
         self.session.close();
-        if let Handle::Owned { child, profile_dir } = &mut self.handle {
-            terminate_tree(child);
+        let handle = std::mem::replace(&mut self.handle, Handle::Attached);
+        if let Handle::Owned {
+            mut child,
+            mut profile_dir,
+        } = handle
+        {
+            terminate_tree(&mut child);
             let _ = child.wait();
             if let Some(dir) = profile_dir.take() {
                 let _ = std::fs::remove_dir_all(dir);
@@ -373,10 +469,7 @@ impl ControlledBrowser {
 
 impl Drop for ControlledBrowser {
     fn drop(&mut self) {
-        self.session.close();
-        if let Handle::Owned { child, .. } = &mut self.handle {
-            terminate_tree(child);
-        }
+        self.close();
     }
 }
 

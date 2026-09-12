@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// What to run in each tree. Keep it fast: it executes twice per experiment.
@@ -120,9 +121,43 @@ fn parse_suite_output(combined: &str) -> Option<(u64, u64)> {
     found.then_some((passed, failed))
 }
 
-fn run_suite(dir: &Path, suite: &CheckSuite) -> SuiteResult {
+fn skipped_suite(reason: &str) -> SuiteResult {
+    SuiteResult {
+        passed: 0,
+        failed: 1,
+        timed_out: false,
+        seconds: 0.0,
+        output_tail: reason.into(),
+    }
+}
+
+fn stop_child(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(0x08000000)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn run_suite(dir: &Path, suite: &CheckSuite, stop: &AtomicBool) -> SuiteResult {
+    if stop.load(Ordering::SeqCst) {
+        return skipped_suite("Cancelled before suite launch");
+    }
     let started = Instant::now();
-    let mut child = match std::process::Command::new("cargo")
+    let mut command = std::process::Command::new("cargo");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = match command
         .args(&suite.argv)
         .current_dir(dir)
         .stdout(std::process::Stdio::piped())
@@ -140,20 +175,57 @@ fn run_suite(dir: &Path, suite: &CheckSuite) -> SuiteResult {
             };
         }
     };
+    // Drain both pipes while the child runs; waiting before reading can deadlock.
+    let (tx, rx) = std::sync::mpsc::channel();
+    for mut pipe in [
+        Box::new(child.stdout.take().unwrap()) as Box<dyn io::Read + Send>,
+        Box::new(child.stderr.take().unwrap()),
+    ] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = (|| -> io::Result<()> {
+                let mut buffer = [0; 8192];
+                loop {
+                    let n = pipe.read(&mut buffer)?;
+                    if n == 0 {
+                        return Ok(());
+                    }
+                    if bytes.len() + n > 4 * 1024 * 1024 {
+                        return Err(io::Error::other("suite output exceeded limit"));
+                    }
+                    bytes.extend_from_slice(&buffer[..n]);
+                }
+            })();
+            let _ = tx.send(result.map(|()| bytes));
+        });
+    }
+    drop(tx);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let output = child
-                    .wait_with_output()
-                    .unwrap_or_else(|e| std::process::Output {
-                        status,
-                        stdout: Vec::new(),
-                        stderr: format!("{e}").into_bytes(),
-                    });
-                let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-                combined.push_str(&String::from_utf8_lossy(&output.stderr));
-                let (passed, failed) = parse_suite_output(&combined)
-                    .unwrap_or((0, if status.success() { 0 } else { 1 }));
+                let mut combined = String::new();
+                let mut capture_failed = false;
+                for _ in 0..2 {
+                    let captured = loop {
+                        if stop.load(Ordering::SeqCst) || started.elapsed() >= suite.timeout {
+                            break None;
+                        }
+                        match rx.recv_timeout(Duration::from_millis(50)) {
+                            Ok(value) => break Some(value),
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(_) => break None,
+                        }
+                    };
+                    match captured {
+                        Some(Ok(bytes)) => {
+                            combined.push_str(&String::from_utf8_lossy(&bytes));
+                            combined.push('\n');
+                        }
+                        _ => capture_failed = true,
+                    }
+                }
+                let (passed, failed) = parse_suite_output(&combined).unwrap_or((0, 1));
                 let mut tail: String = combined
                     .chars()
                     .rev()
@@ -162,31 +234,36 @@ fn run_suite(dir: &Path, suite: &CheckSuite) -> SuiteResult {
                 tail = tail.chars().rev().collect();
                 return SuiteResult {
                     passed,
-                    failed: if status.success() {
+                    failed: if status.success() && !capture_failed && !stop.load(Ordering::SeqCst) {
                         failed
                     } else {
                         failed.max(1)
                     },
-                    timed_out: false,
+                    timed_out: started.elapsed() >= suite.timeout,
                     seconds: started.elapsed().as_secs_f64(),
                     output_tail: tail,
                 };
             }
             Ok(None) => {
-                if started.elapsed() >= suite.timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                if started.elapsed() >= suite.timeout || stop.load(Ordering::SeqCst) {
+                    stop_child(&mut child);
                     return SuiteResult {
                         passed: 0,
                         failed: 1,
-                        timed_out: true,
+                        timed_out: !stop.load(Ordering::SeqCst),
                         seconds: started.elapsed().as_secs_f64(),
-                        output_tail: "suite timed out and was killed".into(),
+                        output_tail: if stop.load(Ordering::SeqCst) {
+                            "Suite cancelled and stopped"
+                        } else {
+                            "Suite timed out and was stopped"
+                        }
+                        .into(),
                     };
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
+                stop_child(&mut child);
                 return SuiteResult {
                     passed: 0,
                     failed: 1,
@@ -228,6 +305,33 @@ impl ExperimentRunner {
         spec: ExperimentSpec,
         mutate: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<ExperimentReport> {
+        self.run_experiment_cancellable(spec, &AtomicBool::new(false), mutate)
+    }
+
+    pub fn run_experiment_cancellable(
+        &self,
+        spec: ExperimentSpec,
+        stop: &AtomicBool,
+        mutate: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<ExperimentReport> {
+        if stop.load(Ordering::SeqCst) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Experiment cancelled",
+            ));
+        }
+        if spec.id.is_empty()
+            || spec.id.len() > 64
+            || !spec
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || spec.branch.is_empty()
+            || spec.branch.starts_with('-')
+        {
+            return Err(io::Error::other("invalid experiment identity"));
+        }
+        git(&self.repo, &["check-ref-format", "--branch", &spec.branch])?;
         if !self.repo.join(".git").exists() {
             // Also accept bare/worktree checkouts via rev-parse.
             git(&self.repo, &["rev-parse", "--git-dir"])?;
@@ -266,17 +370,35 @@ impl ExperimentRunner {
             }
             let _ = remove.arg(&worktree).current_dir(&self.repo).output();
         };
-        let baseline = run_suite(&self.repo, &self.suite);
-        if let Err(e) = mutate(&worktree) {
-            cleanup(true);
-            let _ = git(&self.repo, &["branch", "-D", &spec.branch]);
-            return Err(io::Error::other(format!("mutation failed: {e}")));
-        }
-        let candidate = run_suite(&worktree, &self.suite);
-        let decision = if candidate.failed > baseline.failed {
+        let baseline = run_suite(&self.repo, &self.suite, stop);
+        let candidate = if baseline.failed > 0
+            || baseline.passed == 0
+            || baseline.timed_out
+            || stop.load(Ordering::SeqCst)
+        {
+            skipped_suite("Candidate skipped: baseline did not pass or Stop was requested")
+        } else {
+            if let Err(e) = mutate(&worktree) {
+                cleanup(true);
+                let _ = git(&self.repo, &["branch", "-D", &spec.branch]);
+                return Err(io::Error::other(format!("mutation failed: {e}")));
+            }
+            run_suite(&worktree, &self.suite, stop)
+        };
+        let decision = if stop.load(Ordering::SeqCst) {
+            Decision::Rollback {
+                reason: "Stop requested; candidate was not promoted".into(),
+            }
+        } else if baseline.failed > 0
+            || baseline.timed_out
+            || baseline.passed == 0
+            || candidate.failed > 0
+            || candidate.timed_out
+            || candidate.passed < baseline.passed
+        {
             Decision::Rollback {
                 reason: format!(
-                    "regression: baseline {} failed, candidate {} failed",
+                    "gate refused: require nonempty passing baseline and candidate, with no lost tests; baseline {} failed, candidate {} failed",
                     baseline.failed, candidate.failed
                 ),
             }

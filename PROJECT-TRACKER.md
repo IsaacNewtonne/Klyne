@@ -1,8 +1,23 @@
+# Continuation - learned API operations and cancellable improvements
+
+- OpenAPI discovery now saves searchable operation definitions and invokes them with validated scalar parameters. Unsupported contracts fail explicitly.
+- Apps panel supports Save, Discover, Operations, Use and Forget, with persisted connections and mobile verification.
+- Improvement candidates accept implementation plus tests (1-16 files). Stop interrupts suites and rolls back; failed baselines skip candidate work.
+- 179 distinct tests pass across the workspace run and a corrected Windows HTTP fixture rerun. Doc tests, fmt, Clippy, JavaScript syntax and screenshot checks pass.
+- Detailed evidence and limitations: docs/audit-2026-09-10-continuation.md and docs/local-apps.md.
+# Local apps and improvement audit - 2026-09-10
+
+- Added persistent app_connect, app_list and bounded loopback app_call tools in Studio, controlled by the Local APIs switch.
+- Added self_improve chat actions under the Terminal grant, with isolated worktrees, fixed test gates and retained passing branches.
+- Fixed experiment gates for failing, empty, unparseable and reduced-test candidates; bounded and concurrently drained suite output.
+- All 170 tests report passing (24 Studio and 7 experiment tests included); fmt, Clippy with warnings denied, JavaScript syntax and whitespace checks pass. Desktop/mobile screenshots inspected.
+- Evidence: workspace/audit-2026-09-10-final.log. PowerShell returned 1 due to redirected Cargo progress stderr (NativeCommandError); all 35 libtest groups report success, zero failures.
+- Details: docs/audit-2026-09-10.md and docs/local-apps.md.
 # Project Tracker — Local-first Autonomous AI Agent Harness
 
 > Living file: update it on every feature checkpoint below. Status legend:
 > **IMPLEMENTED**, **PARTIAL**, **EXPERIMENTAL**, **PLANNED**, **BLOCKED**.
-> Suite **138 passing** as of 2026-09-09. Handover state: everything below
+> Suite **147 passing** as of 2026-09-09. Handover state: everything below
 > is verified on Windows/MSVC, Rust 1.98.1.
 
 ## Checkpoint log
@@ -69,12 +84,12 @@
 | Provider router, vector memory, goal planner | **PLANNED** | Beyond current scope |
 | OS sandbox / isolation | **PLANNED** | Permission checks are not a sandbox; investigate separately |
 
-## Verification (last green: 138 passing)
+## Verification (last green: 147 passing)
 
 ```sh
 cargo fmt --all -- --check
 cargo check --workspace --locked
-cargo test --workspace --locked        # 138 passing, 0 failed
+cargo test --workspace --locked        # 147 passing, 0 failed
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo run -p harness-core --example benchmark --locked        # file-core-v1 10/10
 cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verified
@@ -102,8 +117,9 @@ cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verif
 
 ## Handover notes (read before touching anything)
 
-1. Only remaining roadmap item: **GUI control** (Windows UI Automation
-   backend). Everything else is implemented and green.
+1. GUI control remains planned. Resolve the browser lifecycle, protocol and
+   delegation accounting gaps in docs/audit-2026-09-09.md before treating
+   existing prototype milestones as production-ready.
 2. Environment quirks, all verified the hard way:
    - Outside this repo the default `stable` toolchain has a broken cargo.
      Fixtures pin `rust-toolchain.toml` 1.98.1; keep doing that.
@@ -120,3 +136,67 @@ cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verif
 4. Workflow per change: inspect → small vertical slice → `cargo fmt`,
    `check`, `test`, `clippy -D warnings` → independent verification →
    docs → update this file → recoverable commit.
+
+## Audit and hardening checkpoint — 2026-09-09
+
+- Reviewed workspace structure, docs, delegation, browser transport and fetch;
+  findings and next priorities: [audit report](docs/audit-2026-09-09.md).
+- Hardened child database IDs/root binding, denied shell grants to read-only
+  children, bounded artifact reads, and enforced cumulative WebSocket limits
+  before allocation plus a 16 KiB upgrade-header cap.
+- Added six regressions. Final suite reports **144 passed, zero failed**,
+  including all eight live isolated Chrome tests outside the sandbox.
+- fmt/check/clippy with warnings denied pass. File benchmark: 10/10 positive
+  tasks and 10/10 denied traversal cases; 8 MiB benchmark independently verified.
+- The PowerShell redirected test wrapper reported NativeCommandError for Cargo's
+  compilation stderr; the complete log shows all test binaries and doctests
+  passed. Baseline direct test invocation also exited successfully.
+- Existing scripts/demo.sh mode change preserved. GUI control remains planned.
+
+## Visual workspace checkpoint — 2026-09-09
+
+- Added `apps/studio` (`klyne-studio`), an embedded local web GUI connected to
+  actual runtime execution and read-only SQLite inspection.
+- Designed a graphite/lime control room with an execution map, live budget
+  meters, event ledger, expandable evidence, run search, command palette,
+  responsive layouts, keyboard shortcuts, and JSON export.
+- Added isolated file-run creation, cooperative stop, conservative resume,
+  persisted run discovery, bounded requests, and same-origin mutation checks.
+- Added bounded Chrome viewport control for responsive verification.
+- Three Studio integration tests cover API rejection, GUI execution and
+  evidence, mobile overflow, and server restart without terminal replay.
+- Scope: deterministic file agent only. Native Windows GUI automation remains
+  planned; this checkpoint delivers the visual Klyne application.
+- See [Studio documentation](docs/studio.md).
+
+- Final validation: **147 tests passed**, zero failed; fmt/check/clippy and
+  JavaScript syntax checks passed. Desktop (1440px) and mobile (390px)
+  screenshots were inspected; Studio is served at http://127.0.0.1:4317.
+
+## Chat-first Studio � 2026-09-10
+
+- Replaced the home page with a responsive conversation UI, prompt starters,
+  AI settings dialog, access switches, live worker activity, evidence and export.
+- Added a Studio goal driver: model-selected sequential roles, tool execution,
+  separate read-only review and up to three repair passes. Follow-up instructions
+  preserve the workspace and recent context. This is separate from core delegation.
+- Added transactional conversation persistence, pre-action reservations, pending
+  effect refusal after interruption, cooperative Stop and shared per-turn limits.
+- Web fetch and terminal switches grant real tools. Apps remain unavailable.
+  Broad terminal grants are explicitly described; model review is not a formal
+  success proof. Written files receive independent exact read-back checks.
+- All 14 Studio tests passed, including the new chat browser and repair-loop tests.
+  fmt, JavaScript syntax and Studio clippy with warnings denied passed. Desktop
+  and 390px screenshots inspected in workspace/studio-qa/chat-*.png.
+- Existing file-run APIs and the earlier interface remain at /files.
+
+## Harness capability and reliability upgrade — 2026-09-11
+
+- Configurable goal ceilings, restart recovery, saved-task resume and explicit
+  uncertain-action resolution; normalized conversation history and root ownership.
+- Versioned persistent skills/tools/memory; host projects and user/toolchain environment.
+- Interactive CDP browser tools, authenticated HTTPS/LAN app APIs, cancellable
+  model/API calls, Windows process jobs and cross-process desktop ownership.
+- Dirty-project experiment snapshots; supervised binary activation and failed-startup rollback.
+- Atomic persisted delegation reservations for callers of the new budgeted API.
+- See [implementation and verification](docs/harness-upgrade-2026-09-11.md).

@@ -185,3 +185,121 @@ fn duplicate_branch_refuses_experiment() {
 fn io_error(error: std::io::Error) -> std::io::Error {
     error
 }
+
+#[test]
+fn cancellation_stops_running_baseline_and_skips_mutation() {
+    use std::{
+        sync::{Arc, atomic::AtomicBool},
+        time::{Duration, Instant},
+    };
+    let root = fixture_repo("cancel-running");
+    fs::write(root.join("src/main.rs"),r#"fn main() {} #[test] fn slow() { std::fs::write("target/ready", "ready").unwrap(); std::thread::sleep(std::time::Duration::from_secs(60)); }"#).unwrap();
+    git(&root, &["add", "src/main.rs"]);
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=harness-test",
+            "-c",
+            "user.email=test@local",
+            "commit",
+            "-m",
+            "slow test",
+        ],
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let child_stop = stop.clone();
+    let child_root = root.clone();
+    let worker = std::thread::spawn(move || {
+        runner(&child_root)
+            .run_experiment_cancellable(spec("cancel-running"), &child_stop, |_| {
+                panic!("Mutation must not run after cancellation")
+            })
+            .unwrap()
+    });
+    let wait = Instant::now();
+    while !root.join("target/ready").exists() {
+        assert!(
+            wait.elapsed() < Duration::from_secs(20),
+            "Suite did not start"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let stopped = Instant::now();
+    stop.store(true, Ordering::SeqCst);
+    let report = worker.join().unwrap();
+    assert!(stopped.elapsed() < Duration::from_secs(10));
+    assert!(matches!(report.decision, Decision::Rollback { .. }));
+    assert!(report.baseline.output_tail.contains("cancelled"));
+    assert!(report.candidate.output_tail.contains("skipped"));
+    assert_eq!(
+        worktrees(&root)
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1
+    );
+    assert!(
+        git(&root, &["branch", "--list", "exp-cancel-running"])
+            .trim()
+            .is_empty()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cancellation_before_candidate_prevents_promotion() {
+    use std::sync::atomic::AtomicBool;
+    let root = fixture_repo("cancel-candidate");
+    let stop = AtomicBool::new(false);
+    let report = runner(&root)
+        .run_experiment_cancellable(spec("cancel-candidate"), &stop, |tree| {
+            fs::write(tree.join("note.txt"), "candidate")?;
+            stop.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(report.decision, Decision::Rollback { .. }));
+    assert_eq!(report.candidate.passed, 0);
+    assert!(!root.join("note.txt").exists());
+    assert!(
+        git(&root, &["branch", "--list", "exp-cancel-candidate"])
+            .trim()
+            .is_empty()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn removing_tests_cannot_promote() {
+    let root = fixture_repo("lost-tests");
+    let report = runner(&root)
+        .run_experiment(spec("lost-tests"), |tree| {
+            fs::write(tree.join("src/main.rs"), "fn main() {}\n")
+        })
+        .unwrap();
+    assert!(matches!(report.decision, Decision::Rollback { .. }));
+    assert_eq!(report.candidate.passed, 0);
+    assert!(git(&root, &["status", "--porcelain"]).trim().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn equally_failed_suites_cannot_promote() {
+    let root = fixture_repo("bad-suites");
+    let runner = ExperimentRunner::new(
+        &root,
+        CheckSuite {
+            argv: vec!["--version".into()],
+            ..CheckSuite::default()
+        },
+    );
+    let report = runner
+        .run_experiment(spec("invalid-suite"), |tree| {
+            fs::write(tree.join("note.txt"), "candidate")
+        })
+        .unwrap();
+    assert!(matches!(report.decision, Decision::Rollback { .. }));
+    assert!(report.baseline.failed > 0);
+    fs::remove_dir_all(root).unwrap();
+}

@@ -1,3 +1,8 @@
 /target/
 /workspace/*
 !/workspace/.gitkeep
+/scripts/__pycache__/
+**/.playwright-mcp/
+.env
+.env.*
+!.env.example
