@@ -7,6 +7,7 @@ mod failure_policy;
 mod route_recovery;
 mod restart_reconciliation;
 mod document_save;
+mod completion_guard;
 mod browser_tools;
 mod capabilities;
 mod chat;

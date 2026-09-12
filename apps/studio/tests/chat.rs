@@ -192,6 +192,18 @@ fn contract_verifies_actual_file_and_survives_loading() {
 }
 
 #[test]
+fn invented_message_delivery_with_no_tools_is_blocked() {
+    let s=Server::new();
+    let (endpoint,fixture)=model(vec![plan(),complete("Message sent"),complete("The message was successfully sent to him")]);
+    let mut body=request(&endpoint);body["message"]=json!("Open Zalo, send a message to Joidi saying hello");
+    let created=s.api("/api/chats",Some(body));let chat=s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"],"Blocked","{chat}");
+    assert!(chat["messages"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().contains("delivery is unverified"));
+    assert!(chat["evidence"].as_array().unwrap().is_empty());
+    fixture.join().unwrap();
+}
+
+#[test]
 fn restart_reconciles_saved_document_from_file_without_desktop_input() {
     let mut s=Server::new();
     let (endpoint,fixture)=model(vec![plan(),json!({"decision":"fail","reason":"Simulated interruption"}),complete("Saved document already verified"),complete("Document ready")]);
