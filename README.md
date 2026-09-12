@@ -2,13 +2,13 @@
 
 **A local-first AI workspace. A little spark. Something real.**
 
-Give Klyne a task, watch the steps unfold, and inspect the result. Built in Rust with a simple browser interface, local model support, and mouse-responsive fire embers that grow while work is running.
+Give Klyne a task, watch the steps unfold, and inspect the result. Built in Rust with a simple browser interface, local model support.
 
 [![Klyne workspace preview open the interactive demo](site/preview.png)](https://isaacnewtonne.github.io/Klyne/)
 
 ### [Open the interactive workspace](https://isaacnewtonne.github.io/Klyne/)
 
-Move your mouse through the embers, run a sample task, switch between conversation and workspace, or open Details. The demo uses the real presentation code with simulated task data. It makes no model calls and cannot access your computer. GitHub README files cannot run JavaScript; the live experience opens on GitHub Pages.
+Run a sample task, switch between conversation and workspace, or open Details. The demo uses the real presentation code with simulated task data. It makes no model calls and cannot access your computer. GitHub README files cannot run JavaScript; the live experience opens on GitHub Pages.
 
 ## What Klyne does
 
@@ -17,7 +17,7 @@ Move your mouse through the embers, run a sample task, switch between conversati
 - **Tools with explicit access.** Files, browser automation, desktop controls, terminal commands, saved APIs, and curated MCP integrations.
 - **Recovery grounded in evidence.** Completed steps survive restarts. Known pre-dispatch connection failures can switch to desktop observation. Uncertain actions are preserved instead of blindly repeated.
 - **Checks beyond a model's claim.** Caller-owned file contracts, supported desktop focus/field checks, and a first Notepad save-reconciliation adapter.
-- **A quieter interface.** Visual progress, compact steps, optional details, and responsive embers.
+- **A quieter interface.** Visual progress, compact steps, optional details.
 
 Klyne is under active development. Desktop automation currently targets Windows. App coverage depends on available adapters, accessibility controls, and verifiable results; arbitrary message delivery, purchases, deletes, and every application's save behavior are not universally verified. A fallback model using the same Ollama service still shares that service's failure modes.
 
