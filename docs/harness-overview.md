@@ -12,7 +12,7 @@ supervisor for tested binary activation with startup rollback.
 Build and start with `cargo build -p klyne-studio --bins --locked`, then
 `./target/debug/klyne-supervisor.exe --root workspace/studio --port 4317`.
 Open http://127.0.0.1:4317 and choose **Enable trusted laptop access** in Settings.
-See the [upgrade guide](docs/harness-upgrade-2026-09-11.md) for tools, recovery,
+See the [upgrade guide](harness-upgrade-2026-09-11.md) for tools, recovery,
 verification and remaining boundaries. The core CLI retains its own defaults.
 
 ## IMPLEMENTED and tested
@@ -26,18 +26,18 @@ verification and remaining boundaries. The core CLI retains its own defaults.
 - Resume between actions after process termination; refuse uncertain interrupted actions.
 - Explicit `--reconcile` inspects interrupted file actions without replaying writes; action audit records carry stable run-scoped IDs.
 - Persisted tool-call reservations (32 by default), including verification and reconciliation; filesystem reads/writes capped at 1 MiB per operation.
-- Typed range reads, streaming SHA-256, and digest-guarded patches for larger files; see [large-file operations](docs/large-files.md).
-- Structured tool descriptors and discovery (`--tools`); supervised argv process execution with explicit grants, timeout, output bounds, and Windows tree kill; see [process supervision](docs/process-supervision.md).
-- Bounded single-file substring search plus hash/range-based success criteria; a deterministic scripted agent can inspect, patch, and verify a controlled file through the runtime (`run_with_criterion`), with read-only recovery and blocked patch reconciliation; see [coding loop](docs/coding-loop.md).
-- First real model provider: OpenAI-compatible chat-completions adapter with strict validated decisions, credential hygiene, timeouts, response caps, bounded retries, and usage accounting, plus CLI opt-in via `--openai-compat`; see [model provider](docs/model-provider.md).
-- First autonomous coding benchmark: scripted repair of controlled Rust bugs through inspect → patch → `cargo test` → failure-driven repair → restart, with an independent compiler/test oracle and metric reports; see [coding benchmark](docs/coding-benchmark.md).
-- Durable goals and plans: persisted goal/task graphs with dependencies, blocked/abandoned states, evidence-driven repair, lifecycle states, and recorded budget amendments; multi-task plans survive kills without duplicating tasks; see [durable plans](docs/durable-plans.md).
-- Memory and context selection: SQLite-backed project/episodic/procedural/failure memory with confidence, provenance, explained retrieval, retention, and consolidation; recalled experience improves repeated benchmarks without blind replay; see [memory](docs/memory.md).
-- Long-running reliability: wall-clock/token/cost budgets, repeated-error detection, graceful shutdown, step heartbeats, and machine-readable run inspection (`--inspect`); see [reliability](docs/reliability.md).
-- Scoped delegation: fenced child runs with narrowed scope, inherited limits, budget firewall, read-only verifiers, and artifact collection; see [delegation](docs/delegation.md).
-- Supervised network fetch and repo radar: allowlisted read-only HTTPS GET with strict URL validation, plus a GitHub trending digest (`--radar`); fetched bytes are untrusted data; see [network fetch](docs/network-fetch.md).
-- Controlled self-improvement: isolated worktree experiments with baseline/candidate gates, promotion to a kept branch, rollback on regression, and decision records; see [self-improvement](docs/self-improvement.md).
-- Structured browser control: Chrome over CDP with isolated profiles, named-profile launch, attach-to-live-instance (never kills your browser), and CLI one-shots; see [browser](docs/browser.md).
+- Typed range reads, streaming SHA-256, and digest-guarded patches for larger files; see [large-file operations](large-files.md).
+- Structured tool descriptors and discovery (`--tools`); supervised argv process execution with explicit grants, timeout, output bounds, and Windows tree kill; see [process supervision](process-supervision.md).
+- Bounded single-file substring search plus hash/range-based success criteria; a deterministic scripted agent can inspect, patch, and verify a controlled file through the runtime (`run_with_criterion`), with read-only recovery and blocked patch reconciliation; see [coding loop](coding-loop.md).
+- First real model provider: OpenAI-compatible chat-completions adapter with strict validated decisions, credential hygiene, timeouts, response caps, bounded retries, and usage accounting, plus CLI opt-in via `--openai-compat`; see [model provider](model-provider.md).
+- First autonomous coding benchmark: scripted repair of controlled Rust bugs through inspect → patch → `cargo test` → failure-driven repair → restart, with an independent compiler/test oracle and metric reports; see [coding benchmark](coding-benchmark.md).
+- Durable goals and plans: persisted goal/task graphs with dependencies, blocked/abandoned states, evidence-driven repair, lifecycle states, and recorded budget amendments; multi-task plans survive kills without duplicating tasks; see [durable plans](durable-plans.md).
+- Memory and context selection: SQLite-backed project/episodic/procedural/failure memory with confidence, provenance, explained retrieval, retention, and consolidation; recalled experience improves repeated benchmarks without blind replay; see [memory](memory.md).
+- Long-running reliability: wall-clock/token/cost budgets, repeated-error detection, graceful shutdown, step heartbeats, and machine-readable run inspection (`--inspect`); see [reliability](reliability.md).
+- Scoped delegation: fenced child runs with narrowed scope, inherited limits, budget firewall, read-only verifiers, and artifact collection; see [delegation](delegation.md).
+- Supervised network fetch and repo radar: allowlisted read-only HTTPS GET with strict URL validation, plus a GitHub trending digest (`--radar`); fetched bytes are untrusted data; see [network fetch](network-fetch.md).
+- Controlled self-improvement: isolated worktree experiments with baseline/candidate gates, promotion to a kept branch, rollback on regression, and decision records; see [self-improvement](self-improvement.md).
+- Structured browser control: Chrome over CDP with isolated profiles, named-profile launch, attach-to-live-instance (never kills your browser), and CLI one-shots; see [browser](browser.md).
 - Negative security tests, actual process-kill recovery test, checkpoint-boundary tests, supervised-process tests (nonzero exit, timeout, output bounds, denials, env grants, tree kill).
 
 ## Visual workspace
@@ -48,7 +48,7 @@ roles, and follow execution, review and repair in the conversation. Web-fetch
 and terminal grants are optional; Local APIs enables reusable app connections and Terminal enables isolated improvement experiments. Choose
 Codex, Ollama or OpenCode in Settings. The earlier file-run interface remains
 available at `/files`.
-See [Klyne Studio](docs/studio.md) for scope and verification.
+See [Klyne Studio](studio.md) for scope and verification.
 
 ## Run
 
@@ -88,9 +88,9 @@ The benchmark reports JSON and fails if any of 10 file tasks or 10 traversal cas
 - Checkpoints are authoritative; events and checkpoints are not one transaction across an entire tool call. Reconciliation audit attempts may repeat after a crash; consumers should group them by action ID. IDs are scoped to a run/database, not globally unique idempotency keys. No exactly-once or host-power-loss guarantee.
 - Recovery assumes a stateless model. One database handles one run. Step, tool-call, wall-clock, token and monetary budgets exist; concurrent child accounting uses the opt-in persisted `DelegationBudget` pool; legacy callers retain counter-based accounting.
 - Objectives, observations and checkpoints contain task data. Secret redaction is absent: do not supply secrets.
-- Studio supplies model planning, sequential workers and review, persistent capabilities and Windows desktop control. Automatic model routing and vector memory remain unimplemented; arbitrary task competence is not established by orchestration tests. Implemented roadmap features remain prototypes with hardening gaps; see the [project audit](docs/audit-2026-09-09.md). OS isolation is investigated but not built.
+- Studio supplies model planning, sequential workers and review, persistent capabilities and Windows desktop control. Automatic model routing and vector memory remain unimplemented; arbitrary task competence is not established by orchestration tests. Implemented roadmap features remain prototypes with hardening gaps; see the [project audit](audit-2026-09-09.md). OS isolation is investigated but not built.
 
-See [implementation evidence](docs/milestone-durable-core.md) and [historical architecture](docs/architecture-v0.1.md).
+See [implementation evidence](milestone-durable-core.md) and [historical architecture](architecture-v0.1.md).
 
 New objectives accept `--max-tool-calls <integer>` (default 32). This cannot override a resumed run's persisted budget. Reservations commit before invocation; failed reads count, and a crash can consume credit without executing a call. Budget exhaustion returns an error and leaves the checkpoint for inspection. It does not mark the goal complete. Active legacy checkpoints without accounting refuse continuation because prior reconciliation usage cannot be reconstructed reliably; terminal legacy results remain readable. No automatic budget replenishment or migration is implemented.
 
