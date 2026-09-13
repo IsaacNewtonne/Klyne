@@ -173,7 +173,7 @@ cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verif
   JavaScript syntax checks passed. Desktop (1440px) and mobile (390px)
   screenshots were inspected; Studio is served at http://127.0.0.1:4317.
 
-## Chat-first Studio � 2026-09-10
+## Chat-first Studio � 2026-09-10
 
 - Replaced the home page with a responsive conversation UI, prompt starters,
   AI settings dialog, access switches, live worker activity, evidence and export.
@@ -200,3 +200,162 @@ cargo run -p harness-core --example large_file_benchmark --locked  # 8 MiB verif
 - Dirty-project experiment snapshots; supervised binary activation and failed-startup rollback.
 - Atomic persisted delegation reservations for callers of the new budgeted API.
 - See [implementation and verification](docs/harness-upgrade-2026-09-11.md).
+
+## Audit Phase 0 + Phase 1 — 2026-09-13 (security deferred per operator)
+
+- Phase 0: char-boundary-safe history truncation (`truncate_to_char_boundary`,
+  Vietnamese/emoji/mixed tests); fixed mock `Content-Length` parsing that made
+  secret-hygiene assertions vacuous; test tiers documented (`docs/test-tiers.md`)
+  with `scripts/test-baseline.ps1` for env-recorded runs.
+- Phase 1: shared execution contract (`harness-core::execution`: `EffectState`,
+  `ToolResult`, `effect_of_observation`/`effect_of_value`, one uncertainty
+  classifier). All Studio dispatcher branches (browser/MCP/capability/app/
+  shell/registry) now clear pending from that classifier instead of
+  per-branch substring gates.
+- Fixed audit HIGHs: browser post-dispatch title/text failures tagged
+  uncertain (pending kept); desktop helper output joins bounded at 5s with
+  uncertain expiry; `Browsers::execute` takes a typed `BrowserCall` and
+  honors Stop pre-dispatch. Full cancellable browser I/O and per-session
+  actors stay Phase 5 scope.
+- Also collapsed 5 pre-existing clippy `collapsible_if` failures so
+  `clippy -D warnings` passes on the touched crates.
+- Verified: harness-core all green (incl. 5 new contract tests), Studio bin
+  40 passed + 1 ignored, chat 26/26 serial, workspace check clean. Known
+  pre-existing chat parallel-test isolation flake documented in test tiers.
+
+## Audit Phase 3 (partial, broker-independent) — 2026-09-13
+
+- Operation-bound completion receipts: `check_action_evidence` no longer
+  accepts any ok evidence for effect claims. Only successful *effect*
+  receipts (writes, shell, browser/desktop/app/MCP effects, host
+  verification/reconciliation) confirm mutations; read-only trails
+  (`read_file`, `browser_read`/`screenshot`, `desktop_observe`, listings)
+  are rejected, closing the audit's "any successful evidence satisfies the
+  phrase guard" hole without breaking legitimate flows (strict per-class
+  binding would have rejected e.g. "created a reusable tool" backed by
+  shell evidence).
+- Claim triggers extended with evasion variants (`been saved/created/`,
+  `successfully created/`, `was created`). Delivery claims stay
+  categorically rejected (fail-closed without receipt infra).
+- Verified: 4 guard unit tests, Studio bin 43 passed + 1 ignored, chat
+  26/26 serial, clippy/fmt clean. Full paraphrase-proofing needs
+  broker-issued receipts (deferred with Phase 2).
+
+## Audit Phase 4 (filesystem slice) — 2026-09-13
+
+- Atomic writes: `WriteFile` stages to a temp file and renames, so a crash
+  can never leave a truncated file; no staging files leak (tested).
+- Six new workspace actions: `list_dir` (sorted, <=500, truncated flag),
+  `stat_path` (kind/size/readonly, symlinks refused), `make_dir`,
+  `copy_file` (staged, <=64 MiB, regular files only, existing destinations
+  refused — checked pre-stage so Unix rename cannot overwrite), `move_file`
+  (atomic rename, dest-exists refused), `delete_path` (files and empty dirs
+  only; recursive delete refused without a scoped broker).
+- Permission gates: reads under `FilesystemRead` (review-safe), mutations
+  under `FilesystemWrite` (revoked in review); lone `.` names the root.
+- Wired through provider schema (`map_action` + prompt), Studio prompts,
+  descriptors, and `Display`/`tool_name`. Reviewers inherit read-only
+  directory browsing automatically.
+- Verified: 4 new `file_ops` tests, provider schema tests, core lib 21,
+  full core suites green, Studio bin 43 + chat 26/26 serial, clippy/fmt
+  clean. Deferred: recursive search, binary streams, PTY, durable job
+  manager (need broker/persistence design).
+
+## Audit Phase 5 (browser slices) — 2026-09-13
+
+- MCP session isolation (audit HIGH): sessions keyed per
+  (server, conversation) with isolated profiles; LRU cap of 4 with child
+  reaping and profile removal on evict/death; read-only connectivity probe
+  in its own scope; scope strings validated for path safety.
+- Correlated navigation (audit HIGH): `Page.navigate` error text evaluated,
+  stale events drained, completion bound to our frame with the load event
+  as freshness-checked secondary (this Chrome omits `loaderId`), landed
+  URL returned in every browser observation; one shared deadline preserves
+  worst-case timing. Fixed two real bugs found by testing: correlation on
+  a key the event lacks, and uncorrelated waits skipping the parked queue.
+- Session-mutex narrowing (audit HIGH): native browser map lock is now
+  lookup/insert only; CDP I/O runs under per-session locks, so one slow
+  conversation no longer blocks others.
+- Verified: Tier 1 browser 8/8, Studio bin 44 + 1 ignored, chat 26/26
+  serial, workspace check + clippy clean. Deferred: semantic locators,
+  tabs/dialogs, downloads/uploads, vision wiring, full CDP actors.
+
+## Audit Phase 6 (desktop slices) — 2026-09-13
+
+- Takeover detection (audit MEDIUM): every input primitive snapshots the
+  pointer and verifies it afterwards — clicks/drags must land where sent,
+  keyboard input must not displace the pointer — else the effect is
+  `uncertain`, never silently confirmed.
+- Password-focus refusal extended from element ops to raw Type/Press via
+  focused-element UIA check.
+- New tools: `desktop_drag` (covered-endpoint checks, interpolated moves,
+  takeover-verified landing) and `desktop_clipboard_get/set` (STA-threaded,
+  4000-char caps, worker-only, wired through parse/adapter/prompts).
+- Cost (audit LOW): helpers stage only on content change; PowerShell
+  resolved via `%SystemRoot%` with PATH fallback instead of a fixed path.
+- Verified: C# compiles, PS parses, clipboard roundtrip live, full Tier 3
+  recovery script green (also proving no takeover false-positives),
+  Studio bin 46 + chat 26/26 serial, clippy/fmt clean. Deferred:
+  persistent helper process, richer UIA patterns, DPI qualification.
+
+## Audit Phase 7 (planning/budgets/memory) — 2026-09-13
+
+- Evidence-bound task completion: `Done` records `evidence_bound` from its
+  own window (never blocking — answers need no tools); the reviewer gets
+  per-task windows plus an instruction to prefer repairs for unbound
+  completions on action goals.
+- Token/cost budgets: `Connection::respond` returns metered usage (Ollama
+  eval counts parsed; Codex/OpenCode meters kept instead of dropped),
+  accrued per call into durable turn totals, enforced in `guard` via
+  `max_tokens`/`max_cost_usd` execution limits, and visible to the model in
+  context with a spend-aware planning note.
+- Memory auto-recall: `recall_for_task` ranks active memories by keyword
+  overlap, injects top-3 with name/version provenance into worker context,
+  excludes sensitive entries from auto-injection (explicit read still
+  works), caps sizes with char-boundary truncation.
+- Verified: 3 new unit tests + recall tests, integration binding test,
+  Studio bin 49 + chat 27/27 serial, clippy/fmt clean. Deferred:
+  short-horizon replanning UX, relevance compaction, memory expiry schema.
+
+## Audit Phase 8 (extensibility/release) — 2026-09-13
+
+- Tool qualification lifecycle: `tool_test` binds tested/digest/timestamp
+  per version (migration included); `tool_run` refuses unqualified or
+  changed definitions; restore keeps per-version qualification; prompts,
+  guard receipts, and the chat flow updated to save → test → run.
+- MCP install separation: `mcp_setup` is the only installer (worker-only);
+  reads/calls report an unavailable route with a setup directive; the
+  route probe performs setup explicitly; reviewer can no longer trigger
+  installs through discovery.
+- Activation attestation: digest-bound, week-fresh attestations enforced
+  in `preflight` for stage and supervisor paths; `klyne-supervisor
+  --attest-digest/--attest-command` for operators, `runtime_attest` chat
+  tool bound to file bytes; runtime suite proves reject → attest →
+  activate → rollback (debugging it caught a real test-workflow gap:
+  every candidate, including the failing one, needs attestation).
+- Release support boundary documented in `docs/test-tiers.md` (supported
+  vs excluded with the zero-unauthorized-actions release rule).
+- Verified: Studio bin 51 + runtime + chat 27/27 serial, clippy/fmt clean.
+  Residual: exit-zero semantics and attestation honesty still need the
+  deferred Phase 2 broker.
+
+## Audit Phase 2 (authority boundary) — 2026-09-13
+
+- Host-owned broker (`apps/studio/src/broker.rs`, recovery-protected):
+  exact-argv shell grants, name→origin secret grants (network/env
+  directions separated), exact (connection, method, path) delete approvals.
+  Model proposals grant nothing; user request-body grants merge only.
+- Enforcement: `policy()` allowlists exact approved argv (no more
+  model-named programs); saved tools need grants on top of qualification;
+  app auth needs per-origin secret grants at connect and use; shell `env`
+  beyond the OS minimum needs env-only grants; DELETE needs approval.
+  Refusals stash exact proposals in pending; `resolve:approved` records
+  the binding and the worker retries identically on resume. New
+  `ApprovalNeeded` failure kind with pending-panel guidance.
+- Secret hygiene centralized: granted values scrubbed before model dispatch
+  (`request`) and before persistence (`chat_store::save`, incl. the action
+  ledger); short/missing values skipped.
+- Verified: broker unit tests, approval-loop integration (shell grant,
+  exfiltration refusal with zero transmission, single-DELETE), updated
+  skills/tools flow across conversations, Studio bin 58 + chat 30/30
+  serial, recovery python suite green, clippy/fmt clean.

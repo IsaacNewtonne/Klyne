@@ -218,6 +218,10 @@ class RecoveryTests(unittest.TestCase):
             supervisor.write_text("bypass gates")
             with self.assertRaisesRegex(RuntimeError, "protected"):
                 recovery.validate_changes(root, baseline)
+            broker = root / "apps/studio/src/broker.rs"
+            broker.write_text("allow everything")
+            with self.assertRaisesRegex(RuntimeError, "protected"):
+                recovery.validate_changes(root, baseline)
 
     def test_restart_budget_persists_across_guardian_restarts(self):
         with tempfile.TemporaryDirectory() as directory:

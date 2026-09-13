@@ -10,6 +10,7 @@ pub enum FailureKind {
     Precondition,
     RecoveryExhausted,
     MissingInput,
+    ApprovalNeeded,
     Unclassified,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -61,6 +62,11 @@ pub fn decide(kind: FailureKind) -> FailureDecision {
             false,
             "Answer the question to continue the unfinished step.",
         ),
+        FailureKind::ApprovalNeeded => (
+            NextStep::RequestInput,
+            false,
+            "Approve or abandon the pending proposal in the pending-action panel, then resume. The worker retries the identical proposal on resume.",
+        ),
         FailureKind::Unclassified => (
             NextStep::Inspect,
             false,
@@ -108,6 +114,7 @@ mod tests {
             FailureKind::BudgetExhausted,
             FailureKind::RecoveryExhausted,
             FailureKind::MissingInput,
+            FailureKind::ApprovalNeeded,
             FailureKind::Unclassified,
         ] {
             assert!(!decide(kind).automatic);

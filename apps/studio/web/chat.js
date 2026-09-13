@@ -15,10 +15,23 @@ fetch('/api/recovery').then(r=>r.ok?r.json():null).then(info=>{
 }).catch(()=>{});
 const linkedChat = new URLSearchParams(location.hash.slice(1)).get('chat');
 let selected = linkedChat && /^[0-9-]{1,79}$/.test(linkedChat) ? linkedChat : null, snapshot = null, chats = [], polling = false, submitting = false, revision = 0, toastTimer;
+const taskIndicator=document.createElement('span');
+taskIndicator.id='task-indicator';taskIndicator.setAttribute('role','status');taskIndicator.setAttribute('aria-live','polite');
+$('connection').after(taskIndicator);
+let online=false;
+function renderStatus(){
+  const activeChats=chats.filter(c=>['Planning','Working','Reviewing','Stopping','Upgrading'].includes(c.status));
+  const state=!online?'offline':submitting?'working':running(snapshot)||snapshot?.status==='Upgrading'?'working':snapshot?.status==='Completed'?'finished':['Blocked','Interrupted','Needs input','Stopped'].includes(snapshot?.status)?'attention':activeChats.length?'working':'ready';
+  taskIndicator.dataset.state=state;
+  const label={offline:'Offline',working:'Working',finished:'Finished',attention:snapshot?.status==='Needs input'?'Needs your input':snapshot?.status==='Stopped'?'Stopped':'Needs attention',ready:'Ready'}[state];
+  taskIndicator.textContent=label;
+  taskIndicator.title=state==='working'?(snapshot?.activity?.agent||`${activeChats.length || 1} active task`):state==='finished'?'The selected task finished. Open its result for details.':label;
+  document.title=`${label} - Klyne`;
+}
 const drafts = new Map();
 function toast(message) { $('toast').textContent=message; $('toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').hidden=true,4000); }
 async function api(path, body) {
-  const response=await fetch(path,body===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json','X-Klyne-Request':'1'},body:JSON.stringify(body)});
+  const response=await fetch(path,body===undefined?{cache:'no-store',signal:AbortSignal.timeout(8000)}:{method:'POST',headers:{'Content-Type':'application/json','X-Klyne-Request':'1'},body:JSON.stringify(body)});
   const result=await response.json(); if(!response.ok) throw new Error(result.error || 'Could not complete the request.'); return result;
 }
 function setMarkup(element, markup) { if(element.dataset.markup!==markup) {element.innerHTML=markup; element.dataset.markup=markup;} }
@@ -32,6 +45,7 @@ function renderList() {
   if(focused) [...$('chat-list').querySelectorAll('[data-chat]')].find(button=>button.dataset.chat===focused)?.focus({preventScroll:true});
 }
 function render() {
+  renderStatus();
   window.productionView?.update({snapshot,selected,submitting,message:$('instruction').value,provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,desktop:$('access-desktop').checked,apps:$('access-apps').checked}});
   const active=running(snapshot);
   $('writing-mode').disabled=active || submitting;
@@ -71,8 +85,8 @@ async function refresh() {
   try {
     const data=await api('/api/chats'); chats=data.chats; renderList();
     if(selected) { const id=selected, fresh=await api(`/api/chats/${id}`); if(selected===id) {snapshot=fresh;render();} }
-    $('connection').textContent='Connected';$('connection').dataset.state='connected';window.productionView?.connection(true);
-  } catch(e) { $('connection').textContent='Offline · retrying';$('connection').dataset.state='offline';window.productionView?.connection(false); }
+    online=true;renderStatus();$('connection').textContent='Connected';$('connection').dataset.state='connected';window.productionView?.connection(true);
+  } catch(e) { online=false;renderStatus();$('connection').textContent='Offline · retrying';$('connection').dataset.state='offline';window.productionView?.connection(false); }
   finally {polling=false;}
 }
 function closeSidebar() {$('sidebar').classList.remove('open');$('menu').setAttribute('aria-expanded','false');}

@@ -340,7 +340,19 @@ impl PermissionPolicy {
             Action::ReadFile { path }
             | Action::ReadFileRange { path, .. }
             | Action::HashFile { path }
+            | Action::ListDir { path }
+            | Action::StatPath { path }
             | Action::SearchFile { path, .. } => self.check_path(path, Capability::FilesystemRead),
+            Action::MakeDir { path } | Action::DeletePath { path } => {
+                self.check_path(path, Capability::FilesystemWrite)
+            }
+            Action::CopyFile { from, to } | Action::MoveFile { from, to } => {
+                let read = self.check_path(from, Capability::FilesystemRead);
+                if read != PermissionDecision::Allow {
+                    return read;
+                }
+                self.check_path(to, Capability::FilesystemWrite)
+            }
             Action::PatchFile { path, .. } => {
                 let read = self.check_path(path, Capability::FilesystemRead);
                 if read != PermissionDecision::Allow {
@@ -403,8 +415,9 @@ impl PermissionPolicy {
             || raw.split('/').any(|part| {
                 let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
                 part.eq_ignore_ascii_case(".harness")
-                    || part.ends_with('.')
-                    || part.ends_with(' ')
+                    // A lone "." names the workspace root itself; trailing
+                    // dots/spaces elsewhere stay denied (Windows ambiguity).
+                    || (part != "." && (part.ends_with('.') || part.ends_with(' ')))
                     || matches!(
                         stem.as_str(),
                         "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
@@ -520,6 +533,27 @@ mod tests {
             assert!(parse_fetch_url(raw).is_err(), "{raw}");
         }
         assert!(parse_fetch_url(&format!("https://example.com/{}", "x".repeat(3000))).is_err());
+    }
+
+    #[test]
+    fn dot_names_the_workspace_root_but_trailing_dots_stay_denied() {
+        let root = std::env::temp_dir();
+        let policy = PermissionPolicy::milestone_default(&root);
+        let read = |path: &str| policy.check(&Action::ListDir { path: path.into() });
+        // A lone "." lists the workspace root itself.
+        assert_eq!(read("."), PermissionDecision::Allow);
+        assert_eq!(
+            read("sub/."),
+            PermissionDecision::Allow,
+            "harmless navigation inside the root stays usable"
+        );
+        // Trailing dots/spaces are Windows-ambiguous filenames, not navigation.
+        for bad in ["foo.", "foo ", "sub/file.", "..", "../x", ""] {
+            assert!(
+                matches!(read(bad), PermissionDecision::Deny(_)),
+                "{bad} must be denied"
+            );
+        }
     }
 
     #[test]

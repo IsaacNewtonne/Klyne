@@ -35,8 +35,15 @@ pub fn save(path: &Path, chat: &Chat) -> io::Result<()> {
     let tx = db.transaction().map_err(err)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY,payload TEXT NOT NULL);CREATE TABLE IF NOT EXISTS history(kind TEXT NOT NULL,seq INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(kind,seq));").map_err(err)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS action_events(seq INTEGER PRIMARY KEY,action TEXT NOT NULL,state TEXT NOT NULL,evidence TEXT NOT NULL);").map_err(err)?;
-    let prior: Option<String> = tx.query_row("SELECT payload FROM chat WHERE id=1", [], |r| r.get(0)).optional().map_err(err)?;
-    let prior: Value = prior.map(|s| serde_json::from_str(&s)).transpose().map_err(err)?.unwrap_or(Value::Null);
+    let prior: Option<String> = tx
+        .query_row("SELECT payload FROM chat WHERE id=1", [], |r| r.get(0))
+        .optional()
+        .map_err(err)?;
+    let prior: Value = prior
+        .map(|s| serde_json::from_str(&s))
+        .transpose()
+        .map_err(err)?
+        .unwrap_or(Value::Null);
     let before = &prior["pending"];
     let after = chat.pending.as_ref().unwrap_or(&Value::Null);
     if before != after {
@@ -44,17 +51,37 @@ pub fn save(path: &Path, chat: &Chat) -> io::Result<()> {
             return Err(err("Cannot replace an unresolved action"));
         }
         let (action, state, evidence) = if before.is_null() {
-            (after, "dispatched", Value::Null)
+            (after.clone(), "dispatched", Value::Null)
         } else {
             // A returned tool call is not proof of task success. Preserve the
             // observation or explicit reconciliation without calling it verified.
-            let evidence = chat.evidence.last().cloned().unwrap_or(Value::Null);
-            let state = if evidence["agent"] == "User reconciliation" { "reconciled" } else { "returned" };
-            (before, state, evidence)
+            let mut evidence = chat.evidence.last().cloned().unwrap_or(Value::Null);
+            let secrets = crate::broker::secret_values(&chat.execution.secret_grants);
+            crate::broker::scrub_value(&mut evidence, &secrets);
+            let state = if evidence["agent"] == "User reconciliation" {
+                "reconciled"
+            } else {
+                "returned"
+            };
+            let mut action = before.clone();
+            crate::broker::scrub_value(&mut action, &secrets);
+            (action, state, evidence)
         };
-        tx.execute("INSERT INTO action_events(action,state,evidence) VALUES(?1,?2,?3)", params![action.to_string(), state, evidence.to_string()]).map_err(err)?;
+        tx.execute(
+            "INSERT INTO action_events(action,state,evidence) VALUES(?1,?2,?3)",
+            params![action.to_string(), state, evidence.to_string()],
+        )
+        .map_err(err)?;
     }
     let mut metadata = serde_json::to_value(chat).map_err(err)?;
+    // Centralized secret hygiene (audit Phase 2): granted secret values
+    // never persist. Values come from the process environment for names
+    // the user bound, so only live secrets scrub — and only values long
+    // enough to be unambiguous.
+    crate::broker::scrub_value(
+        &mut metadata,
+        &crate::broker::secret_values(&chat.execution.secret_grants),
+    );
     for kind in ["messages", "evidence"] {
         let entries = metadata.as_object_mut().unwrap().remove(kind).unwrap();
         let entries = entries.as_array().unwrap();

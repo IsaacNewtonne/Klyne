@@ -16,9 +16,10 @@ backoff, and persisted usage accounting remain **PLANNED**.
   reqwest blocking I/O with rustls + built-in webPKI roots. No tokio, no
   native TLS, no shell-outs.
 - Strict structured decisions: the closed schema is act/verify/complete/fail
-  with six file tools (`write_file`, `read_file`, `read_range`, `hash_file`,
-  `patch_file`, `search_file`). Shell execution is never proposed. Unknown
-  tools, missing fields, wrong types, and non-JSON responses become `Fail`,
+  with twelve file tools (`write_file`, `read_file`, `read_range`, `hash_file`,
+  `patch_file`, `search_file`, `list_dir`, `stat_path`, `make_dir`,
+  `copy_file`, `move_file`, `delete_path`). Shell execution is never proposed.
+  Unknown tools, missing fields, wrong types, and non-JSON responses become `Fail`,
   never an executed action. Oversized text fields (>2 MiB) are rejected.
 - Credentials and endpoint configuration stay out of prompts and persisted
   task data: `ProviderConfig` holds the endpoint URL and model name plus the
@@ -27,7 +28,8 @@ backoff, and persisted usage accounting remain **PLANNED**.
 - Bounds: per-attempt timeout (default 60 s), response-size cap (default
   256 KiB, enforced while streaming), bounded retries (default 2, only for
   transport errors and HTTP 429/500/502/503/504 with capped backoff), bounded
-  history (default last 20 entries, observations truncated to 2000 chars).
+   history (default last 20 entries, observations truncated to 2000 bytes at a
+   UTF-8 character boundary; see `truncate_to_char_boundary`).
   Everything fails closed to `Fail`.
 - Client-side usage accounting (`http_calls`, `retries`, `prompt_tokens`,
   `completion_tokens`) is exposed via `usage()`; the runtime does not yet

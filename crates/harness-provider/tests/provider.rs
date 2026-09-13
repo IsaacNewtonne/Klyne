@@ -54,8 +54,12 @@ fn read_request(stream: &mut std::net::TcpStream) -> SeenRequest {
     });
     let length: usize = head
         .lines()
-        .find_map(|line| line.strip_prefix("Content-Length: "))
-        .and_then(|value| value.trim().parse().ok())
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
         .unwrap_or(0);
     while raw.len() < header_end + length {
         let count = stream.read(&mut chunk).unwrap();
@@ -546,4 +550,65 @@ fn provider_invalid_action_fails_without_side_effects() {
     assert!(!events.iter().any(|e| e.kind == "ToolCalled"));
     handle.join().unwrap();
     fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn unicode_history_truncates_at_char_boundary_without_panicking() {
+    use harness_core::{Objective, Observation};
+    use harness_provider::truncate_to_char_boundary as truncate_helper;
+
+    // Direct helper coverage: Vietnamese, emoji, and mixed scripts at every
+    // awkward byte offset must stay valid UTF-8 and never panic.
+    for source in [
+        "Tiếng Việt có dấu ễ ộ ữ — test ".repeat(8),
+        "😀🎉🧪🚀✨ mixed ".repeat(8),
+        "hello Tiếng Việt 😀 — mixed 123 ".repeat(8),
+    ] {
+        for limit in [1usize, 2, 3, 5, 7, 10, 25] {
+            let mut data = source.clone();
+            truncate_helper(&mut data, limit);
+            assert!(data.len() <= limit, "limit {limit}");
+            assert!(std::str::from_utf8(data.as_bytes()).is_ok());
+        }
+    }
+
+    // End-to-end: oversized multibyte observations travel through
+    // render_history into the mock provider request without panicking, arrive
+    // as valid UTF-8, and carry the truncation marker.
+    let unicode_observation = "Tiếng Việt 😀🎉 — ".repeat(200);
+    assert!(unicode_observation.len() > 64);
+    let history = vec![(
+        Action::ReadFile {
+            path: "a.txt".into(),
+        },
+        Observation {
+            ok: true,
+            summary: "ok".into(),
+            data: unicode_observation,
+        },
+    )];
+    let (url, seen, handle) = serve(vec![ok(envelope(
+        serde_json::json!({"decision": "fail", "reason": "done"}),
+    ))]);
+    let mut model = OpenAiCompat::new(ProviderConfig::new(&url, "mock-model").with_limits(
+        ProviderLimits {
+            max_observation_chars: 25,
+            ..ProviderLimits::default()
+        },
+    ))
+    .unwrap();
+    let decision = model.decide(&Objective::new("unicode"), &history);
+    assert!(matches!(decision, StepDecision::Fail(_)), "{decision:?}");
+    let request = seen.try_iter().next().expect("mock saw one request");
+    assert!(
+        std::str::from_utf8(request.body.as_bytes()).is_ok(),
+        "request must stay valid UTF-8"
+    );
+    assert!(
+        request.body.contains("[truncated]"),
+        "oversized observation must be marked"
+    );
+    // No half-cut emoji may leak into the transmitted history.
+    assert!(!request.body.contains('\u{FFFD}'));
+    handle.join().unwrap();
 }

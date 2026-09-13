@@ -48,6 +48,9 @@ impl Adapter {
                     "desktop_scroll",
                     "desktop_invoke",
                     "desktop_fill",
+                    "desktop_drag",
+                    "desktop_clipboard_get",
+                    "desktop_clipboard_set",
                 ],
                 "observation_required",
             ),
@@ -70,11 +73,12 @@ impl Adapter {
 pub fn select(root: &Path, app_name: &str, app_id: &str, api: Option<&str>) -> io::Result<Value> {
     if let Some(name) = api {
         // Reads saved definitions only; selecting an adapter must not test a write.
-        let operations = crate::local_apps::execute(
+        let operations = crate::local_apps::execute_with_access(
             root,
             &json!({"tool":"app_operations","name":name}),
             true,
             true,
+            &crate::broker::AppAccess::default(),
         )?;
         if operations["total"].as_u64().unwrap_or(0) == 0 {
             return Err(crate::err("The linked API has no saved operations"));

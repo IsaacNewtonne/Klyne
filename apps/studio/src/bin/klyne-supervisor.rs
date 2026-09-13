@@ -52,6 +52,11 @@ fn main() -> io::Result<()> {
     let mut port = 4317;
     let mut binary = std::env::current_exe()?
         .with_file_name(format!("klyne-studio{}", std::env::consts::EXE_SUFFIX));
+    // Operator attestation path: record a green candidate suite for a
+    // digest after running it outside this process. Staging and activation
+    // both refuse candidates without a fresh attestation.
+    let mut attest_digest: Option<String> = None;
+    let mut attest_command: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--root" => {
@@ -59,6 +64,18 @@ fn main() -> io::Result<()> {
                     .next()
                     .ok_or_else(|| io::Error::other("Missing root"))?
                     .into()
+            }
+            "--attest-digest" => {
+                attest_digest = Some(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("Missing digest"))?,
+                )
+            }
+            "--attest-command" => {
+                attest_command = Some(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("Missing command"))?,
+                )
             }
             "--port" => {
                 port = args
@@ -73,8 +90,25 @@ fn main() -> io::Result<()> {
                     .ok_or_else(|| io::Error::other("Missing binary"))?
                     .into()
             }
-            _ => return Err(io::Error::other("Use --root, --port or --binary")),
+            _ => {
+                return Err(io::Error::other(
+                    "Use --root, --port, --binary, or --attest-digest with --attest-command",
+                ));
+            }
         }
+    }
+    if let (Some(digest), Some(command)) = (attest_digest.as_ref(), attest_command.as_ref()) {
+        let attestation = activation::attest(&root, digest, command)?;
+        println!(
+            "{}",
+            serde_json::to_string(&attestation).map_err(io::Error::other)?
+        );
+        return Ok(());
+    }
+    if attest_digest.is_some() || attest_command.is_some() {
+        return Err(io::Error::other(
+            "Attestation needs both --attest-digest and --attest-command",
+        ));
     }
     fs::create_dir_all(&root)?;
     root = fs::canonicalize(root)?;
@@ -112,7 +146,7 @@ fn main() -> io::Result<()> {
             && let Ok(candidate) = serde_json::from_slice::<activation::Candidate>(&bytes)
             && health(port).is_some_and(|v| v["ready"] == true && v["pid"] == child.id())
         {
-            let result = activation::preflight(&candidate);
+            let result = activation::preflight(&root, &candidate);
             let rejected = result.as_ref().err().map(ToString::to_string);
             if result.is_ok() {
                 let client = reqwest::blocking::Client::builder()

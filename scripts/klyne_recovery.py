@@ -534,7 +534,8 @@ def apply_changes(workspace, changes):
         name = change.get("path", "")
         path = safe_relative(workspace, name)
         if not ((name.startswith("apps/studio/src/") and not name.startswith("apps/studio/src/bin/")
-                and name not in ("apps/studio/src/activation.rs", "apps/studio/src/recovery.rs"))
+                and name not in ("apps/studio/src/activation.rs", "apps/studio/src/recovery.rs",
+                                 "apps/studio/src/broker.rs"))
                 or name.startswith("apps/studio/web/")
                 or (name.startswith("apps/studio/tests/") and not path.exists() and name.endswith(".rs"))):
             raise RuntimeError(f"Patch targets a protected file: {name}")
@@ -566,9 +567,10 @@ def validate_changes(workspace, before):
         if name in ("repair-plan.md", "repair-result.md"):
             continue
         allowed = ((name.startswith("apps/studio/src/") and not name.startswith("apps/studio/src/bin/")
-                    and name not in ("apps/studio/src/activation.rs", "apps/studio/src/recovery.rs"))
-                   or name.startswith("apps/studio/web/")
-                   or (name.startswith("apps/studio/tests/") and name not in before and name.endswith(".rs")))
+                    and name not in ("apps/studio/src/activation.rs", "apps/studio/src/recovery.rs",
+                                     "apps/studio/src/broker.rs"))
+                    or name.startswith("apps/studio/web/")
+                    or (name.startswith("apps/studio/tests/") and name not in before and name.endswith(".rs")))
         if not allowed or name not in after:
             raise RuntimeError(f"Repair changed a protected file: {name}")
         changed.append(name)

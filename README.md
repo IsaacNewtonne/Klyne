@@ -21,6 +21,17 @@ Run a sample task, switch between conversation and workspace, or open Details. T
 
 Klyne is under active development. Desktop automation currently targets Windows. App coverage depends on available adapters, accessibility controls, and verifiable results; arbitrary message delivery, purchases, deletes, and every application's save behavior are not universally verified. A fallback model using the same Ollama service still shares that service's failure modes.
 
+## Execution guarantees
+
+A September 2026 technical audit ([AUDIT-2026-09-13.md](AUDIT-2026-09-13.md)) drove nine upgrade phases, now implemented:
+
+- **Host-owned authority.** Shell programs run only with exact user-approved (program, arguments) grants; API secrets are bound to approved origins; DELETE calls and other unapproved actions pause for user approval in the pending-action panel — model proposals grant nothing. See `apps/studio/src/broker.rs`.
+- **Honest effects.** Every route reports typed effect states; post-dispatch observation failures preserve uncertainty instead of clearing pending work; task completions need operation-bound evidence receipts, and each step records whether its completion cited fresh evidence.
+- **Qualified extensions.** Saved tools run only after version-and-digest qualification plus user approval; MCP adapter installs are explicit operations; runtime upgrades need fresh test attestations with supervisor rollback.
+- **Verified in tiers.** Deterministic suites, Chrome-gated browser tests, ignored live tests, and Windows desktop checks are documented in [docs/test-tiers.md](docs/test-tiers.md) with environment-recorded baselines.
+
+Known limits: desktop/API consequential actions beyond shell and DELETE have no host-classifiable approval gate; unsupervised model task-success rates are not measured; supervised processes are lifetime-managed, not sandboxed.
+
 ## Run locally
 
 Install a current stable Rust toolchain with edition-2024 support and the platform's native build tools. On Windows, use the MSVC toolchain and Visual Studio C++ build tools. Install and start Ollama if you want local inference; choose a model that fits your hardware.
@@ -62,6 +73,7 @@ Open **http://localhost:8080**. The Pages workflow rebuilds presentation assets 
 | App integrations | [MCP and desktop routes](docs/app-connections.md) |
 | Recovery | [Recovery service](docs/recovery.md) |
 | Architecture and next steps | [Autonomy roadmap](docs/autonomy-roadmap.md) |
+| Audit and test tiers | [2026-09 audit](AUDIT-2026-09-13.md) · [Test tiers](docs/test-tiers.md) |
 | Core runtime | [Harness overview](docs/harness-overview.md) |
 
 The Rust workspace includes the core runtime, providers, browser control, benchmarks, memory, experiments, CLI, and Studio. The model proposes actions; the host owns execution, permissions, persistence, and independent checks.

@@ -2,7 +2,8 @@ use crate::permissions::{PermissionDecision, PermissionPolicy};
 use crate::types::{Action, Observation};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     Arc,
@@ -52,6 +53,14 @@ pub struct WorkspaceFsTool;
 
 /// Hard per-operation ceiling, including recovery reads. Not a total memory cap.
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
+
+/// Maximum directory entries returned by one `list_dir`; the remainder sets
+/// `truncated` instead of growing the observation.
+pub const MAX_LIST_ENTRIES: usize = 500;
+
+/// Maximum bytes moved by one `copy_file`; larger transfers need an
+/// approved job or chunked protocol (Phase 4 remainder).
+pub const MAX_COPY_BYTES: u64 = 64 * 1024 * 1024;
 
 fn bounded_read(path: &std::path::Path) -> io::Result<String> {
     // Check before opening to reject known special files; concurrent hostile
@@ -113,6 +122,36 @@ impl Tool for WorkspaceFsTool {
                     description: "Bounded substring search (needle <=1 KiB, <=50 matches) over files up to 64 MiB.".into(),
                     effects: "read-only:filesystem.read".into(),
                 },
+                ActionDescriptor {
+                    action: "ListDir".into(),
+                    description: "List a workspace directory (names and kinds, <=500 entries, sorted).".into(),
+                    effects: "read-only:filesystem.read".into(),
+                },
+                ActionDescriptor {
+                    action: "StatPath".into(),
+                    description: "Report kind (file/dir), size, and readonly flag for one workspace path.".into(),
+                    effects: "read-only:filesystem.read".into(),
+                },
+                ActionDescriptor {
+                    action: "MakeDir".into(),
+                    description: "Create a workspace directory and missing parents.".into(),
+                    effects: "mutating:filesystem.write".into(),
+                },
+                ActionDescriptor {
+                    action: "CopyFile".into(),
+                    description: "Copy one regular file (<=64 MiB); the destination must not exist.".into(),
+                    effects: "mutating:filesystem.write".into(),
+                },
+                ActionDescriptor {
+                    action: "MoveFile".into(),
+                    description: "Atomically rename a file or directory; the destination must not exist.".into(),
+                    effects: "mutating:filesystem.write".into(),
+                },
+                ActionDescriptor {
+                    action: "DeletePath".into(),
+                    description: "Delete one file or empty directory; non-empty directories are refused.".into(),
+                    effects: "mutating:filesystem.write".into(),
+                },
             ],
         }
     }
@@ -170,11 +209,25 @@ impl Tool for WorkspaceFsTool {
                         data: e.to_string(),
                     };
                 }
-                match fs::write(&full, contents) {
-                    Ok(()) => Observation {
+                // Atomic publication: the previous content (or absence) stays
+                // intact until the staged replacement renames over it, so a
+                // crash or power loss can never leave a truncated file.
+                // (Audit HIGH: destructive write behavior.)
+                let parent = full
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| policy.workspace_root().to_path_buf());
+                match (|| -> io::Result<usize> {
+                    let mut staged = tempfile::NamedTempFile::new_in(&parent)?;
+                    staged.write_all(contents.as_bytes())?;
+                    staged.as_file().sync_all()?;
+                    staged.persist(&full).map_err(|e| e.error)?;
+                    Ok(contents.len())
+                })() {
+                    Ok(size) => Observation {
                         ok: true,
                         summary: format!("wrote {path}"),
-                        data: contents.len().to_string(),
+                        data: size.to_string(),
                     },
                     Err(e) => Observation {
                         ok: false,
@@ -203,6 +256,272 @@ impl Tool for WorkspaceFsTool {
                     Err(e) => Observation {
                         ok: false,
                         summary: format!("read failed for {path}"),
+                        data: e.to_string(),
+                    },
+                }
+            }
+            Action::ListDir { path } => {
+                let full = match policy.resolve_workspace_path(path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Observation {
+                            ok: false,
+                            summary: "invalid path".into(),
+                            data: e,
+                        };
+                    }
+                };
+                match (|| -> io::Result<String> {
+                    let mut entries = Vec::new();
+                    let mut truncated = false;
+                    let mut count = 0;
+                    for entry in fs::read_dir(&full)? {
+                        let entry = entry?;
+                        count += 1;
+                        if entries.len() >= MAX_LIST_ENTRIES {
+                            truncated = true;
+                            continue;
+                        }
+                        let kind = entry.file_type()?;
+                        entries.push(serde_json::json!({
+                            "name": entry.file_name().to_string_lossy(),
+                            "kind": if kind.is_dir() { "dir" } else if kind.is_file() { "file" } else { "other" },
+                        }));
+                    }
+                    entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                    Ok(serde_json::json!({
+                        "path": path,
+                        "entries": entries,
+                        "scanned": count,
+                        "truncated": truncated,
+                    })
+                    .to_string())
+                })() {
+                    Ok(data) => Observation {
+                        ok: true,
+                        summary: format!("listed {path}"),
+                        data,
+                    },
+                    Err(e) => Observation {
+                        ok: false,
+                        summary: format!("list failed for {path}"),
+                        data: e.to_string(),
+                    },
+                }
+            }
+            Action::StatPath { path } => {
+                let full = match policy.resolve_workspace_path(path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Observation {
+                            ok: false,
+                            summary: "invalid path".into(),
+                            data: e,
+                        };
+                    }
+                };
+                match (|| -> io::Result<String> {
+                    let metadata = fs::symlink_metadata(&full)?;
+                    if metadata.file_type().is_symlink() {
+                        return Err(io::Error::other("symlinks are not allowed"));
+                    }
+                    Ok(serde_json::json!({
+                        "path": path,
+                        "kind": if metadata.is_dir() { "dir" } else if metadata.is_file() { "file" } else { "other" },
+                        "size": metadata.len(),
+                        "readonly": metadata.permissions().readonly(),
+                    })
+                    .to_string())
+                })() {
+                    Ok(data) => Observation {
+                        ok: true,
+                        summary: format!("stated {path}"),
+                        data,
+                    },
+                    Err(e) => Observation {
+                        ok: false,
+                        summary: format!("stat failed for {path}"),
+                        data: e.to_string(),
+                    },
+                }
+            }
+            Action::MakeDir { path } => {
+                let full = match policy.resolve_workspace_path(path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Observation {
+                            ok: false,
+                            summary: "invalid path".into(),
+                            data: e,
+                        };
+                    }
+                };
+                match fs::create_dir_all(&full) {
+                    Ok(()) => Observation {
+                        ok: true,
+                        summary: format!("created directory {path}"),
+                        data: full.is_dir().to_string(),
+                    },
+                    Err(e) => Observation {
+                        ok: false,
+                        summary: format!("mkdir failed for {path}"),
+                        data: e.to_string(),
+                    },
+                }
+            }
+            Action::CopyFile { from, to } => {
+                let source = match policy.resolve_workspace_path(from) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Observation {
+                            ok: false,
+                            summary: "invalid source path".into(),
+                            data: e,
+                        };
+                    }
+                };
+                // Destination needs the write grant; resolve checks read, and
+                // the top-level policy check already enforced write on `to`.
+                let dest = match policy.resolve_workspace_path(to) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Observation {
+                            ok: false,
+                            summary: "invalid destination path".into(),
+                            data: e,
+                        };
+                    }
+                };
+                match (|| -> io::Result<u64> {
+                    let metadata = fs::symlink_metadata(&source)?;
+                    if !metadata.is_file() || metadata.file_type().is_symlink() {
+                        return Err(io::Error::other("copy supports regular files only"));
+                    }
+                    if metadata.len() > MAX_COPY_BYTES {
+                        return Err(io::Error::other("file exceeds 64 MiB copy limit"));
+                    }
+                    // Checked before staging: Unix rename would otherwise
+                    // silently overwrite an existing destination.
+                    if fs::symlink_metadata(&dest).is_ok() {
+                        return Err(io::Error::other("destination exists; delete it first"));
+                    }
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let mut staged = tempfile::NamedTempFile::new_in(
+                        dest.parent()
+                            .ok_or_else(|| io::Error::other("missing parent"))?,
+                    )?;
+                    let mut input = fs::File::open(&source)?;
+                    let bytes = io::copy(&mut (&mut input).take(MAX_COPY_BYTES + 1), &mut staged)?;
+                    if bytes > MAX_COPY_BYTES {
+                        return Err(io::Error::other("file exceeds 64 MiB copy limit"));
+                    }
+                    staged.as_file().sync_all()?;
+                    staged.persist(&dest).map_err(|e| e.error)?;
+                    Ok(bytes)
+                })() {
+                    Ok(bytes) => Observation {
+                        ok: true,
+                        summary: format!("copied {from} to {to}"),
+                        data: bytes.to_string(),
+                    },
+                    Err(e) => Observation {
+                        ok: false,
+                        summary: format!("copy failed for {from}"),
+                        data: e.to_string(),
+                    },
+                }
+            }
+            Action::MoveFile { from, to } => {
+                let source = match policy.resolve_workspace_path(from) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Observation {
+                            ok: false,
+                            summary: "invalid source path".into(),
+                            data: e,
+                        };
+                    }
+                };
+                let dest = match policy.resolve_workspace_path(to) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Observation {
+                            ok: false,
+                            summary: "invalid destination path".into(),
+                            data: e,
+                        };
+                    }
+                };
+                match (|| -> io::Result<()> {
+                    let metadata = fs::symlink_metadata(&source)?;
+                    if metadata.file_type().is_symlink() {
+                        return Err(io::Error::other("symlinks are not allowed"));
+                    }
+                    // Best-effort guard: Windows rename fails on existing
+                    // destinations; Unix rename would replace one, so check
+                    // first (a concurrent creator racing this call is outside
+                    // the workspace threat model, as elsewhere here).
+                    if dest.exists() {
+                        return Err(io::Error::other("destination exists; delete it first"));
+                    }
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    // Same-volume rename: atomic, no copy window.
+                    fs::rename(&source, &dest)
+                })() {
+                    Ok(()) => Observation {
+                        ok: true,
+                        summary: format!("moved {from} to {to}"),
+                        data: to.clone(),
+                    },
+                    Err(e) => Observation {
+                        ok: false,
+                        summary: format!("move failed for {from}"),
+                        data: e.to_string(),
+                    },
+                }
+            }
+            Action::DeletePath { path } => {
+                let full = match policy.resolve_workspace_path(path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Observation {
+                            ok: false,
+                            summary: "invalid path".into(),
+                            data: e,
+                        };
+                    }
+                };
+                match (|| -> io::Result<String> {
+                    let metadata = fs::symlink_metadata(&full)?;
+                    if metadata.file_type().is_symlink() {
+                        return Err(io::Error::other("symlinks are not allowed"));
+                    }
+                    if metadata.is_dir() {
+                        // No recursive deletion without a scoped approval
+                        // broker (deferred Phase 2); empty dirs go directly.
+                        fs::remove_dir(&full).map_err(|_| {
+                            io::Error::other("directory is not empty; refusing recursive delete")
+                        })?;
+                        return Ok("dir".into());
+                    }
+                    if !metadata.is_file() {
+                        return Err(io::Error::other("only regular files and empty directories"));
+                    }
+                    fs::remove_file(&full)?;
+                    Ok("file".into())
+                })() {
+                    Ok(kind) => Observation {
+                        ok: true,
+                        summary: format!("deleted {path}"),
+                        data: kind,
+                    },
+                    Err(e) => Observation {
+                        ok: false,
+                        summary: format!("delete failed for {path}"),
                         data: e.to_string(),
                     },
                 }

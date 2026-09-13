@@ -1,23 +1,24 @@
-mod mcp;
 mod activation;
-mod app_schema;
 mod app_adapter;
-mod execution_graph;
-mod failure_policy;
-mod route_recovery;
-mod restart_reconciliation;
-mod document_save;
-mod completion_guard;
+mod app_schema;
+mod broker;
 mod browser_tools;
 mod capabilities;
 mod chat;
 mod chat_store;
+mod completion_guard;
 mod connections;
 mod desktop;
+mod document_save;
+mod execution_graph;
+mod failure_policy;
 mod improvement;
 mod local_apps;
+mod mcp;
 mod network;
 mod recovery;
+mod restart_reconciliation;
+mod route_recovery;
 mod telemetry;
 
 use harness_core::{
@@ -281,7 +282,7 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
     }
     let (method, path) = (parts[0], parts[1]);
     if method == "GET" {
-        let asset = match path {
+        let asset = match path.split('?').next().unwrap_or(path) {
             "/" => Some((
                 "text/html; charset=utf-8",
                 include_bytes!("../web/chat.html").as_slice(),
@@ -325,7 +326,8 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         }
         if method == "GET" && path == "/api/recovery" {
             let settings = recovery::settings(&studio.root);
-            let state = fs::read(studio.root.join("recovery/status.json")).ok()
+            let state = fs::read(studio.root.join("recovery/status.json"))
+                .ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
             return Ok(json!({"enabled":settings.is_some(),"state":state}));
         }
@@ -380,7 +382,11 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         let body: Value = serde_json::from_slice(&body).map_err(err)?;
         let starting = matches!(
             path,
-            "/api/chats" | "/api/runs" | "/api/desktop/launch" | "/api/apps/select" | "/api/runtime/quiesce"
+            "/api/chats"
+                | "/api/runs"
+                | "/api/desktop/launch"
+                | "/api/apps/select"
+                | "/api/runtime/quiesce"
         );
         let _admission = starting.then(|| studio.admission.lock().unwrap());
         if path == "/api/runtime/quiesce" {
@@ -402,7 +408,18 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
             }
             let root = studio.root.join("conversations");
             fs::create_dir_all(&root)?;
-            return local_apps::execute(&root, &body, true, false);
+            // Management-UI calls carry the user's own typing (including
+            // credential names), so they run as user-authorized.
+            return local_apps::execute_with_access(
+                &root,
+                &body,
+                true,
+                false,
+                &broker::AppAccess {
+                    by_user: true,
+                    ..Default::default()
+                },
+            );
         }
         if let Some(id) = path
             .strip_prefix("/api/chats/")
@@ -429,13 +446,24 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
             return connections::Connection::parse(&body)?.check();
         }
         if path == "/api/apps/select" {
-            let id=body["app_id"].as_str().ok_or_else(||err("Choose an installed app"))?;
-            let apps=desktop_apps(&studio.root)?;
-            let app=apps["apps"].as_array().and_then(|a|a.iter().find(|a|a["AppID"]==id)).ok_or_else(||err("App is not installed"))?;
-            let name=app["Name"].as_str().unwrap_or("");
-            let api_connection = body.get("api_connection").map(|v| v.as_str().ok_or_else(||err("Invalid API connection"))).transpose()?;
-            let route=app_adapter::select(&studio.root.join("conversations"),name,id,api_connection)?;
-            if route["route"]=="desktop" {desktop_launch(&studio.root,id)?;}
+            let id = body["app_id"]
+                .as_str()
+                .ok_or_else(|| err("Choose an installed app"))?;
+            let apps = desktop_apps(&studio.root)?;
+            let app = apps["apps"]
+                .as_array()
+                .and_then(|a| a.iter().find(|a| a["AppID"] == id))
+                .ok_or_else(|| err("App is not installed"))?;
+            let name = app["Name"].as_str().unwrap_or("");
+            let api_connection = body
+                .get("api_connection")
+                .map(|v| v.as_str().ok_or_else(|| err("Invalid API connection")))
+                .transpose()?;
+            let route =
+                app_adapter::select(&studio.root.join("conversations"), name, id, api_connection)?;
+            if route["route"] == "desktop" {
+                desktop_launch(&studio.root, id)?;
+            }
             return Ok(route);
         }
         if path == "/api/desktop/launch" {

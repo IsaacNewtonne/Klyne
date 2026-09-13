@@ -1,7 +1,7 @@
 //! OpenAI-compatible chat-completions adapter with strict decisions.
 //!
 //! Works with any endpoint serving the chat-completions dialect, including
-//! local servers where compatible. The adapter proposes only the six
+//! local servers where compatible. The adapter proposes only the twelve
 //! workspace file actions; shell execution is never proposed. Every response
 //! is validated before it can become a [`harness_core::StepDecision`]:
 //! unknown tools, missing fields, and wrong types become `Fail`, never an
@@ -65,8 +65,8 @@ pub const SYSTEM_PROMPT: &str = r#"You are the cognition module of a file-scoped
 {"decision":"complete","summary":"..."}
 {"decision":"fail","reason":"..."}
 The action object has {"tool":<name>, ...fields} where tool is one of:
-write_file {path, contents}, read_file {path}, read_range {path, offset, length}, hash_file {path}, patch_file {path, offset, expected, replacement, expected_sha256}, search_file {path, needle, max_matches}.
-Paths are workspace-relative: use the exact relative path from the objective (for example hello.txt), never /workspace/hello.txt or any absolute path. After writing, request verify with read_file and the same relative path, then complete after its observation matches. Offsets and lengths are byte counts. patch_file requires the current whole-file SHA-256 hex digest. Never propose anything else; the runtime validates, authorizes, and executes."#;
+write_file {path, contents}, read_file {path}, read_range {path, offset, length}, hash_file {path}, patch_file {path, offset, expected, replacement, expected_sha256}, search_file {path, needle, max_matches}, list_dir {path}, stat_path {path}, make_dir {path}, copy_file {from, to}, move_file {from, to}, delete_path {path}.
+Paths are workspace-relative: use the exact relative path from the objective (for example hello.txt), never /workspace/hello.txt or any absolute path. list_dir lists one directory (<=500 entries); stat_path reports kind/size/readonly. make_dir creates parents. copy_file and move_file refuse existing destinations; delete_path removes one file or empty directory only and never recurses. After writing, request verify with read_file and the same relative path, then complete after its observation matches. Offsets and lengths are byte counts. patch_file requires the current whole-file SHA-256 hex digest. Never propose anything else; the runtime validates, authorizes, and executes."#;
 
 /// Adapter state. Usage accumulates across `decide` calls; read transport
 /// telemetry with [`OpenAiCompat::telemetry`] and metered spend through the
@@ -126,8 +126,7 @@ impl OpenAiCompat {
         let start = history.len().saturating_sub(limits.max_history_entries);
         for (index, (action, observation)) in history.iter().enumerate().skip(start) {
             let mut data = observation.data.clone();
-            if data.len() > limits.max_observation_chars {
-                data.truncate(limits.max_observation_chars);
+            if crate::truncate_to_char_boundary(&mut data, limits.max_observation_chars) {
                 data.push_str("[truncated]");
             }
             out.push_str(&format!(
@@ -347,6 +346,26 @@ fn map_action(action: &serde_json::Value) -> Result<Action, String> {
             needle: bounded_text(required_str(action, "needle")?, "needle")?,
             max_matches: required_u64(action, "max_matches")?,
         }),
+        "list_dir" => Ok(Action::ListDir {
+            path: required_str(action, "path")?,
+        }),
+        "stat_path" => Ok(Action::StatPath {
+            path: required_str(action, "path")?,
+        }),
+        "make_dir" => Ok(Action::MakeDir {
+            path: required_str(action, "path")?,
+        }),
+        "copy_file" => Ok(Action::CopyFile {
+            from: required_str(action, "from")?,
+            to: required_str(action, "to")?,
+        }),
+        "move_file" => Ok(Action::MoveFile {
+            from: required_str(action, "from")?,
+            to: required_str(action, "to")?,
+        }),
+        "delete_path" => Ok(Action::DeletePath {
+            path: required_str(action, "path")?,
+        }),
         _ => Err(format!("unknown tool '{tool}'")),
     }
 }
@@ -377,5 +396,81 @@ impl Model for OpenAiCompat {
             Ok(envelope) => self.decide_from_envelope(envelope),
             Err(reason) => StepDecision::Fail(reason),
         }
+    }
+}
+
+#[cfg(test)]
+mod directory_tool_tests {
+    use super::map_decision;
+    use harness_core::{Action, StepDecision};
+
+    fn act(tool: &str, fields: serde_json::Value) -> serde_json::Value {
+        let mut action = serde_json::json!({"tool": tool});
+        for (key, value) in fields.as_object().unwrap() {
+            action[key] = value.clone();
+        }
+        serde_json::json!({"decision": "act", "action": action})
+    }
+
+    #[test]
+    fn directory_tools_parse_to_typed_actions() {
+        for (tool, fields, expected) in [
+            (
+                "list_dir",
+                serde_json::json!({"path": "sub"}),
+                Action::ListDir { path: "sub".into() },
+            ),
+            (
+                "stat_path",
+                serde_json::json!({"path": "a.txt"}),
+                Action::StatPath {
+                    path: "a.txt".into(),
+                },
+            ),
+            (
+                "make_dir",
+                serde_json::json!({"path": "new/nested"}),
+                Action::MakeDir {
+                    path: "new/nested".into(),
+                },
+            ),
+            (
+                "copy_file",
+                serde_json::json!({"from": "a.txt", "to": "b.txt"}),
+                Action::CopyFile {
+                    from: "a.txt".into(),
+                    to: "b.txt".into(),
+                },
+            ),
+            (
+                "move_file",
+                serde_json::json!({"from": "a.txt", "to": "sub/b.txt"}),
+                Action::MoveFile {
+                    from: "a.txt".into(),
+                    to: "sub/b.txt".into(),
+                },
+            ),
+            (
+                "delete_path",
+                serde_json::json!({"path": "old.txt"}),
+                Action::DeletePath {
+                    path: "old.txt".into(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                map_decision(&act(tool, fields)),
+                StepDecision::Act(expected)
+            );
+        }
+        // Missing fields and unknown tools stay failures, never actions.
+        assert!(matches!(
+            map_decision(&act("copy_file", serde_json::json!({"from": "a"}))),
+            StepDecision::Fail(_)
+        ));
+        assert!(matches!(
+            map_decision(&act("format_disk", serde_json::json!({}))),
+            StepDecision::Fail(_)
+        ));
     }
 }

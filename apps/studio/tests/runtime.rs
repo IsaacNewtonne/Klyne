@@ -76,6 +76,27 @@ fn supervisor_rejects_bad_digest_activates_and_rolls_back_failed_startup() {
     assert_eq!(app.health().unwrap()["pid"], original);
     app.wait(|| !app.root.path().join("runtime/pending.json").exists());
     app.stage(binary, None);
+    // Identity and protocol alone do not qualify: activation requires an
+    // independently produced test attestation for the exact digest.
+    app.wait(|| {
+        app.result().is_some_and(|v| {
+            v["rejected"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("attestation"))
+        })
+    });
+    app.wait(|| !app.root.path().join("runtime/pending.json").exists());
+    let digest = format!("{:x}", Sha256::digest(fs::read(binary).unwrap()));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    fs::write(
+        app.root.path().join(format!("runtime/attestation-{digest}.json")),
+        json!({"digest":digest,"test_command":"cargo test --workspace --locked","test_result":"pass","produced_at_ms":now_ms}).to_string(),
+    )
+    .unwrap();
+    app.stage(binary, None);
     app.wait(|| app.result().is_some_and(|v| v["rollback"] == false));
     let activated = app.health().unwrap()["pid"].clone();
     assert_ne!(activated, original);
@@ -97,6 +118,14 @@ fn supervisor_rejects_bad_digest_activates_and_rolls_back_failed_startup() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Every candidate needs its own attestation, including the failing one:
+    // the gate binds attestation per digest, not per test.
+    let fails_digest = format!("{:x}", Sha256::digest(fs::read(&candidate).unwrap()));
+    fs::write(
+        app.root.path().join(format!("runtime/attestation-{fails_digest}.json")),
+        json!({"digest":fails_digest,"test_command":"rustc fails.rs","test_result":"pass","produced_at_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64}).to_string(),
+    )
+    .unwrap();
     app.stage(&candidate, None);
     app.wait(|| app.result().is_some_and(|v| v["rollback"] == true));
     app.wait(|| app.health().is_some());

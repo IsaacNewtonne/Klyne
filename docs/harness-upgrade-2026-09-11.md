@@ -40,7 +40,7 @@ Workers with Terminal access can create capabilities themselves:
 
 `capability_list` searches stored descriptions with `query` and pages with `offset`. `skill_read` loads instructions. `memory_save`/`memory_read` store and retrieve reusable findings. `capability_history` lists versions; `capability_restore` activates an earlier version. Capabilities live in `conversations/capabilities.sqlite3`, shared by conversations in that Studio root.
 
-Saving a tool activates its definition immediately; successful execution marks the specific version tested. Updating it creates a new untested version. Tools use argv and append supplied invocation arguments. Use absolute script paths so another conversation can reuse a script. Reviewers can inspect definitions but cannot create, restore or execute them.
+Saving a tool activates its definition immediately but never qualifies it: `tool_test` runs the active version once and binds the tested flag to that version's program/args digest (with a timestamp), and only then does `tool_run` execute it. Updating creates a new untested version; restoring an untested version does not borrow an older version's qualification. Tools use argv and append supplied invocation arguments. Use absolute script paths so another conversation can reuse a script. Reviewers can inspect definitions but cannot create, restore, test or execute them. Exit zero records the run; judging semantic correctness from the output stays the model's job.
 
 This is Klyne's native registry. It does not automatically import Codex's personal skill directories or implement the MCP transport protocol. An external MCP client or app SDK can be wrapped in a registered executable tool. Registry definitions do not grant themselves additional access.
 

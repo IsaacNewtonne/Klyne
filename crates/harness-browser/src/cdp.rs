@@ -214,12 +214,47 @@ impl CdpSession {
             .ok_or_else(|| format!("CDP response #{id} has no result"))
     }
 
-    /// Wait for a domain event such as `Page.loadEventFired`.
-    pub(crate) fn wait_event(&mut self, method: &str, timeout: Duration) -> Result<Value, String> {
-        if let Some(index) = self.events.iter().position(|e| e["method"] == method) {
+    /// Drop queued events for `method`. Call before an operation whose
+    /// completion you will wait on: a stale queued event (e.g. from a
+    /// previous navigation) must never satisfy a later wait.
+    pub(crate) fn drain_event(&mut self, method: &str) {
+        self.events
+            .retain(|e| e.get("method").and_then(Value::as_str) != Some(method));
+    }
+
+    /// Wait for `method` with identity correlation against `params[key]`.
+    ///
+    /// - `key = "frameId"` binds the wait to our frame (e.g.
+    ///   `Page.frameStoppedLoading` after `Page.navigate`).
+    /// - `key = "loaderId"` binds navigations where the event carries one.
+    /// - `key = ""` accepts the first fresh event; only sound when the
+    ///   caller drained stale events first (see [`drain_event`](Self::drain_event)).
+    ///
+    /// Non-matching events park back in the queue; the caller shares one
+    /// absolute `deadline` across sequential waits so worst-case timing
+    /// stays bounded. Note: some Chrome builds emit `Page.loadEventFired`
+    /// with only a timestamp, so frame correlation is the primary signal
+    /// and the load event is the freshness-checked secondary.
+    pub(crate) fn wait_event_matching(
+        &mut self,
+        method: &str,
+        key: &str,
+        want: &str,
+        deadline: Instant,
+    ) -> Result<Value, String> {
+        // Correlated check first; with an empty key any queued event for
+        // the method satisfies (freshness is the caller's drain duty).
+        if let Some(index) = self.events.iter().position(|e| {
+            e.get("method").and_then(Value::as_str) == Some(method)
+                && (key.is_empty()
+                    || want.is_empty()
+                    || e.get("params")
+                        .and_then(|p| p.get(key))
+                        .and_then(Value::as_str)
+                        == Some(want))
+        }) {
             return Ok(self.events.remove(index).unwrap()["params"].clone());
         }
-        let deadline = Instant::now() + timeout;
         loop {
             if Instant::now() > deadline {
                 return Err(format!("timed out waiting for {method}"));
@@ -231,7 +266,16 @@ impl CdpSession {
             let message: Value =
                 serde_json::from_str(&text).map_err(|e| format!("bad CDP frame: {e}"))?;
             if message.get("method").and_then(Value::as_str) == Some(method) {
-                return Ok(message.get("params").cloned().unwrap_or(Value::Null));
+                let correlated = key.is_empty()
+                    || want.is_empty()
+                    || message
+                        .get("params")
+                        .and_then(|p| p.get(key))
+                        .and_then(Value::as_str)
+                        == Some(want);
+                if correlated {
+                    return Ok(message.get("params").cloned().unwrap_or(Value::Null));
+                }
             }
             if message.get("id").is_some() {
                 return Err("Unexpected CDP response ID".into());

@@ -61,7 +61,12 @@ Reviewers may list definitions and saved operations but cannot invoke APIs,
 including GET endpoints, or fetch a schema.
 App data remains untrusted. Connections accept `auth.bearer_env` or
 `auth.headers_env` mappings from header names to environment variable names.
-Credential values are resolved in the server process and known echoes are redacted.
+Every named secret needs a user grant for the exact origin — declared in the
+request `grants` or approved as a pending proposal — otherwise the call pauses
+before anything transmits. DELETE calls additionally need an exact
+(connection, method, path) approval. Credential values are resolved in the
+server process, redacted from echoes, and scrubbed from prompts and stored
+history for granted names.
 Interactive OAuth, streaming, automatic port scans and launcher lifecycle integration
 remain unimplemented. Stop cancels active HTTP requests; uncertain mutating outcomes
 remain pending for inspection.

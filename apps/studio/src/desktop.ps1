@@ -41,11 +41,23 @@ try {
         'desktop_scroll' { [KlyneDesktop]::Scroll([string]$action.window,[int]$action.ticks) }
         'desktop_invoke' { [KlyneDesktop]::ElementAction([string]$action.window,[string]$action.element,'',$false) }
         'desktop_fill' { [KlyneDesktop]::ElementAction([string]$action.window,[string]$action.element,[string]$action.text,$true) }
+        'desktop_drag' {
+            $screen = $request.previous.screen
+            $x1 = [int]$screen.left + [int]([double]$action.x1 * [double]$screen.width / [double]$screen.image_width)
+            $y1 = [int]$screen.top + [int]([double]$action.y1 * [double]$screen.height / [double]$screen.image_height)
+            $x2 = [int]$screen.left + [int]([double]$action.x2 * [double]$screen.width / [double]$screen.image_width)
+            $y2 = [int]$screen.top + [int]([double]$action.y2 * [double]$screen.height / [double]$screen.image_height)
+            [KlyneDesktop]::Drag([string]$action.window,$x1,$y1,$x2,$y2)
+        }
+        'desktop_clipboard_get' { $clipboard = [KlyneDesktop]::ClipboardGet() }
+        'desktop_clipboard_set' { [KlyneDesktop]::ClipboardSet([string]$action.text) }
         default { throw 'Unknown desktop action' }
     }
     Start-Sleep -Milliseconds 150
     $observation = [KlyneDesktop]::Observe([string]$request.image_path)
-    @{ok=$true; observation=$observation} | ConvertTo-Json -Depth 12 -Compress
+    $result = @{ok=$true; observation=$observation}
+    if ($action.tool -eq 'desktop_clipboard_get') { $result['clipboard'] = $clipboard }
+    $result | ConvertTo-Json -Depth 12 -Compress
 } catch {
     $failure = $_.Exception.Message + ' [' + $_.FullyQualifiedErrorId + ']'
     try {

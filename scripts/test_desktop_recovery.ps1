@@ -65,6 +65,16 @@ try {
     $value=$long.controls | Where-Object {$_.element -eq $field.element} | Select-Object -First 1
     if(!$value.value_truncated){throw 'Truncated field evidence was not marked'}
     'PASS: exact field value observed; truncated values explicitly marked.'
+    $priorClip=''
+    try{$priorClip=[KlyneDesktop]::ClipboardGet()}catch{}
+    try {
+        [KlyneDesktop]::ClipboardSet('Klyne clipboard check 123')
+        $back=[KlyneDesktop]::ClipboardGet()
+        if($back -ne 'Klyne clipboard check 123'){throw 'Clipboard roundtrip failed'}
+        'PASS: clipboard roundtrip preserves text.'
+    } finally {
+        try{[KlyneDesktop]::ClipboardSet($priorClip)}catch{}
+    }
     [KlyneDesktop]::InputStarted=$false
     $rejected=$false
     try {[KlyneDesktop]::CheckLayout($id,-999,-999,1,1)}catch{$rejected=$true}

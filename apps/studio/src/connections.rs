@@ -29,6 +29,9 @@ pub struct Connection {
     pub model: String,
 }
 impl Connection {
+    /// One model decision plus the metered usage behind it. Callers accrue
+    /// the usage into durable turn totals; Studio budgets enforce them in
+    /// `guard` (audit Phase 7: track tokens/cost, not just op counts).
     pub fn respond(
         &self,
         workspace: &Path,
@@ -37,7 +40,7 @@ impl Connection {
         prompt_maker: bool,
         screenshot: Option<&Path>,
         stop: &AtomicBool,
-    ) -> io::Result<String> {
+    ) -> io::Result<(String, ModelUsage)> {
         let prompt = format!("{system}\n{}", context);
         if prompt.len() > 128 * 1024 {
             return Err(error("Conversation context exceeded its limit"));
@@ -55,22 +58,30 @@ impl Connection {
                 body["options"] = json!({"temperature":0.2,"top_p":0.5});
             }
             let response = model_post(self, "/api/chat", None, &body, 120, stop)?;
-            return response["message"]["content"]
+            let text = response["message"]["content"]
                 .as_str()
                 .map(str::to_owned)
-                .ok_or_else(|| error("Model returned no message"));
+                .ok_or_else(|| error("Model returned no message"))?;
+            // Ollama reports eval counts on non-streaming chat responses.
+            let usage = ModelUsage {
+                prompt_tokens: response["prompt_eval_count"].as_u64().unwrap_or(0),
+                completion_tokens: response["eval_count"].as_u64().unwrap_or(0),
+                cost_usd: 0.0,
+            };
+            return Ok((text, usage));
         }
         if self.kind == "demo" {
             return Err(error(
                 "Choose an AI connection in Settings to start a conversation.",
             ));
         }
-        AgentConnection {
+        let mut agent = AgentConnection {
             config: self.clone(),
             workspace: workspace.to_owned(),
             usage: ModelUsage::default(),
-        }
-        .decide_text(&prompt, system, screenshot, stop)
+        };
+        let text = agent.decide_text(&prompt, system, screenshot, stop)?;
+        Ok((text, agent.usage))
     }
     pub fn parse(value: &Value) -> io::Result<Self> {
         let mut config: Self = if value.is_null() {

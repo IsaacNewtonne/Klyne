@@ -51,6 +51,26 @@ pub enum Action {
         needle: String,
         max_matches: u64,
     },
+    ListDir {
+        path: String,
+    },
+    StatPath {
+        path: String,
+    },
+    MakeDir {
+        path: String,
+    },
+    CopyFile {
+        from: String,
+        to: String,
+    },
+    MoveFile {
+        from: String,
+        to: String,
+    },
+    DeletePath {
+        path: String,
+    },
     RunShell {
         program: String,
         args: Vec<String>,
@@ -71,7 +91,13 @@ impl Action {
             | Self::ReadFileRange { .. }
             | Self::HashFile { .. }
             | Self::PatchFile { .. }
-            | Self::SearchFile { .. } => "workspace_fs",
+            | Self::SearchFile { .. }
+            | Self::ListDir { .. }
+            | Self::StatPath { .. }
+            | Self::MakeDir { .. }
+            | Self::CopyFile { .. }
+            | Self::MoveFile { .. }
+            | Self::DeletePath { .. } => "workspace_fs",
             Self::RunShell { .. } => "workspace_shell",
             Self::FetchUrl { .. } => "network_fetch",
             Self::Finish { .. } => "runtime",
@@ -135,6 +161,12 @@ impl fmt::Display for Action {
             Action::HashFile { path } => write!(f, "hash_file:{path}"),
             Action::PatchFile { path, offset, .. } => write!(f, "patch_file:{path}:{offset}"),
             Action::SearchFile { path, needle, .. } => write!(f, "search_file:{path}:{needle}"),
+            Action::ListDir { path } => write!(f, "list_dir:{path}"),
+            Action::StatPath { path } => write!(f, "stat_path:{path}"),
+            Action::MakeDir { path } => write!(f, "make_dir:{path}"),
+            Action::CopyFile { from, to } => write!(f, "copy_file:{from}:{to}"),
+            Action::MoveFile { from, to } => write!(f, "move_file:{from}:{to}"),
+            Action::DeletePath { path } => write!(f, "delete_path:{path}"),
             Action::RunShell { program, args } => write!(f, "shell:{} {}", program, args.join(" ")),
             Action::FetchUrl { url } => write!(f, "fetch:{url}"),
             Action::Finish { summary } => write!(f, "finish:{summary}"),

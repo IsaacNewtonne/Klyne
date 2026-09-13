@@ -41,6 +41,28 @@ public static class KlyneDesktop {
         if((GetAsyncKeyState(0x13)&0x8000)!=0 || (cursor.X>=0 && cursor.X<=2 && cursor.Y>=0 && cursor.Y<=2))
             throw new InvalidOperationException("Emergency stop: Pause key or pointer at the primary screen's top-left corner.");
     }
+    // User-input takeover detection (audit Phase 6): the desktop is shared
+    // with the user, so every input primitive snapshots the pointer before
+    // acting and verifies it afterwards. The agent knows exactly where it
+    // put the pointer (Click/Scroll/Drag set it explicitly; keyboard input
+    // never moves it), so any displacement means the user — or something
+    // else — grabbed the mouse mid-operation and the effect is uncertain.
+    static Point CursorNow() { Point p; GetCursorPos(out p); return p; }
+    static void ExpectCursor(Point want,string op) {
+        var after=CursorNow();
+        if(after.X!=want.X || after.Y!=want.Y)
+            throw new Exception(op+" did not land as sent: the pointer moved during input. The user may have taken over; outcome uncertain.");
+    }
+    // Password-focus refusal across primitives (audit Phase 6): the
+    // ElementAction path already rejects password controls, but raw
+    // Type/Press act on whatever holds focus. Refuse there too.
+    static void RefusePasswordFocus() {
+        try {
+            var focused=AutomationElement.FocusedElement;
+            if(focused!=null && focused.Current.IsPassword)
+                throw new Exception("Password fields require your input.");
+        } catch(Exception e) { if(e.Message.Contains("Password"))throw; }
+    }
     static IntPtr Window(string id,bool foreground) {
         CheckEmergency(); long raw;
         if(!long.TryParse(id,out raw) || raw==0) throw new Exception("Invalid window handle. Observe first.");
@@ -76,13 +98,32 @@ public static class KlyneDesktop {
         else if(button=="left")Send(Mouse(2,0),Mouse(4,0));
         else if(button=="double") {Send(Mouse(2,0),Mouse(4,0));Thread.Sleep(70);Send(Mouse(2,0),Mouse(4,0));}
         else throw new Exception("Button must be left, right or double.");
+        ExpectCursor(point,"Click");
+    }
+    public static void Drag(string id,int x1,int y1,int x2,int y2) {
+        var window=Window(id,true);
+        var start=new Point{X=x1,Y=y1};var end=new Point{X=x2,Y=y2};
+        if(GetAncestor(WindowFromPoint(start),2)!=window)throw new Exception("Drag start is covered by another window or outside the target. Observe again.");
+        if(GetAncestor(WindowFromPoint(end),2)!=window)throw new Exception("Drag end is covered by another window or outside the target. Observe again.");
+        if(!SetCursorPos(x1,y1))throw new Exception("Could not move pointer.");
+        Send(Mouse(2,0));
+        for(int step=1;step<=12;step++) {
+            CheckEmergency();
+            int x=x1+(x2-x1)*step/12,y=y1+(y2-y1)*step/12;
+            if(!SetCursorPos(x,y)) { Send(Mouse(4,0)); throw new Exception("Could not move pointer during drag."); }
+            Thread.Sleep(8);
+        }
+        Send(Mouse(4,0));
+        ExpectCursor(end,"Drag");
     }
     public static void Type(string id,string text) {
         if(text.Length>4000)throw new Exception("Type at most 4000 characters per action.");
+        RefusePasswordFocus();var before=CursorNow();
         foreach(char c in text) {Window(id,true);Send(Key(0,c,4),Key(0,c,6));}
+        ExpectCursor(before,"Type");
     }
     public static void Press(string id,string chord) {
-        Window(id,true);var inputs=new List<Input>();var modifiers=new List<ushort>();var parts=chord.ToUpperInvariant().Split('+');
+        Window(id,true);RefusePasswordFocus();var before=CursorNow();var inputs=new List<Input>();var modifiers=new List<ushort>();var parts=chord.ToUpperInvariant().Split('+');
         for(int i=0;i<parts.Length-1;i++) {
             ushort modifier=parts[i]=="CTRL"?(ushort)17:parts[i]=="ALT"?(ushort)18:parts[i]=="SHIFT"?(ushort)16:(ushort)0;
             if(modifier==0)throw new Exception("Unknown key modifier.");modifiers.Add(modifier);inputs.Add(Key(modifier,0,0));
@@ -93,12 +134,14 @@ public static class KlyneDesktop {
         if(code==0)throw new Exception("Unsupported key.");
         inputs.Add(Key(code,0,0));inputs.Add(Key(code,0,2));
         for(int i=modifiers.Count-1;i>=0;i--)inputs.Add(Key(modifiers[i],0,2));Send(inputs.ToArray());
+        ExpectCursor(before,"Press");
     }
     public static void Scroll(string id,int ticks) {
         var window=Window(id,true);Rect r;GetWindowRect(window,out r);var p=new Point{X=(r.Left+r.Right)/2,Y=(r.Top+r.Bottom)/2};
         if(GetAncestor(WindowFromPoint(p),2)!=window)throw new Exception("Scroll target is obscured.");
         if(ticks==0 || Math.Abs(ticks)>10)throw new Exception("Scroll ticks must be between -10 and 10, excluding zero.");
         SetCursorPos(p.X,p.Y);Send(Mouse(0x0800,unchecked((uint)(ticks*120))));
+        ExpectCursor(p,"Scroll");
     }
     static IEnumerable<AutomationElement> Elements(IntPtr window) {
         var queue=new Queue<AutomationElement>();queue.Enqueue(AutomationElement.FromHandle(window));int count=0;
@@ -110,7 +153,7 @@ public static class KlyneDesktop {
     }
     static string Id(AutomationElement element) {return string.Join(".",element.GetRuntimeId());}
     public static void ElementAction(string windowId,string id,string text,bool fill) {
-        var window=Window(windowId,true);
+        var window=Window(windowId,true);var before=CursorNow();
         foreach(var element in Elements(window)) {
             try {if(Id(element)!=id)continue;}catch{continue;}
             if(element.Current.IsPassword)throw new Exception("Password fields require your input.");
@@ -126,12 +169,37 @@ public static class KlyneDesktop {
                 else if(element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern,out pattern)){InputStarted=true;((ExpandCollapsePattern)pattern).Expand();}
                 else throw new Exception("Control has no supported action pattern. Observe and use keyboard navigation or visible coordinates.");
             }
+            ExpectCursor(before,"Element input");
             return;
         }
         throw new Exception("Control is stale or unavailable. Observe again.");
     }
-    public static object Observe(string imagePath) {
-        CheckEmergency();var screen=SystemInformation.VirtualScreen;
+    // Clipboard access runs on STA threads: the PowerShell host is MTA and
+    // System.Windows.Forms.Clipboard refuses to work there. Content is
+    // capped like typed input; reads are sensitive user data — the caller
+    // treats them as untrusted and never logs them beyond task evidence.
+    public static void ClipboardSet(string text) {
+        CheckEmergency();
+        if(text==null)text="";
+        if(text.Length>4000)throw new Exception("Clipboard holds at most 4000 characters per action.");
+        Exception failure=null;
+        var worker=new Thread(()=>{try{Clipboard.SetText(text);}catch(Exception e){failure=e;}});
+        worker.SetApartmentState(ApartmentState.STA);worker.Start();
+        if(!worker.Join(5000))throw new Exception("Clipboard write timed out; outcome uncertain.");
+        if(failure!=null)throw new Exception("Clipboard write failed: "+failure.Message);
+        InputStarted=true;
+    }
+    public static string ClipboardGet() {
+        CheckEmergency();
+        string result="";Exception failure=null;
+        var worker=new Thread(()=>{try{if(Clipboard.ContainsText())result=Clipboard.GetText();}catch(Exception e){failure=e;}});
+        worker.SetApartmentState(ApartmentState.STA);worker.Start();
+        if(!worker.Join(5000))throw new Exception("Clipboard read timed out; outcome uncertain.");
+        if(failure!=null)throw new Exception("Clipboard read failed: "+failure.Message);
+        if(result.Length>4000)result=result.Substring(0,4000)+"[truncated]";
+        return result;
+    }
+    public static object Observe(string imagePath) {        CheckEmergency();var screen=SystemInformation.VirtualScreen;
         if(screen.Width<=0 || screen.Height<=0 || screen.Width>20000 || screen.Height>12000)throw new Exception("No supported interactive desktop.");
         var width=Math.Min(1600,screen.Width);var height=Math.Max(1,(int)((long)screen.Height*width/screen.Width));
         using(var bitmap=new Bitmap(screen.Width,screen.Height)) {

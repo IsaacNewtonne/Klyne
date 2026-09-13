@@ -362,16 +362,45 @@ impl ControlledBrowser {
         Ok(result.get("value").cloned().unwrap_or(Value::Null))
     }
 
-    /// Navigate and wait for the load event.
-    pub fn navigate(&mut self, url: &str) -> Result<(), String> {
-        self.session.call(
+    /// Navigate, correlate completion with this navigation, and return the
+    /// document URL actually landed on (redirects included).
+    ///
+    /// Three gaps closed here (audit HIGH): the `Page.navigate` response
+    /// `errorText` is evaluated instead of ignored; stale queued events are
+    /// drained and completion is bound to our frame, so an old queued event
+    /// can never satisfy a later wait; and the landed URL is returned so
+    /// callers verify task-specific readiness instead of assuming the
+    /// request URL. Both waits share one deadline, preserving the previous
+    /// worst-case timing.
+    pub fn navigate(&mut self, url: &str) -> Result<String, String> {
+        self.session.drain_event("Page.loadEventFired");
+        self.session.drain_event("Page.frameStoppedLoading");
+        let result = self.session.call(
             "Page.navigate",
             serde_json::json!({"url": url}),
             self.limits.command_timeout,
         )?;
+        if let Some(error) = result.get("errorText").and_then(Value::as_str) {
+            return Err(format!("navigation failed: {error}"));
+        }
+        let frame = result
+            .get("frameId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let deadline = Instant::now() + self.limits.command_timeout;
         self.session
-            .wait_event("Page.loadEventFired", self.limits.command_timeout)?;
-        Ok(())
+            .wait_event_matching("Page.frameStoppedLoading", "frameId", frame, deadline)
+            .map_err(|e| format!("navigation frame wait failed: {e}"))?;
+        // Freshness-checked secondary: drained above, so any load event now
+        // belongs to this navigation. (Some Chrome builds omit loaderId.)
+        self.session
+            .wait_event_matching("Page.loadEventFired", "", "", deadline)
+            .map_err(|e| format!("navigation load wait failed: {e}"))?;
+        let landed = self.evaluate_value("document.URL")?;
+        landed
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "landed URL is not a string".to_string())
     }
 
     pub fn title(&mut self) -> Result<String, String> {
