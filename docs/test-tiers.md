@@ -57,18 +57,21 @@ powershell -NoProfile -File scripts/test_desktop_recovery.ps1
 - No test dials a real model endpoint. `docs/model-provider.md` records the
   mock-verified contract; vendor behavior is explicitly out of scope.
 
-## Known baseline issue (2026-09-13)
+## Parallel-test isolation (fixed 2026-09-13)
 
-- `klyne-studio --test chat`: 25/26 pass under default parallel threads;
-  `restart_reconciles_saved_document_from_file_without_desktop_input` panics
-  with `cannot access index 0 of JSON array of length 0`. It passes alone and
-  the full file passes with `-- --test-threads=1` (26/26). This is a
-  pre-existing test-isolation defect in the uncommitted Studio working tree,
-  unrelated to the provider truncation fix — verify any Studio claim serially:
-
-```powershell
-cargo test -p klyne-studio --test chat --locked --offline -- --test-threads=1
-```
+- `restart_reconciles_...` failed under default parallel threads with
+  `cannot access index 0 of JSON array of length 0`. Root cause, found by
+  tracing save history: the turn never planned (only send-time + terminal
+  saves existed) because `send()` failed the desktop lease instantly while
+  another test server held the system-wide lock file — Blocked with zero
+  tasks, then the test indexed `tasks[0]`.
+- Fixes: `send()` now waits boundedly (30s) for the desktop lease, matching
+  its own documented behavior, instead of failing a second conversation on
+  a transient holder; the chat harness verifies its child actually won the
+  port bind (spawn retry) and rebinds verified on respawn; the test asserts
+  planned tasks with a clear message instead of indexing blindly.
+- Chat suite is now green in default parallel mode (3 consecutive runs);
+  `-- --test-threads=1` remains the fallback for constrained machines.
 
 ## Phase 1 conformance notes (2026-09-13)
 

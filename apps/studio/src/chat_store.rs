@@ -31,6 +31,9 @@ fn connection(path: &Path, write: bool) -> io::Result<Connection> {
     Ok(db)
 }
 pub fn save(path: &Path, chat: &Chat) -> io::Result<()> {
+    save_inner(path, chat)
+}
+fn save_inner(path: &Path, chat: &Chat) -> io::Result<()> {
     let mut db = connection(path, true)?;
     let tx = db.transaction().map_err(err)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY,payload TEXT NOT NULL);CREATE TABLE IF NOT EXISTS history(kind TEXT NOT NULL,seq INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(kind,seq));").map_err(err)?;

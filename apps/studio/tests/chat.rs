@@ -37,29 +37,54 @@ struct Server {
     root: tempfile::TempDir,
     host: String,
 }
+/// Spawn Studio on `port` under `root`, succeeding only if OUR child is
+/// alive once something answers. Between the probe bind and child startup
+/// the port is unbound: another parallel test's server can win it, and the
+/// loser would otherwise talk to a stranger (wrong models, empty tasks).
+/// A lost bind race exits the child within milliseconds, so a short settle
+/// wait before trusting the connection closes the race.
+fn spawn_verified(root: &std::path::Path, port: u16) -> Option<Child> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
+        .args(["--port", &port.to_string(), "--root"])
+        .arg(root)
+        .stdout(Stdio::null())
+        .spawn()
+        .ok()?;
+    let host = format!("127.0.0.1:{port}");
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        if child.try_wait().ok().flatten().is_some() {
+            return None;
+        }
+        if TcpStream::connect(&host).is_ok() {
+            std::thread::sleep(Duration::from_millis(300));
+            if child.try_wait().ok().flatten().is_none() {
+                return Some(child);
+            }
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
 impl Server {
     fn new() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
         let root = tempfile::tempdir().unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
-            .args(["--port", &port.to_string(), "--root"])
-            .arg(root.path())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
-        let server = Self {
-            child,
-            root,
-            host: format!("127.0.0.1:{port}"),
-        };
-        let start = Instant::now();
-        while TcpStream::connect(&server.host).is_err() {
-            assert!(start.elapsed() < Duration::from_secs(10));
-            std::thread::sleep(Duration::from_millis(30));
+        for _ in 0..20 {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            if let Some(child) = spawn_verified(root.path(), port) {
+                return Self {
+                    child,
+                    root,
+                    host: format!("127.0.0.1:{port}"),
+                };
+            }
         }
-        server
+        panic!("could not bind a test server port");
     }
     fn api(&self, path: &str, body: Option<Value>) -> Value {
         let mut stream = TcpStream::connect(&self.host).unwrap();
@@ -304,6 +329,12 @@ fn restart_reconciles_saved_document_from_file_without_desktop_input() {
         .unwrap();
     let mut payload: Value = serde_json::from_str(&payload).unwrap();
     payload["status"] = json!("Working");
+    assert!(
+        payload["tasks"]
+            .as_array()
+            .is_some_and(|tasks| !tasks.is_empty()),
+        "interrupted turn must have planned tasks: {payload}"
+    );
     payload["tasks"][0]["status"] = json!("Working");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -316,17 +347,21 @@ fn restart_reconciles_saved_document_from_file_without_desktop_input() {
     )
     .unwrap();
     drop(db);
-    s.child = Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
-        .args(["--port", s.host.split(':').nth(1).unwrap(), "--root"])
-        .arg(s.root.path())
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while TcpStream::connect(&s.host).is_err() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(20));
+    // The freed port is itself racy under parallel tests: rebind verified,
+    // moving to a fresh port when the old one is taken.
+    let mut respawned = false;
+    for _ in 0..20 {
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        if let Some(child) = spawn_verified(s.root.path(), port) {
+            s.child = child;
+            s.host = format!("127.0.0.1:{port}");
+            respawned = true;
+            break;
+        }
     }
+    assert!(respawned, "could not rebind a test server port");
     let done = s.wait(id);
     assert_eq!(done["status"], "Completed", "{done}");
     assert!(done["pending"].is_null());
@@ -755,7 +790,13 @@ fn shell_approval_records_exact_grant_before_first_execution() {
     let task = json!({"summary":"Run one command.","tasks":[{"agent":"Runner","instruction":"Run the approved echo command","expected_result":"Echo output"}]});
     let run = json!({"decision":"act","action":{"tool":"run_shell","program":"cmd.exe","args":["/d","/c","echo approved"]}});
     // The refused proposal consumes a model reply, so the retry needs its own.
-    let (endpoint, model) = model(vec![task, run.clone(), run, complete("Echo done"), complete("Done")]);
+    let (endpoint, model) = model(vec![
+        task,
+        run.clone(),
+        run,
+        complete("Echo done"),
+        complete("Done"),
+    ]);
     let mut body = request(&endpoint);
     body["access"]["terminal"] = json!(true);
     let created = s.api("/api/chats", Some(body));
@@ -816,7 +857,9 @@ fn secret_binding_refuses_ungranted_exfiltration() {
                 if head.is_empty() {
                     continue;
                 }
-                hits_tx.send(String::from_utf8_lossy(&head).into_owned()).unwrap();
+                hits_tx
+                    .send(String::from_utf8_lossy(&head).into_owned())
+                    .unwrap();
                 let body = "{}";
                 write!(
                     stream,
@@ -848,10 +891,16 @@ fn secret_binding_refuses_ungranted_exfiltration() {
     let paused = s.wait(id);
     assert_eq!(paused["status"], "Interrupted", "{paused}");
     assert_eq!(paused["pending"]["proposal"]["kind"], "secret");
-    assert_eq!(paused["pending"]["proposal"]["name"], "HARNESS_CHAT_SECRET_XYZ");
+    assert_eq!(
+        paused["pending"]["proposal"]["name"],
+        "HARNESS_CHAT_SECRET_XYZ"
+    );
     model1.join().unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    assert!(attacker_hits.try_recv().is_err(), "secret must never transmit");
+    assert!(
+        attacker_hits.try_recv().is_err(),
+        "secret must never transmit"
+    );
     assert!(legit_hits.try_recv().is_err());
     // Conversation two: the user grants the secret for the legitimate
     // origin only. The attacker origin stays refused (unit-covered), the
@@ -865,13 +914,17 @@ fn secret_binding_refuses_ungranted_exfiltration() {
     ]);
     let mut body = request(&endpoint);
     body["access"]["apps"] = json!(true);
-    body["grants"] = json!({"secrets":[{"name":"HARNESS_CHAT_SECRET_XYZ","origins":[format!("{legit_url}/")]}]});
+    body["grants"] =
+        json!({"secrets":[{"name":"HARNESS_CHAT_SECRET_XYZ","origins":[format!("{legit_url}/")]}]});
     let created = s.api("/api/chats", Some(body));
     let done = s.wait(created["id"].as_str().unwrap());
     assert_eq!(done["status"], "Completed", "{done}");
     model.join().unwrap();
     let hit = legit_hits.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(hit.contains("authorization: Bearer test-secret-value-12345"), "{hit}");
+    assert!(
+        hit.contains("authorization: Bearer test-secret-value-12345"),
+        "{hit}"
+    );
     assert!(attacker_hits.try_recv().is_err());
     unsafe { std::env::remove_var("HARNESS_CHAT_SECRET_XYZ") };
 }
@@ -895,7 +948,9 @@ fn delete_calls_pause_for_exact_approval_without_replay() {
                 }
                 Err(_) => break,
             };
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut head = Vec::new();
             let mut byte = [0];
             while !head.ends_with(b"\r\n\r\n") {

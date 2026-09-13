@@ -518,17 +518,32 @@ impl Chats {
         let id = chat.id.clone();
         let stop = Arc::new(AtomicBool::new(false));
         // A desktop turn needs exclusive control for its emergency-stop watch.
-        // Acquire before the worker starts so a second conversation waits.
-        // The lease is moved into the worker thread to keep it alive.
+        // Acquire before the worker starts so a second conversation waits
+        // (boundedly) instead of failing on a transient holder — including
+        // another test server sharing the system lock file.
         let desktop_lease = if chat.access.desktop {
-            match desktop::Lease::acquire(stop.clone()) {
-                Ok(lease) => Some(lease),
-                Err(e) => {
-                    chat.status = "Blocked".into();
-                    push(&mut chat, "assistant", "Klyne", &e.to_string());
-                    let _ = self.save(&chat);
-                    return Ok(json!({"id":chat.id}));
+            let mut lease = None;
+            let wait_start = Instant::now();
+            while wait_start.elapsed() < Duration::from_secs(30) {
+                match desktop::Lease::acquire(stop.clone()) {
+                    Ok(acquired) => {
+                        lease = Some(acquired);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(100)),
                 }
+            }
+            match lease {
+                Some(lease) => Some(lease),
+                None => match desktop::Lease::acquire(stop.clone()) {
+                    Ok(lease) => Some(lease),
+                    Err(e) => {
+                        chat.status = "Blocked".into();
+                        push(&mut chat, "assistant", "Klyne", &e.to_string());
+                        let _ = self.save(&chat);
+                        return Ok(json!({"id":chat.id}));
+                    }
+                },
             }
         } else {
             None
