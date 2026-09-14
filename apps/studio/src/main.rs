@@ -6,6 +6,7 @@ mod browser_tools;
 mod capabilities;
 mod chat;
 mod chat_store;
+mod clarification;
 mod completion_guard;
 mod connections;
 mod desktop;

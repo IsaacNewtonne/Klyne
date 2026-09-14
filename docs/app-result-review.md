@@ -19,7 +19,9 @@ File receipts and caller-owned acceptance checks retain their independent checks
 
 If completion lacks evidence, the reviewer gets up to two further opportunities
 to inspect or correct the result within the goal budget. It cannot create repair
-tasks to repeat the operation after this rejection, including after Resume.
+tasks to repeat an attempted operation after this rejection, including after Resume.
+If no tool operation was attempted, repair remains available: a worker merely
+restating the request must not trap the goal in verification-only mode.
 If verification remains unavailable, the task requests a destination check and
 records `verification_needed`, rather than reporting an unclassified execution
 failure. An actually uncertain dispatched action still requires reconciliation.
@@ -33,3 +35,18 @@ Regression coverage includes a disposable browser chat: one send, a rejected
 completion, a read-only destination check, then successful reviewed completion
 without another send. Unit tests cover different destination labels and reject
 worker-only, failed and stale observations. No real messages are sent by tests.
+
+## Clarification discipline
+
+Planner, workers and reviewer are instructed to use the latest user answers,
+inspect display names in the app, and avoid asking about capitalization or
+spacing alone. Exact content and identifiers retain their original semantics.
+A proposed question contrasting quoted cosmetic variants of a group/contact/
+profile label receives one bounded reconsideration before presentation, even
+after a model-format retry. Questions about distinct observed matches, sign-in,
+access, or missing content remain valid. This check does not resolve identity
+itself or guarantee that a model will never ask another unnecessary question.
+
+A conversation regression covers clarification, invalid JSON, a redundant
+case question, and repair of unattempted work, while preserving a real sign-in
+question. No real communication account is accessed by this test.

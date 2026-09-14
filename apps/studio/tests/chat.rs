@@ -274,6 +274,7 @@ fn invented_message_delivery_requests_verification_without_replaying() {
     let s = Server::new();
     let (endpoint, fixture) = model(vec![
         plan(),
+        write_file("scratch evidence"),
         complete("Message sent"),
         complete("The message was successfully sent to him"),
         complete("The message was successfully sent to him"),
@@ -297,7 +298,7 @@ fn invented_message_delivery_requests_verification_without_replaying() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|e| e["action"] == "completion_check")
+            .any(|e| e["action"] == "completion_check")
     );
     let id = created["id"].as_str().unwrap();
     resume(&s, &endpoint, id, false, false);
@@ -306,6 +307,57 @@ fn invented_message_delivery_requests_verification_without_replaying() {
     assert_eq!(resumed["tasks"], chat["tasks"]);
     assert_eq!(resumed["evidence"], chat["evidence"]);
     fixture.join().unwrap();
+}
+
+#[test]
+fn clarified_display_name_reconsiders_case_and_repairs_unattempted_work() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        complete("I will send the requested message"),
+        json!({"decision":"needs_input","question":"Is Team Chat a group?"}),
+        json!({"invalid":"response"}),
+        json!({"decision":"needs_input","question":"Is the group 'TEAM CHAT' or 'Team Chat'?"}),
+        json!({"decision":"repair","summary":"Use the confirmed group and inspect the app","tasks":[{"agent":"Assistant","instruction":"Inspect the app and send the authorized message to the confirmed group"}]}),
+        json!({"decision":"needs_input","question":"Please sign in to the app to continue."}),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Send hello to Team Chat");
+    let created = s.api("/api/chats", Some(body.clone()));
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(s.wait(id)["status"], "Needs input");
+    body["id"] = json!(id);
+    body["resume"] = json!(true);
+    body["message"] = json!("TEAM CHAT is a group, yes use that message");
+    s.api("/api/chats", Some(body));
+    let chat = s.wait(id);
+    assert_eq!(chat["status"], "Needs input", "{chat}");
+    assert!(
+        chat["messages"].as_array().unwrap().last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("sign in")
+    );
+    assert!(
+        !chat["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["text"].as_str().unwrap_or("").contains("'TEAM CHAT' or"))
+    );
+    assert!(
+        chat["tasks"][0]["instruction"]
+            .as_str()
+            .unwrap()
+            .contains("Inspect the app")
+    );
+    let calls = fixture.join().unwrap();
+    assert!(
+        calls[5]["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("clarification_check")
+    );
 }
 
 #[test]

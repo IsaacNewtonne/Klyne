@@ -798,6 +798,7 @@ impl Chats {
             RULES.to_owned()
         };
         system.push_str(crate::broker::POLICY_INSTRUCTIONS);
+        system.push_str(crate::clarification::INSTRUCTIONS);
         system.push_str(r#" For results in any app, distinguish an observed outcome from a host-verified receipt. Before completing an app action, the independent reviewer must inspect the destination with a read-only tool. Cite review_observations indices using observed_results:[{effect:"send|open|click|delete|install|upload",target:"specific app and destination",observation:"exact visible result matching the requested content and target",evidence_index:0}] and outcome:"achieved". These are model-reviewed observations, never claims or host receipts. For sending, check the correct conversation/account and exact outgoing content; do not infer delivered/read status from a visible sent item. Do not resend to obtain verification. If the UI is hidden or ambiguous, report what is missing; do not invent an observation. File changes still require host file receipts. A Completion review rejection requests read-only verification or a corrected summary, not repetition of the original action."#);
         system.push_str(" Current access flags are authoritative; earlier messages about disabled access may be stale. The original_request is the goal, and later user messages clarify it. A clarification answered is not completion of the original goal. A reviewer must request repair tasks when the original goal remains unfinished. Disabled access is not evidence that an app is absent. The context usage block reports metered tokens and spend against turn budgets; prefer fewer information-dense actions as remaining_tokens runs low. Shell commands follow the user-selected command_policy: autonomous permits commands without repeated approval, ask requires exact user grants. Environment secrets and destructive API calls still require exact grants: if the host pauses for approval, do not repeat or rephrase the request — wait for the user's decision and then retry the identical proposal.");
         system.push_str(crate::capabilities::INSTRUCTIONS);
@@ -840,7 +841,8 @@ impl Chats {
         let mut provider = chat.provider.clone();
         let mut failures = Vec::new();
         let mut responses = Vec::new();
-        for attempt in 0..2 {
+        let mut clarification_reconsidered = false;
+        for attempt in 0..3 {
             let response = provider.respond(
                 &chat.workspace,
                 &system,
@@ -877,7 +879,19 @@ impl Chats {
                 });
             match parsed {
                 Ok(value) => {
-                    if attempt > 0 {
+                    if !clarification_reconsidered
+                        && attempt < 2
+                        && value["question"]
+                            .as_str()
+                            .is_some_and(crate::clarification::cosmetic_name_question)
+                    {
+                        clarification_reconsidered = true;
+                        context["clarification_check"] = json!({"proposed_question":value["question"],"instruction":"Reconsider this cosmetic display-name question. Apply the user's existing answer and inspect the destination. Return an action or plan; reviewers should request repair work if no tool action happened. Ask only if actual observed destinations remain ambiguous. Preserve exact message content and account identifiers."});
+                        chat.used += 1;
+                        guard(chat, stop, start)?;
+                        continue;
+                    }
+                    if attempt > 0 && !failures.is_empty() {
                         push(
                             chat,
                             "assistant",
@@ -1155,7 +1169,14 @@ impl Chats {
                         chat.execution.failure = None;
                         return Ok(());
                     }
-                    Some("repair") if verification_only || verification_failures > 0 => {
+                    Some("repair")
+                        if (verification_only || verification_failures > 0)
+                            && crate::completion_guard::has_attempted_action(
+                                chat.evidence
+                                    .get(chat.execution.evidence_start..)
+                                    .unwrap_or(&[]),
+                            ) =>
+                    {
                         chat.execution.failure = Some(crate::failure_policy::decide(
                             crate::failure_policy::FailureKind::VerificationNeeded,
                         ));

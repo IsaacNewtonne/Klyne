@@ -9,6 +9,12 @@ pub fn delivery_claim(text: &str) -> bool {
             .iter()
             .any(|s| text.contains(s))
 }
+pub fn has_attempted_action(evidence: &[serde_json::Value]) -> bool {
+    evidence.iter().any(|e| {
+        e["action"].is_string()
+            && !matches!(e["agent"].as_str(), Some("Completion review" | "Reviewer"))
+    })
+}
 pub fn observation_candidates(evidence: &[serde_json::Value]) -> Vec<usize> {
     // A later worker operation invalidates an earlier destination observation.
     // Unknown tools are conservatively treated as operations, not read checks.
@@ -73,6 +79,11 @@ pub fn check_review(
     evidence: &[serde_json::Value],
 ) -> std::io::Result<()> {
     let answer = review["summary"].as_str().unwrap_or("");
+    if (delivery_claim(goal) || delivery_claim(answer)) && !has_attempted_action(evidence) {
+        return Err(crate::err(
+            "No tool action has been attempted for this goal. Restating the request is not completion. Use the supplied destination and message; request repair tasks to inspect the app and do the authorized work. Do not ask for capitalization confirmation.",
+        ));
+    }
     let app_action = evidence.iter().any(|e| {
         let action = e["action"].as_str().unwrap_or("");
         e["agent"] != "Reviewer"

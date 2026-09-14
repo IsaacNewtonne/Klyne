@@ -19,6 +19,7 @@ Run a sample task, switch between conversation and workspace, or open Details. T
 - **Checks beyond a model's claim.** Caller-owned file contracts, supported desktop focus/field checks, and a first Notepad save-reconciliation adapter.
 - **App results checked at the destination.** After desktop or browser actions, a reviewer inspects the result with read-only tools and cites the observed destination. This shared path supports different apps without a messaging-app allowlist. Observed results are labeled Reviewed; independent acceptance checks are labeled Verified. Missing evidence prompts a destination check, not another send.
 - **A quieter interface.** Visual progress, compact steps, optional details.
+- **Fewer redundant questions.** Klyne uses prior clarifications and inspects app display names instead of treating capitalization alone as a different destination. Missing access, sign-in and genuine target ambiguity still need your input.
 - **One command to open, one window to close.** On Windows, `klyne` opens a dedicated app window. Closing its last window stops Klyne and its owned child processes, including running jobs.
 - **Independent work continues.** Tasks waiting for approval block their dependents while other ready tasks continue. Approval cards appear when the run pauses, and approval resumes the blocked work.
 - **Experiment history the app can reuse.** Repository-specific records preserve candidate patches and test evidence, including rejected attempts. Relevant history is recalled automatically and checked for changes before reuse.
