@@ -3,12 +3,22 @@ const $ = id => document.getElementById(id);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const running = chat => ['Planning','Working','Reviewing','Stopping'].includes(chat?.status);
 const names = {codex:'Codex',ollama:'Ollama',opencode:'OpenCode'};
+// Keep the composer about the task; access decisions live together in Settings.
+const accessSummary=document.createElement('button');accessSummary.id='access-summary';accessSummary.type='button';accessSummary.className='access';
+const accessControls=document.querySelector('.access-controls');
+accessControls.before(accessSummary);accessSummary.after($('apps-button'));
+$('execution-settings').querySelector('summary').after(accessControls);
+$('execution-settings').append($('terminal-note'),$('desktop-note'));
+accessSummary.onclick=()=>{$('settings').showModal();$('execution-settings').open=true;$('execution-settings').scrollIntoView({block:'nearest'});};
+$('activity-details').querySelector('summary').textContent='Details';
+$('activity-details').querySelector('summary').after($('tasks'));
+const workerMessages=document.createElement('div');workerMessages.id='worker-messages';$('activity-details').append(workerMessages);
 const recoveryLink = document.createElement('a');
-recoveryLink.textContent = 'Recovery'; recoveryLink.className = 'quiet';
+recoveryLink.textContent = 'Recovery tools'; recoveryLink.className = 'quiet';
 recoveryLink.href = `http://127.0.0.1:${Number(location.port || 4317) + 1}/`;
 recoveryLink.target = '_blank'; recoveryLink.rel = 'noopener';
 recoveryLink.title = 'Open the independent recovery workspace';
-$('settings-button').before(recoveryLink);
+$('execution-settings').append(recoveryLink);
 fetch('/api/recovery').then(r=>r.ok?r.json():null).then(info=>{
   const port=info?.state?.recovery_port;
   if(Number.isInteger(port) && port>0 && port<65536) recoveryLink.href=`http://127.0.0.1:${port}/`;
@@ -29,6 +39,15 @@ function renderStatus(){
   document.title=`${label} - Klyne`;
 }
 const drafts = new Map();
+let configuredChat=null;
+function hydrateExecution(chat){
+  if(!chat||configuredChat===chat.id)return;
+  configuredChat=chat.id;
+  $('command-policy').value=chat.execution?.command_policy||'ask';
+  $('max-tokens').value=chat.execution?.max_tokens||0;$('max-cost').value=chat.execution?.max_cost_usd||0;
+  $('max-steps').value=chat.limit||0;$('max-seconds').value=chat.execution?.timeout_seconds||0;$('max-reviews').value=chat.execution?.max_review_rounds||0;
+}
+
 function toast(message) { $('toast').textContent=message; $('toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').hidden=true,4000); }
 async function api(path, body) {
   const response=await fetch(path,body===undefined?{cache:'no-store',signal:AbortSignal.timeout(8000)}:{method:'POST',headers:{'Content-Type':'application/json','X-Klyne-Request':'1'},body:JSON.stringify(body)});
@@ -45,6 +64,7 @@ function renderList() {
   if(focused) [...$('chat-list').querySelectorAll('[data-chat]')].find(button=>button.dataset.chat===focused)?.focus({preventScroll:true});
 }
 function render() {
+  hydrateExecution(snapshot);
   renderStatus();
   window.productionView?.update({snapshot,selected,submitting,message:$('instruction').value,provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,desktop:$('access-desktop').checked,apps:$('access-apps').checked}});
   const active=running(snapshot);
@@ -55,14 +75,30 @@ function render() {
   $('stop-chat').hidden=!active;
   $('resume-chat').hidden=!snapshot || active || snapshot.status==='Completed' || !!snapshot.pending;
   $('pending-action').hidden=!snapshot?.pending || active;
+  if(snapshot?.pending && !active) {
+    const approval=!!snapshot.pending.proposal;
+    const panel=$('pending-action');
+    panel.querySelector('summary').textContent=approval?'Review requested action':'Resolve an uncertain action';
+    const request=snapshot.pending.proposal;
+    panel.querySelector('p').textContent=!approval?'Inspect the affected app or file, then record what happened before continuing.':request.kind==='shell'?`Run ${request.program} with arguments ${(request.args||[]).map(arg=>JSON.stringify(arg)).join(' ')}. This command has not run.`:request.kind==='delete'?`Allow DELETE ${request.origin?.replace(/\/$/,'')||''}${request.path}. Review the request body in Exact request.`:request.kind==='secret'?`Allow credential ${request.name} for ${(request.origins||[]).join(', ')||'the command environment'}.`:'This action has not run. Review the exact request below.';
+    let proposal=$('pending-proposal');
+    if(!proposal) {proposal=document.createElement('pre');proposal.id='pending-proposal';const exact=document.createElement('details'),label=document.createElement('summary');label.textContent='Exact request';exact.append(label,proposal);panel.querySelector('p').after(exact);}
+    let expiry=$('pending-expiry');if(!expiry){expiry=document.createElement('p');expiry.id='pending-expiry';proposal.parentElement.after(expiry);}expiry.textContent=approval && snapshot.pending.expires_at_ms ? `Approval expires ${new Date(snapshot.pending.expires_at_ms).toLocaleTimeString()} | ${(snapshot.execution?.approval_queue?.length||0)+1} request(s) awaiting review` : '';
+    proposal.textContent=JSON.stringify(snapshot.pending.proposal || snapshot.pending.action || snapshot.pending,null,2);
+    const choices=approval?[['approved','Approve this action'],['abandon','Decline this action']]:[['completed','Already completed'],['not_applied','Did not happen'],['abandon','Abandon this action']];
+    setMarkup($('pending-disposition'),choices.map(([value,label])=>`<option value="${value}">${label}</option>`).join(''));
+    panel.querySelector('label').textContent=approval?'Note (optional)':'What did you verify?';
+    $('resolve-action').textContent=approval && $('pending-disposition').value==='approved'?'Approve and continue':'Record decision';
+  }
   $('instruction').placeholder=active?'You can draft your next instruction while Klyne works…':selected?'Add an instruction or ask a follow-up…':'Describe what you’d like to do…';
   $('composer-hint').textContent=active?'Your team is working · You can stop at any time':'Enter to send · Shift + Enter for a new line';
-  for(const id of ['access-web','access-terminal','access-desktop','access-apps']) $(id).disabled=active || submitting;
+  for(const id of ['access-web','access-terminal','access-desktop','access-apps','command-policy','max-tokens','max-cost']) $(id).disabled=active || submitting;
   if(!snapshot) { $('messages').replaceChildren(); delete $('messages').dataset.markup; $('work-panel').hidden=true; return; }
   const main=$('main'), nearBottom=main.scrollHeight-main.scrollTop-main.clientHeight<100;
-  const messageMarkup=snapshot.messages.map(m=>`<article class="message ${m.role==='user'?'user':m.agent==='Klyne'?'assistant':'worker'}"><p class="message-label">${escape(m.agent)}</p><div class="message-text">${escape(m.text)}</div></article>`).join('');
+  const messageMarkup=snapshot.messages.filter(m=>m.role==='user'||m.agent==='Klyne').map(m=>`<article class="message ${m.role==='user'?'user':m.agent==='Klyne'?'assistant':'worker'}"><p class="message-label">${escape(m.agent)}</p><div class="message-text">${escape(m.text)}</div></article>`).join('');
   const changed=$('messages').dataset.markup!==messageMarkup;
   setMarkup($('messages'),messageMarkup);
+  setMarkup(workerMessages,snapshot.messages.filter(m=>m.role!=='user'&&m.agent!=='Klyne').map(m=>`<p><strong>${escape(m.agent)}</strong> ${escape(m.text)}</p>`).join(''));
   $('work-panel').hidden=false;
   $('work-status').textContent=snapshot.status==='Completed'?'Done · reviewed by AI':snapshot.status;
   $('work-status').dataset.active=String(active);
@@ -93,9 +129,9 @@ function closeSidebar() {$('sidebar').classList.remove('open');$('menu').setAttr
 async function select(id) {
   drafts.set(selected,$('instruction').value);selected=id;snapshot=null;
   $('instruction').value=drafts.get(id)||'';$('form-error').textContent='';closeSidebar();render();renderList();
-  if(!id) { $('instruction').focus();return; }
+  if(!id) { $('command-policy').value='ask';$('max-tokens').value=0;$('max-cost').value=0;$('instruction').focus();return; }
   try { const fresh=await api(`/api/chats/${id}`);if(id!==selected)return;snapshot=fresh;
-    $('max-steps').value=fresh.limit||0; $('max-seconds').value=fresh.execution?.timeout_seconds||0; $('max-reviews').value=fresh.execution?.max_review_rounds||0; $('host-workspace').value=fresh.access.terminal?fresh.workspace:'';
+    $('command-policy').value=fresh.execution?.command_policy||'ask';$('max-tokens').value=fresh.execution?.max_tokens||0;$('max-cost').value=fresh.execution?.max_cost_usd||0;$('max-steps').value=fresh.limit||0; $('max-seconds').value=fresh.execution?.timeout_seconds||0; $('max-reviews').value=fresh.execution?.max_review_rounds||0; $('host-workspace').value=fresh.access.terminal?fresh.workspace:'';
     $('writing-mode').value=fresh.prompt_maker?'prompt_maker':'general';modeChanged();
     $('access-apps').checked=!!fresh.access.apps;$('access-web').checked=fresh.access.web;$('access-terminal').checked=fresh.access.terminal;$('access-desktop').checked=!!fresh.access.desktop;accessChanged();render();$('main').scrollTop=0;
   }catch(e){if(id===selected)$('form-error').textContent=e.message;}
@@ -112,9 +148,9 @@ function modeChanged() {
   $('prompt-mode-note').textContent=$('provider-kind').value==='ollama'?'Prompt maker · Concise, clear, copy-ready prompts. Temperature 0.2 · top_p 0.5.':'Prompt maker · Concise, clear, copy-ready prompts. Sampling settings are unavailable through this connector.';
 }
 $('writing-mode').onchange=modeChanged;
-function accessChanged() {$('terminal-note').hidden=!$('access-terminal').checked;$('desktop-note').hidden=!$('access-desktop').checked;}
+function accessChanged() {const count=['access-web','access-terminal','access-desktop','access-apps'].filter(id=>$(id).checked).length;accessSummary.textContent=count?`Access · ${count} enabled`:'Access · Workspace';$('terminal-note').hidden=!$('access-terminal').checked;$('desktop-note').hidden=!$('access-desktop').checked;}
 $('access-terminal').onchange=accessChanged;
-$('access-desktop').onchange=accessChanged;
+$('access-desktop').onchange=accessChanged;$('access-web').onchange=accessChanged;$('access-apps').onchange=accessChanged;accessChanged();
 $('instruction').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(!running(snapshot)&&!submitting)$('chat-form').requestSubmit();}};
 $('chat-form').onsubmit=async e=>{
   e.preventDefault();if(submitting||running(snapshot))return;
@@ -231,20 +267,26 @@ let saved={};try{saved=JSON.parse(localStorage.getItem('klyne-provider')||'{}')|
 if(Object.hasOwn(names,saved.kind))$('provider-kind').value=saved.kind;else saved={};
 configureProvider(saved);render();refresh();setInterval(()=>{if(!document.hidden)refresh();},1500);
 
-function executionConfig(){return {max_steps:Number($('max-steps').value)||0,timeout_seconds:Number($('max-seconds').value)||0,max_review_rounds:Number($('max-reviews').value)||0};}
+function executionConfig(){return {max_steps:Number($('max-steps').value)||0,timeout_seconds:Number($('max-seconds').value)||0,max_review_rounds:Number($('max-reviews').value)||0,command_policy:$('command-policy').value,max_tokens:Number($('max-tokens').value)||0,max_cost_usd:Number($('max-cost').value)||0};}
 $('resume-chat').onclick=async()=>{
   if(!snapshot||submitting)return; submitting=true;
   try {await api('/api/chats',{id:selected,message:'Continue the saved goal from its current task state.',resume:true,execution:executionConfig(),provider:snapshot.provider,access:snapshot.access});await refresh();}
   catch(e){toast(e.message);}finally{submitting=false;render();}
 };
+$('pending-disposition').onchange=()=>{$('resolve-action').textContent=snapshot?.pending?.proposal && $('pending-disposition').value==='approved'?'Approve and continue':'Record decision';};
 $('resolve-action').onclick=async()=>{
-  try {await api(`/api/chats/${selected}/resolve`,{disposition:$('pending-disposition').value,note:$('pending-note').value});$('pending-note').value='';await refresh();}
-  catch(e){toast(e.message);}
+  if(submitting || !snapshot?.pending)return;
+  const id=selected,approval=!!snapshot.pending.proposal,disposition=$('pending-disposition').value;
+  const continuation={id,message:'Continue the saved goal after approval.',resume:true,execution:executionConfig(),provider:snapshot.provider,access:snapshot.access};
+  submitting=true;$('resolve-action').disabled=true;
+  try {const resolution=await api(`/api/chats/${id}/resolve`,{request_id:snapshot.pending.request_id,disposition,note:$('pending-note').value.trim() || (approval?`User selected ${disposition} for the displayed proposal.`:'')});if(selected===id)$('pending-note').value='';if(approval && disposition==='approved') {if(resolution.renewal_required)toast('This request expired or changed. Klyne will prepare a fresh proposal.');await api('/api/chats',continuation);}await refresh();}
+  catch(e){toast(e.message);}finally{submitting=false;$('resolve-action').disabled=false;render();}
 };
 
 $('trusted-laptop').onclick=()=>{
   if(running(snapshot)){toast('Stop current work before changing access.');return;}
   for(const id of ['access-web','access-terminal','access-desktop','access-apps'])$(id).checked=true;
+  $('command-policy').value='autonomous';
   try{localStorage.setItem('klyne-trusted-laptop','true');}catch(_){}
   accessChanged();toast('Trusted laptop access enabled for new work.');
 };

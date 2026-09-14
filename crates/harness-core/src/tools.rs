@@ -789,9 +789,16 @@ impl WorkspaceShellTool {
                         data.push_str("\n[stderr]\n");
                         data.push_str(&String::from_utf8_lossy(&err));
                     }
+                    let ok = status.success() && !out_exceeded && !err_exceeded;
                     return Observation {
-                        ok: status.success() && !out_exceeded && !err_exceeded,
-                        summary: format!("{program} exited with {status}"),
+                        ok,
+                        summary: if ok {
+                            format!("{program} exited with {status}")
+                        } else {
+                            format!(
+                                "{program} exited with {status}; external outcome may be uncertain"
+                            )
+                        },
                         data,
                     };
                 }

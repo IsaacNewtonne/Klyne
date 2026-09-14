@@ -50,15 +50,23 @@ fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     let mut root = PathBuf::from("workspace/studio");
     let mut port = 4317;
+    let mut app_browser: Option<PathBuf> = None;
     let mut binary = std::env::current_exe()?
         .with_file_name(format!("klyne-studio{}", std::env::consts::EXE_SUFFIX));
-    // Operator attestation path: record a green candidate suite for a
-    // digest after running it outside this process. Staging and activation
-    // both refuse candidates without a fresh attestation.
+    // Execute the supplied test argv under supervision, then record a receipt
+    // only if it succeeds and the candidate digest remains unchanged.
+    // Staging and activation both require a fresh runner receipt.
     let mut attest_digest: Option<String> = None;
     let mut attest_command: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--app-browser" => {
+                app_browser = Some(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("Missing browser"))?
+                        .into(),
+                );
+            }
             "--root" => {
                 root = args
                     .next()
@@ -92,13 +100,23 @@ fn main() -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "Use --root, --port, --binary, or --attest-digest with --attest-command",
+                    "Use --root, --port, --binary, --app-browser, or --attest-digest with --attest-command",
                 ));
             }
         }
     }
     if let (Some(digest), Some(command)) = (attest_digest.as_ref(), attest_command.as_ref()) {
-        let attestation = activation::attest(&root, digest, command)?;
+        let command: Vec<String> = serde_json::from_str(command).map_err(|_| {
+            io::Error::other("--attest-command must be a JSON argv array; it will be executed")
+        })?;
+        let attestation = activation::run_tests(
+            &root,
+            &binary,
+            digest,
+            &command,
+            &std::env::current_dir()?,
+            &std::sync::atomic::AtomicBool::new(false),
+        )?;
         println!(
             "{}",
             serde_json::to_string(&attestation).map_err(io::Error::other)?
@@ -135,11 +153,72 @@ fn main() -> io::Result<()> {
         let _ = child.kill();
         return Err(io::Error::other("Studio failed its startup health check"));
     }
+    // A dedicated browser profile prevents attaching to the user's personal
+    // browser. Its last window owns the lifetime of this entire app session.
+    let mut app_window = if let Some(browser) = app_browser {
+        let mut window = Command::new(browser)
+            .arg(format!("--app=http://127.0.0.1:{port}"))
+            .arg(format!(
+                "--user-data-dir={}",
+                root.join("app-browser").display()
+            ))
+            .args([
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-background-mode",
+            ])
+            .spawn()?;
+        let window_job = match harness_core::process_job::ProcessJob::attach(&window) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = window.kill();
+                let _ = window.wait();
+                return Err(error);
+            }
+        };
+        Some((window, window_job))
+    } else {
+        None
+    };
+    let mut crashes = 0u32;
+    let mut healthy_since = Instant::now();
     loop {
-        if child.try_wait()?.is_some() {
-            return Err(io::Error::other(
-                "Studio exited; retained checkpoints and runtime versions",
-            ));
+        if let Some((window, _)) = app_window.as_mut()
+            && window.try_wait()?.is_some()
+        {
+            job.terminate();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            job.terminate();
+            let _ = child.wait();
+            if healthy_since.elapsed() >= Duration::from_secs(60) {
+                crashes = 0;
+            }
+            crashes += 1;
+            fs::write(
+                root.join("runtime/restart-status.json"),
+                serde_json::to_vec(
+                    &serde_json::json!({"attempt":crashes,"exhausted":crashes>3,"exit":status.to_string(),"message":if crashes>3 {"Repeated crashes; checkpoints retained. Inspect the runtime before restarting."}else{"Restarting Studio from saved checkpoints"}}),
+                )?,
+            )?;
+            if crashes > 3 {
+                return Err(io::Error::other(
+                    "Studio crash loop; stopped after three restart attempts",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(250 * (1u64 << (crashes - 1))));
+            child = start(&binary, &root, port)?;
+            job = harness_core::process_job::ProcessJob::attach(&child)?;
+            healthy_since = Instant::now();
+            if !healthy(&mut child, port) {
+                job.terminate();
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            continue;
         }
         let pending = root.join("runtime/pending.json");
         if let Ok(bytes) = fs::read(&pending)

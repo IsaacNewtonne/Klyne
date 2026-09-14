@@ -38,14 +38,15 @@ pub fn next(tasks: &[Task]) -> io::Result<Option<usize>> {
     tasks
         .iter()
         .position(|task| {
-            task.status != "Done"
-                && task
-                    .depends_on
-                    .iter()
-                    .all(|id| tasks[id - 1].status == "Done")
+            !matches!(
+                task.status.as_str(),
+                "Done" | "Awaiting approval" | "Declined"
+            ) && task
+                .depends_on
+                .iter()
+                .all(|id| tasks[id - 1].status == "Done")
         })
-        .map(Some)
-        .ok_or_else(|| err("No executable step; dependencies remain unresolved"))
+        .map_or(Ok(None), |index| Ok(Some(index)))
 }
 
 #[cfg(test)]

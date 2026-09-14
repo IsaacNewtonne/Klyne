@@ -198,3 +198,14 @@ main{container-type:size;container-name:chat-main;min-height:0}
 @media(min-width:701px){.suggestions{padding-bottom:6px}}
 
 #apps .app-row{width:100%;text-align:left;padding:14px;min-height:64px;cursor:pointer}#apps .app-row:hover{border-color:#ff793e;background:#30231d}.app-avatar{display:grid;place-items:center;width:36px;height:36px;flex-shrink:0;border-radius:10px;background:#ff793e18;color:#ffad78;font-weight:600}.app-select-arrow{color:#aaa29b}#apps-search{margin-top:8px}#apps-status{font-size:12px;color:var(--muted)}
+
+/* Persistent task state stays visible while the workspace scrolls. */
+#task-indicator{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid #ffffff20;border-radius:20px;font-size:12px;white-space:nowrap;color:#d5c9bf}
+#task-indicator:before{content:'';width:8px;height:8px;border-radius:50%;background:#8bab94}
+#task-indicator[data-state=working]:before{background:#ff914d;box-shadow:0 0 10px #ff914d80;animation:task-pulse 1.3s ease-in-out infinite}
+#task-indicator[data-state=finished]:before{background:#8fdaaa}
+#task-indicator[data-state=attention]:before{background:#ffc36d}
+#task-indicator[data-state=offline]:before{background:#ef776b}
+@keyframes task-pulse{50%{opacity:.35}}
+@media(prefers-reduced-motion:reduce){#task-indicator:before{animation:none!important}}
+@media(max-width:700px){.app>header{flex-wrap:wrap;gap:8px}#task-indicator{padding:5px 9px;font-size:11px}.header-title{max-width:90px}}

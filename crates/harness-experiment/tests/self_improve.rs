@@ -94,6 +94,10 @@ fn improving_change_is_promoted_with_record() {
     assert_eq!(report.baseline.failed, 0);
     assert_eq!(report.candidate.passed, 3);
     assert!(
+        !report.improvement_verified,
+        "Adding a candidate-authored test does not prove benefit"
+    );
+    assert!(
         matches!(report.decision, Decision::Promote { .. }),
         "{:?}",
         report.decision
@@ -301,5 +305,100 @@ fn equally_failed_suites_cannot_promote() {
         .unwrap();
     assert!(matches!(report.decision, Decision::Rollback { .. }));
     assert!(report.baseline.failed > 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn weakened_assertions_are_rejected_even_when_test_names_and_count_match() {
+    let root = fixture_repo("weakened");
+    let report = runner(&root)
+        .run_experiment(spec("weakened"), |tree| {
+            let path = tree.join("src/main.rs");
+            let text =
+                fs::read_to_string(&path)?.replace("assert_eq!(answer(), 42)", "assert!(true)");
+            fs::write(path, text)
+        })
+        .unwrap();
+    assert!(matches!(report.decision, Decision::Rollback { .. }));
+    assert!(
+        report
+            .reference_error
+            .as_deref()
+            .unwrap()
+            .contains("Protected")
+    );
+    assert!(report.candidate_patch.contains("assert!(true)"));
+    assert!(!report.improvement_verified);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn changed_manifest_cannot_disable_the_reference_tests() {
+    let root = fixture_repo("manifest");
+    let report = runner(&root)
+        .run_experiment(spec("manifest"), |tree| {
+            let path = tree.join("Cargo.toml");
+            fs::write(
+                &path,
+                fs::read_to_string(&path)?
+                    + "\n[[bin]]\nname=\"fixture\"\npath=\"src/main.rs\"\ntest=false\n",
+            )
+        })
+        .unwrap();
+    assert!(matches!(report.decision, Decision::Rollback { .. }));
+    assert!(report.reference_error.unwrap().contains("Cargo.toml"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn host_acceptance_proves_a_specific_gain_and_remains_outside_candidate_commit() {
+    let root = fixture_repo("acceptance");
+    let path = root.join("src/main.rs");
+    fs::write(
+        &path,
+        fs::read_to_string(&path).unwrap() + "\nfn doubled()->i32 {42}\n",
+    )
+    .unwrap();
+    git(&root, &["add", "src/main.rs"]);
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@local",
+            "commit",
+            "-m",
+            "initial incomplete capability",
+        ],
+    );
+    let acceptance = root.with_extension("acceptance.rs");
+    fs::write(
+        &acceptance,
+        "include!(\"../src/main.rs\");\n#[test] fn required_double(){assert_eq!(doubled(),84);}\n",
+    )
+    .unwrap();
+    let report = runner(&root)
+        .with_acceptance_test(&acceptance)
+        .run_experiment(spec("double"), |tree| {
+            let path = tree.join("src/main.rs");
+            fs::write(
+                &path,
+                fs::read_to_string(&path)?
+                    .replace("fn doubled()->i32 {42}", "fn doubled()->i32 {84}"),
+            )
+        })
+        .unwrap();
+    assert!(
+        matches!(report.decision, Decision::Promote { .. }),
+        "{:?}",
+        report
+    );
+    assert!(report.improvement_verified);
+    assert_eq!(report.acceptance_baseline.as_ref().unwrap().failed, 1);
+    assert_eq!(report.acceptance_candidate.as_ref().unwrap().failed, 0);
+    assert!(report.acceptance_sha256.is_some());
+    assert!(!git(&root, &["ls-tree", "-r", "exp-double"]).contains("__klyne_acceptance"));
+    fs::remove_file(acceptance).unwrap();
     fs::remove_dir_all(root).unwrap();
 }

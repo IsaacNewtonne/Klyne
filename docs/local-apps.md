@@ -79,7 +79,11 @@ The legacy single-file `path`/`contents` form remains accepted. Implementation
 and new regression tests can be included together. The experiment runner writes
 files in an isolated worktree, independently reads them back, and runs
 `cargo test --offline` against baseline and candidate.
-Both must have passing tests, zero failures, and no reduction in passed-test count.
+Both must have passing tests and zero failures. Baseline named tests and frozen
+test/configuration definitions must survive unchanged. A separate host acceptance
+suite can demonstrate a specific improvement; candidate-authored passing tests
+alone do not establish benefit. Completed attempts retain evidence for later
+repository-scoped recall. See [protected improvement evaluation](protected-improvement-evaluation.md).
 Passing candidates remain on `klyne/<id>`; failures roll back. Reports live beside
 the conversation database in `experiments/`. Experiments do not merge themselves.
 The separate supervised `runtime_stage` tool can activate a built candidate with

@@ -17,184 +17,260 @@ pub fn check(goal: &str, answer: &str) -> std::io::Result<()> {
     }
     Ok(())
 }
+/// Bind supported completion claims to host-produced destination receipts.
+/// Unstructured prose remains model-reviewed; it never creates a receipt.
 pub fn check_action_evidence(answer: &str, evidence: &[serde_json::Value]) -> std::io::Result<()> {
     let lower = answer.to_lowercase();
-    let claims = [
-        "was opened",
-        "been opened",
-        "i opened",
-        "i saved",
-        "been saved",
-        "saved successfully",
-        "was saved",
-        "i created",
-        "was created",
-        "been created",
-        "created successfully",
-        "file created",
-        "file is ready",
-        "i deleted",
-        "been deleted",
-        "deleted successfully",
-        "was deleted",
-        "i installed",
-        "been installed",
-        "installed successfully",
-        "was installed",
-        "i uploaded",
-        "been uploaded",
-        "uploaded successfully",
-        "was uploaded",
-        "i clicked",
-        "been clicked",
-        "successfully sent",
-        "been sent",
-        "i sent",
+    let groups: &[(&str, &[&str])] = &[
+        (
+            "file_write",
+            &[
+                "i saved",
+                "been saved",
+                "saved successfully",
+                "was saved",
+                "i created",
+                "was created",
+                "been created",
+                "created successfully",
+                "file created",
+                "file is ready",
+            ],
+        ),
+        ("open", &["was opened", "been opened", "i opened"]),
+        (
+            "delete",
+            &[
+                "i deleted",
+                "been deleted",
+                "deleted successfully",
+                "was deleted",
+            ],
+        ),
+        (
+            "install",
+            &[
+                "i installed",
+                "been installed",
+                "installed successfully",
+                "was installed",
+            ],
+        ),
+        (
+            "upload",
+            &[
+                "i uploaded",
+                "been uploaded",
+                "uploaded successfully",
+                "was uploaded",
+            ],
+        ),
+        ("click", &["i clicked", "been clicked"]),
+        ("send", &["successfully sent", "been sent", "i sent"]),
     ];
-    if !claims.iter().any(|claim| lower.contains(claim)) {
-        return Ok(());
+    for (effect, phrases) in groups {
+        if !phrases.iter().any(|phrase| lower.contains(phrase)) {
+            continue;
+        }
+        let receipts: Vec<_> = evidence
+            .iter()
+            .filter(|e| valid_receipt(e) && e["receipt"]["effect"] == *effect)
+            .collect();
+        if receipts.is_empty() {
+            return Err(crate::err(format!(
+                "No verified {effect} receipt supports this completion. Inspect the destination and report only observed results."
+            )));
+        }
+        if *effect == "file_write" {
+            for word in answer.split_whitespace() {
+                let path = word.trim_matches(|c: char| {
+                    matches!(
+                        c,
+                        '`' | '\'' | '"' | '.' | ',' | '(' | ')' | ';' | '!' | '?'
+                    )
+                });
+                let Some((_, extension)) = path.rsplit_once('.') else {
+                    continue;
+                };
+                if extension.is_empty()
+                    || extension.len() > 12
+                    || !extension.chars().all(char::is_alphanumeric)
+                {
+                    continue;
+                }
+                if !receipts
+                    .iter()
+                    .any(|e| e["receipt"]["target"].as_str() == Some(path))
+                {
+                    return Err(crate::err(format!("No matching file receipt for {path}")));
+                }
+            }
+        }
     }
-    // Operation-bound receipts (audit Phase 3): an effect claim needs a
-    // successful *effect* receipt, not just any ok evidence. Pure
-    // observations — file reads, searches, hashes, browser reads/screenshots,
-    // desktop observations, listings — can never confirm a mutation, so a
-    // read-only trail claiming "saved" is rejected. Unknown future effect
-    // tools stay lenient; host verification receipts always qualify.
-    // Residual risk (documented): paraphrase outside the claim list still
-    // evades; broker-issued receipts (deferred Phase 2) close that fully.
-    if evidence.iter().any(is_effect_receipt) {
-        return Ok(());
-    }
-    Err(crate::err(
-        "The proposed answer claims an app or file action, but this task has no successful effect evidence. That action is not confirmed. The task is incomplete.",
-    ))
+    Ok(())
 }
 
-/// Whether one evidence entry can serve as a receipt for a claimed mutation:
-/// successful, not from an excluded controller, and recording an effect
-/// rather than a read-only observation.
-fn is_effect_receipt(entry: &serde_json::Value) -> bool {
-    if entry["ok"] != true {
-        return false;
-    }
-    match entry["agent"].as_str() {
-        // Host verification and reconciliation are bound receipts by
-        // construction; route-control and approval bookkeeping carry no
-        // effects (an approval must never satisfy the claim it approved).
-        Some("Host reconciliation") | Some("Runtime check") | Some("Host verifier") => return true,
-        Some("Route controller") | Some("User reconciliation") | Some("User approval") => {
-            return false;
-        }
-        _ => {}
-    }
-    let action = entry["action"].as_str().unwrap_or("");
-    // Read-only observations can never confirm a mutation.
-    const OBSERVATIONAL: [&str; 11] = [
-        "read_file:",
-        "read_range:",
-        "hash_file:",
-        "search_file:",
-        "browser_read",
-        "browser_screenshot",
-        "desktop_observe",
-        "app_list",
-        "app_operations",
-        "runtime_status",
-        "sample_outline",
-    ];
-    !OBSERVATIONAL
-        .iter()
-        .any(|prefix| action.starts_with(prefix))
+fn valid_receipt(entry: &serde_json::Value) -> bool {
+    entry["ok"] == true
+        && entry["receipt"]["version"] == 1
+        && entry["receipt"]["target"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+        && matches!(
+            entry["agent"].as_str(),
+            Some("Runtime check" | "Host verifier" | "Host reconciliation")
+        )
 }
+
+pub fn verify_claims(
+    review: &serde_json::Value,
+    evidence: &[serde_json::Value],
+    policy: &harness_core::PermissionPolicy,
+) -> std::io::Result<()> {
+    use harness_core::verification::{FileEvidenceVerifier, Verifier};
+    if let Some(claims) = review.get("claims") {
+        let claims = claims
+            .as_array()
+            .filter(|c| c.len() <= 32)
+            .ok_or_else(|| crate::err("claims must be a bounded array"))?;
+        for claim in claims {
+            if !claim["effect"].is_string()
+                || !claim["target"].is_string()
+                || !evidence.iter().any(|e| {
+                    valid_receipt(e)
+                        && e["receipt"]["effect"] == claim["effect"]
+                        && e["receipt"]["target"] == claim["target"]
+                })
+            {
+                return Err(crate::err(
+                    "A completion claim has no matching host receipt",
+                ));
+            }
+        }
+    }
+    // Recheck the latest receipt for each file. Earlier versions do not verify
+    // later edits, and historical success does not verify a deleted file.
+    let explicit = review.get("claims").and_then(serde_json::Value::as_array);
+    let summary = review["summary"].as_str().unwrap_or("");
+    let named: std::collections::HashSet<_> = evidence
+        .iter()
+        .filter_map(|entry| {
+            let target = entry["receipt"]["target"].as_str()?;
+            (summary.contains(target)
+                || explicit.is_some_and(|claims| claims.iter().any(|c| c["target"] == target)))
+            .then_some(target)
+        })
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for entry in evidence
+        .iter()
+        .rev()
+        .filter(|e| valid_receipt(e) && e["receipt"]["effect"] == "file_write")
+    {
+        let target = entry["receipt"]["target"].as_str().unwrap();
+        if !named.is_empty() && !named.contains(target) {
+            continue;
+        }
+        // An explicit empty claim set need not revalidate scratch files that
+        // were deliberately removed. Caller-owned contracts still run.
+        if named.is_empty() && explicit.is_some_and(|claims| claims.is_empty()) {
+            continue;
+        }
+        if !seen.insert(target) {
+            continue;
+        }
+        let criterion: harness_core::verification::SuccessCriterion =
+            serde_json::from_value(entry["receipt"]["criterion"].clone()).map_err(crate::err)?;
+        let action = criterion.observation_action();
+        let observation = harness_core::ToolRegistry::milestone_default().execute(&action, policy);
+        if !FileEvidenceVerifier
+            .verify(&criterion, &action, &observation)
+            .passed
+        {
+            return Err(crate::err(format!(
+                "File receipt is stale for {target}; verify the current result before completing"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use serde_json::json;
-
-    fn receipt(agent: &str, action: &str) -> serde_json::Value {
-        json!({"agent": agent, "action": action, "ok": true})
+    fn receipt(path: &str) -> serde_json::Value {
+        json!({"agent":"Runtime check","ok":true,"receipt":{"version":1,"effect":"file_write","target":path}})
     }
-
     #[test]
-    fn invented_delivery_is_not_success() {
-        assert!(super::check("open zalo, send a message to joidi", "Task complete").is_err());
-        assert!(super::check("hi", "The message was successfully sent to him").is_err());
-        assert!(super::check("hi", "Hi! How can I help?").is_ok());
-        assert!(super::check_action_evidence("Zalo was opened", &[]).is_err());
-        assert!(super::check_action_evidence("Here is a project plan", &[]).is_ok());
-    }
-
-    #[test]
-    fn observations_alone_cannot_confirm_mutations() {
-        // The audit hole: any successful tool evidence satisfied any claim.
-        // A read-only trail must not confirm "saved".
-        let reads = vec![
-            receipt("Worker", "read_file:greeting.txt"),
-            receipt("Worker", "browser_read"),
-            receipt("Worker", "desktop_observe"),
-            receipt("Worker", "browser_screenshot"),
-        ];
-        assert!(super::check_action_evidence("I saved greeting.txt.", &reads).is_err());
-        assert!(super::check_action_evidence("Zalo was opened", &reads).is_err());
-        // Failed writes are not receipts either.
-        let failed = vec![json!({"agent": "Worker", "action": "write_file:x.txt", "ok": false})];
-        assert!(super::check_action_evidence("I saved x.", &failed).is_err());
-    }
-
-    #[test]
-    fn effect_receipts_confirm_claims() {
+    fn unrelated_actions_and_targets_never_confirm_saves() {
         for action in [
-            "write_file:greeting.txt",
-            "patch_file:greeting.txt:0",
             "shell:pytest tests",
             "browser_click",
-            "desktop_fill",
-            "desktop_drag",
-            "desktop_clipboard_set",
-            "tool_run",
             "tool_test",
-            "app_call",
-            "mcp_call",
+            "list_dir:.",
+            "stat_path:x",
+            "desktop_clipboard_get",
+            "unknown_future_tool",
         ] {
             assert!(
-                super::check_action_evidence("I saved the document.", &[receipt("Worker", action)])
-                    .is_ok(),
-                "{action} should confirm a save claim"
+                check_action_evidence(
+                    "I saved greeting.txt.",
+                    &[json!({"agent":"Worker","action":action,"ok":true})]
+                )
+                .is_err()
             );
         }
-        // Host verification and reconciliation are bound receipts.
+        assert!(check_action_evidence("I saved greeting.txt.", &[receipt("other.txt")]).is_err());
+        assert!(check_action_evidence("I saved greeting.txt.", &[receipt("greeting.txt")]).is_ok());
         assert!(
-            super::check_action_evidence(
-                "I saved the document.",
-                &[receipt("Host reconciliation", "document_save_reconcile")]
+            check_action_evidence(
+                "The package has been installed.",
+                &[receipt("greeting.txt")]
             )
-            .is_ok()
+            .is_err()
         );
-        assert!(
-            super::check_action_evidence(
-                "The file was created.",
-                &[receipt("Runtime check", "read_file:greeting.txt")]
-            )
-            .is_ok()
-        );
-        // Controller bookkeeping is not evidence.
-        let control = vec![receipt("Route controller", "route_switch")];
-        assert!(super::check_action_evidence("I saved the file.", &control).is_err());
+        assert!(check_action_evidence("Here is a project plan", &[]).is_ok());
     }
-
     #[test]
-    fn paraphrase_variants_still_trigger() {
-        let proof = vec![receipt("Worker", "write_file:x.txt")];
-        for claim in [
-            "The file has been saved.",
-            "Created successfully.",
-            "It was successfully sent.",
-            "The package has been installed.",
-        ] {
-            assert!(super::check_action_evidence(claim, &[]).is_err(), "{claim}");
-            assert!(
-                super::check_action_evidence(claim, &proof).is_ok(),
-                "{claim}"
-            );
-        }
+    fn claims_require_exact_effect_and_target_and_fresh_file() {
+        let root = tempfile::tempdir().unwrap();
+        let policy = harness_core::PermissionPolicy::milestone_default(root.path());
+        let mut proof = receipt("a.txt");
+        proof["receipt"]["criterion"] =
+            json!({"FileContents":{"path":"a.txt","expected":"checked"}});
+        std::fs::write(root.path().join("a.txt"), "checked").unwrap();
+        assert!(
+            verify_claims(
+                &json!({"claims":[{"effect":"file_write","target":"a.txt"}]}),
+                &[proof.clone()],
+                &policy
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_claims(
+                &json!({"claims":[{"effect":"file_write","target":"b.txt"}]}),
+                &[proof.clone()],
+                &policy
+            )
+            .is_err()
+        );
+        std::fs::write(root.path().join("a.txt"), "changed later").unwrap();
+        assert!(
+            verify_claims(
+                &json!({"summary":"Saved a.txt", "claims":[]}),
+                &[proof.clone()],
+                &policy
+            )
+            .is_err()
+        );
+        assert!(verify_claims(&json!({}), &[proof], &policy).is_err());
+    }
+    #[test]
+    fn invented_delivery_is_not_success() {
+        assert!(check("open zalo, send a message to joidi", "Task complete").is_err());
+        assert!(check("hi", "The message was successfully sent to him").is_err());
+        assert!(check("hi", "Hi!").is_ok());
     }
 }

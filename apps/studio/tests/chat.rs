@@ -571,7 +571,7 @@ fn recovery_screenshot_link_opens_the_failed_conversation() {
     assert_eq!(browser.eval("selected").unwrap(), id);
     assert_eq!(
         browser.eval("recoveryLink.textContent").unwrap(),
-        "Recovery"
+        "Recovery tools"
     );
     fixture.join().unwrap();
 }
@@ -607,7 +607,7 @@ fn chat_creates_loads_and_reuses_versioned_skills_and_tools() {
     assert_eq!(paused["execution"]["failure"]["kind"], "approval_needed");
     s.api(
         &format!("/api/chats/{id}/resolve"),
-        Some(json!({"disposition":"approved","note":"Approve cargo --version for this task"})),
+        Some(json!({"request_id":s.api(&format!("/api/chats/{id}"), None)["pending"]["request_id"],"disposition":"approved","note":"Approve cargo --version for this task"})),
     );
     let mut resume = request(&endpoint);
     resume["id"] = json!(id);
@@ -634,7 +634,7 @@ fn chat_creates_loads_and_reuses_versioned_skills_and_tools() {
     assert_eq!(paused["pending"]["proposal"]["kind"], "shell");
     s.api(
         &format!("/api/chats/{id2}/resolve"),
-        Some(json!({"disposition":"approved","note":"Approve reuse"})),
+        Some(json!({"request_id":s.api(&format!("/api/chats/{id2}"), None)["pending"]["request_id"],"disposition":"approved","note":"Approve reuse"})),
     );
     let mut resume = request(&endpoint);
     resume["id"] = json!(id2);
@@ -769,7 +769,7 @@ fn complete(text: &str) -> Value {
 fn approve(s: &Server, id: &str) {
     s.api(
         &format!("/api/chats/{id}/resolve"),
-        Some(json!({"disposition":"approved","note":"User approves the exact proposal"})),
+        Some(json!({"request_id":s.api(&format!("/api/chats/{id}"), None)["pending"]["request_id"],"disposition":"approved","note":"User approves the exact proposal"})),
     );
 }
 
@@ -808,14 +808,252 @@ fn shell_approval_records_exact_grant_before_first_execution() {
     assert_eq!(paused["pending"]["proposal"]["program"], "cmd.exe");
     assert_eq!(paused["execution"]["failure"]["kind"], "approval_needed");
     assert!(paused["evidence"].as_array().unwrap().is_empty());
-    approve(&s, id);
-    resume(&s, &endpoint, id, true, false);
+    let mut browser = ControlledBrowser::launch_isolated(BrowserLimits::default()).unwrap();
+    browser
+        .navigate(&format!("http://{}/#chat={id}", s.host))
+        .unwrap();
+    browser_wait(&mut browser, "snapshot?.pending?.proposal?.kind==='shell'");
+    browser
+        .eval("document.querySelector('#pending-action').open=true")
+        .unwrap();
+    assert_eq!(
+        browser
+            .eval("document.querySelector('#resolve-action').textContent")
+            .unwrap(),
+        "Approve and continue"
+    );
+    assert_eq!(
+        browser
+            .eval("document.querySelector('#pending-action > p').textContent.includes('cmd.exe')")
+            .unwrap(),
+        true
+    );
+    browser.click("#resolve-action").unwrap();
+    browser_wait(&mut browser, "snapshot?.status==='Completed'");
     let done = s.wait(id);
     assert_eq!(done["status"], "Completed", "{done}");
     assert!(done["evidence"].as_array().unwrap().iter().any(|e| e["ok"] == true
         && e["data"].as_str().unwrap_or_default().contains("approved")));
     assert_eq!(done["execution"]["shell_grants"][0]["program"], "cmd.exe");
     model.join().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn autonomous_command_policy_runs_without_grants_and_preserves_failed_effects() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"run_shell","program":"cmd.exe","args":["/d","/c","echo first"]}}),
+        json!({"decision":"act","action":{"tool":"run_shell","program":"cmd.exe","args":["/d","/c","echo changed>partial.txt & exit /b 7"]}}),
+    ]);
+    let mut body = request(&endpoint);
+    body["access"]["terminal"] = json!(true);
+    body["execution"] = json!({"command_policy":"autonomous"});
+    let created = s.api("/api/chats", Some(body));
+    let id = created["id"].as_str().unwrap();
+    let paused = s.wait(id);
+    assert_eq!(paused["status"], "Blocked", "{paused}");
+    assert!(
+        paused["pending"]["action"]["RunShell"].is_object(),
+        "{paused}"
+    );
+    assert!(
+        paused["execution"]["shell_grants"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(paused["execution"]["command_policy"], "autonomous");
+    assert!(
+        fs::read_to_string(
+            std::path::Path::new(paused["workspace"].as_str().unwrap()).join("partial.txt")
+        )
+        .unwrap()
+        .contains("changed")
+    );
+    let refused = s.api(
+        &format!("/api/chats/{id}/resolve"),
+        Some(json!({"disposition":"approved","note":"approval is not inspection"})),
+    );
+    assert!(refused["error"].is_string());
+    assert!(!s.api(&format!("/api/chats/{id}"), None)["pending"].is_null());
+    fixture.join().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn approvals_queue_while_independent_work_finishes_and_survive_restart() {
+    let mut s = Server::new();
+    let a = json!({"decision":"act","action":{"tool":"run_shell","program":"cmd.exe","args":["/d","/c","echo first"]}});
+    let b = json!({"decision":"act","action":{"tool":"run_shell","program":"cmd.exe","args":["/d","/c","echo second"]}});
+    let (endpoint, fixture) = model(vec![
+        json!({"summary":"Independent tasks","tasks":[
+            {"agent":"A","instruction":"First command","depends_on":[]},
+            {"agent":"B","instruction":"Second command","depends_on":[]},
+            {"agent":"C","instruction":"Independent greeting","depends_on":[]},
+            {"agent":"D","instruction":"Depends on first command","depends_on":[1]}]}),
+        a.clone(),
+        b.clone(),
+        write_file("Independent work"),
+        complete("Greeting ready"),
+        a,
+        complete("First finished"),
+        complete("Dependent finished"),
+        b,
+        complete("Second finished"),
+        complete("Done"),
+    ]);
+    let mut body = request(&endpoint);
+    body["access"]["terminal"] = json!(true);
+    let created = s.api("/api/chats", Some(body));
+    let id = created["id"].as_str().unwrap();
+    let paused = s.wait(id);
+    assert_eq!(paused["status"], "Interrupted", "{paused}");
+    assert_eq!(paused["tasks"][0]["status"], "Awaiting approval");
+    assert_eq!(paused["tasks"][1]["status"], "Awaiting approval");
+    assert_eq!(paused["tasks"][2]["status"], "Done");
+    assert_eq!(paused["tasks"][3]["status"], "Queued");
+    assert_eq!(
+        paused["execution"]["approval_queue"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(
+            std::path::Path::new(paused["workspace"].as_str().unwrap()).join("greeting.txt")
+        )
+        .unwrap(),
+        "Independent work"
+    );
+    let stale_id = paused["pending"]["request_id"].clone();
+    s.child.kill().unwrap();
+    s.child.wait().unwrap();
+    s.child = spawn_verified(
+        s.root.path(),
+        s.host.split(':').nth(1).unwrap().parse().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        s.api(&format!("/api/chats/{id}"), None)["pending"]["request_id"],
+        stale_id
+    );
+    approve(&s, id);
+    resume(&s, &endpoint, id, true, false);
+    let second = s.wait(id);
+    assert_eq!(second["tasks"][3]["status"], "Done", "{second}");
+    assert_eq!(second["pending"]["proposal"]["args"][2], "echo second");
+    let rejected = s.api(
+        &format!("/api/chats/{id}/resolve"),
+        Some(json!({"request_id":stale_id,"disposition":"approved","note":"stale tab"})),
+    );
+    assert!(rejected["error"].is_string());
+    approve(&s, id);
+    resume(&s, &endpoint, id, true, false);
+    let done = s.wait(id);
+    assert_eq!(done["status"], "Completed", "{done}");
+    assert!(done["used"].as_u64().unwrap() > paused["used"].as_u64().unwrap());
+    let requests = fixture.join().unwrap();
+    let mut inherited = None;
+    for request in requests {
+        let context: Value =
+            serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+        let policy = context["host_policy"].clone();
+        assert_eq!(policy["version"], 1);
+        if let Some(previous) = &inherited {
+            assert_eq!(previous, &policy);
+        }
+        inherited = Some(policy);
+    }
+}
+
+#[test]
+fn expired_card_requires_a_new_request_and_never_grants_execution() {
+    let s = Server::new();
+    let action = json!({"decision":"act","action":{"tool":"run_shell","program":"not-executed-fixture","args":[]}});
+    let (endpoint, fixture) = model(vec![plan(), action.clone(), action]);
+    let mut body = request(&endpoint);
+    body["access"]["terminal"] = json!(true);
+    let created = s.api("/api/chats", Some(body));
+    let id = created["id"].as_str().unwrap();
+    let paused = s.wait(id);
+    let db = rusqlite::Connection::open(
+        s.root
+            .path()
+            .join("conversations")
+            .join(id)
+            .join("chat.sqlite3"),
+    )
+    .unwrap();
+    let payload: String = db
+        .query_row("SELECT payload FROM chat WHERE id=1", [], |r| r.get(0))
+        .unwrap();
+    let mut data: Value = serde_json::from_str(&payload).unwrap();
+    data["pending"]["expires_at_ms"] = json!(0);
+    db.execute("UPDATE chat SET payload=?1 WHERE id=1", [data.to_string()])
+        .unwrap();
+    drop(db);
+    let resolved=s.api(&format!("/api/chats/{id}/resolve"),Some(json!({"request_id":paused["pending"]["request_id"],"disposition":"approved","note":"approve displayed card"})));
+    assert_eq!(resolved["renewal_required"], true, "{resolved}");
+    let expired = s.api(&format!("/api/chats/{id}"), None);
+    assert!(
+        expired["execution"]["shell_grants"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(expired["pending"].is_null());
+    resume(&s, &endpoint, id, true, false);
+    let fresh = s.wait(id);
+    assert_eq!(fresh["status"], "Interrupted");
+    assert_ne!(
+        fresh["pending"]["request_id"],
+        paused["pending"]["request_id"]
+    );
+    assert!(
+        fresh["execution"]["shell_grants"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    fixture.join().unwrap();
+}
+
+#[test]
+fn approval_resume_cannot_reset_the_shared_step_budget() {
+    let s = Server::new();
+    let action = json!({"decision":"act","action":{"tool":"run_shell","program":"not-executed-fixture","args":[]}});
+    let (endpoint, fixture) = model(vec![plan(), action]);
+    let mut body = request(&endpoint);
+    body["access"]["terminal"] = json!(true);
+    // Planner + worker + attempted dispatch reaches the cap after the card
+    // has been created; increasing the cap is an explicit user action.
+    body["execution"] = json!({"max_steps":3});
+    let created = s.api("/api/chats", Some(body));
+    let id = created["id"].as_str().unwrap();
+    let paused = s.wait(id);
+    assert_eq!(paused["status"], "Interrupted", "{paused}");
+    let used = paused["used"].as_u64().unwrap();
+    approve(&s, id);
+    let mut continuation = request(&endpoint);
+    continuation["id"] = json!(id);
+    continuation["resume"] = json!(true);
+    continuation["access"]["terminal"] = json!(true);
+    continuation["execution"] = json!({"max_steps":used});
+    s.api("/api/chats", Some(continuation));
+    let blocked = s.wait(id);
+    assert_eq!(blocked["status"], "Blocked", "{blocked}");
+    assert_eq!(blocked["used"], used);
+    assert!(
+        blocked["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["agent"] == "User approval")
+    );
+    fixture.join().unwrap();
 }
 
 #[test]
@@ -838,6 +1076,9 @@ fn secret_binding_refuses_ungranted_exfiltration() {
                     }
                     Err(_) => break,
                 };
+                // Windows accepted sockets can inherit the listener's
+                // nonblocking mode. Read the complete request before replying.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -1289,6 +1530,12 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
         &mut b,
         "snapshot?.activity?.kind==='model' && document.querySelector('#prod-core-state').textContent==='Thinking'",
     );
+    assert_eq!(
+        b.eval("document.querySelector('#production').dataset.view==='conversation'")
+            .unwrap(),
+        true
+    );
+    b.click("#prod-view-toggle").unwrap();
     assert_eq!(b.eval("!document.querySelector('#production').hidden && !document.querySelector('#stop-chat').hidden").unwrap(),true);
     let artifacts =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workspace/studio-qa");
@@ -1318,6 +1565,9 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
         &mut b,
         "!document.querySelector('#production').hidden && document.querySelectorAll('.prod-worker').length===2",
     );
+    b.set_reduced_motion(true).unwrap();
+    b.click("#prod-view-toggle").unwrap();
+    b.set_reduced_motion(false).unwrap();
     b.click("#prod-cap-files").unwrap();
     assert_eq!(b.eval("document.querySelector('#prod-inspector').open && document.querySelector('#prod-inspector-body').textContent.includes('greeting.txt')").unwrap(),true);
     b.eval("window.__morphCount=0;window.__morphPending=0;window.__morphReady=0;window.__nativeMorph=document.startViewTransition?.bind(document);if(__nativeMorph)document.startViewTransition=callback=>{__morphCount++;__morphPending++;const t=__nativeMorph(callback);t.ready.then(()=>__morphReady++).catch(()=>{});t.finished.catch(()=>{}).finally(()=>__morphPending--);return t;};document.querySelector('#instruction').value='Keep my draft'").unwrap();
@@ -1405,6 +1655,19 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
             .unwrap(),
         true
     );
+    // Blocked work must expose its next action in the default workspace view.
+    b.eval("polling=true;snapshot=structuredClone(presentation);snapshot.status='Interrupted';snapshot.pending={proposal:{kind:'shell',program:'cargo',args:['test']}};snapshot.execution.max_tokens=1234;snapshot.execution.max_cost_usd=0.25;configuredChat=null;render()").unwrap();
+    assert_eq!(b.eval("document.querySelector('#prod-continue').checkVisibility() && document.querySelector('#prod-continue').textContent==='Review action'").unwrap(),true);
+    b.click("#prod-continue").unwrap();
+    assert_eq!(b.eval("document.querySelector('#pending-action').checkVisibility() && document.querySelector('#pending-action').open && document.querySelector('#pending-proposal').textContent.includes('cargo') && [...document.querySelector('#pending-disposition').options].map(o=>o.value).join(',')==='approved,abandon'").unwrap(),true);
+    assert_eq!(
+        b.eval("executionConfig().max_tokens===1234 && executionConfig().max_cost_usd===0.25")
+            .unwrap(),
+        true
+    );
+    b.eval("snapshot.pending={action:{tool:'desktop_click'}};render()")
+        .unwrap();
+    assert_eq!(b.eval("[...document.querySelector('#pending-disposition').options].map(o=>o.value).join(',')==='completed,not_applied,abandon'").unwrap(),true);
     assert_eq!(b.eval("__errors").unwrap(), json!([]));
     b.close();
     assert_eq!(fixture.join().unwrap().len(), 6);
@@ -1545,7 +1808,7 @@ fn chat_browser_conversation_settings_controls_and_mobile() {
     );
     assert_eq!(b.eval("snapshot.access.apps").unwrap(), true);
     assert_eq!(
-        b.eval("document.querySelectorAll('.message').length===4 && window.injected===undefined")
+        b.eval("document.querySelectorAll('.message').length===2 && window.injected===undefined")
             .unwrap(),
         true
     );

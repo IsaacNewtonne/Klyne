@@ -239,27 +239,6 @@ pub fn execute_cancellable(
     {
         return Ok(proposal);
     }
-    // Destructive calls need an exact user approval even with bound
-    // secrets (audit Phase 2). Reads never trigger this gate.
-    if !access.by_user && matches!(tool, "app_call" | "app_invoke") {
-        let (method, path) = if tool == "app_call" {
-            (
-                action["method"].as_str().unwrap_or("GET").to_string(),
-                action["path"].as_str().unwrap_or("").to_string(),
-            )
-        } else {
-            let id = action["operation"].as_str().unwrap_or("");
-            let (method, path) = id.split_once(' ').unwrap_or(("", ""));
-            (method.to_string(), path.to_string())
-        };
-        if method == "DELETE"
-            && !crate::broker::delete_allowed(&access.deletes, name, &method, &path)
-        {
-            return Ok(
-                json!({"ok":false,"needs_approval":{"kind":"delete","connection":name,"method":method,"path":path},"error":"Destructive API calls need user approval for the exact connection, method and path."}),
-            );
-        }
-    }
     if tool == "app_inspect" {
         let response = call(
             &base,
@@ -365,9 +344,72 @@ pub fn execute_cancellable(
             .find(|op| action["operation"] == op.operation)
             .ok_or_else(|| err("Unknown saved operation; use app_operations"))?;
         let request = crate::app_schema::request(operation, &base, action)?;
-        return call(&base, &request, 65536, &auth, stop);
+        return authorized_call(&base, name, &request, &auth, stop, access);
     }
-    call(&base, action, 65536, &auth, stop)
+    authorized_call(&base, name, action, &auth, stop, access)
+}
+
+// Build the concrete target before deciding authority. A schema operation ID
+// is a template, never an authorization for all of its parameter values.
+fn authorized_call(
+    base: &Url,
+    name: &str,
+    action: &Value,
+    auth: &Value,
+    stop: &std::sync::atomic::AtomicBool,
+    access: &crate::broker::AppAccess,
+) -> io::Result<Value> {
+    let (url, method) = request_target(base, action)?;
+    if method == "DELETE" && !access.by_user {
+        use sha2::{Digest, Sha256};
+        let binding = crate::broker::DeleteGrant {
+            connection: name.into(),
+            origin: base.as_str().into(),
+            method: method.into(),
+            path: url.path().to_owned() + &url.query().map(|q| format!("?{q}")).unwrap_or_default(),
+            body_sha256: format!(
+                "{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&(action.get("body").is_some(), &action["body"]))
+                        .map_err(err)?
+                )
+            ),
+            granted_at_ms: 0,
+        };
+        if !crate::broker::delete_allowed(&access.deletes, &binding) {
+            let mut proposal = serde_json::to_value(binding).map_err(err)?;
+            proposal["kind"] = json!("delete");
+            proposal["body"] = action["body"].clone();
+            return Ok(
+                json!({"ok":false,"needs_approval":proposal,"error":"Approve this concrete API request before it runs."}),
+            );
+        }
+    }
+    call(base, action, 65536, auth, stop)
+}
+
+fn request_target<'a>(base: &Url, action: &'a Value) -> io::Result<(Url, &'a str)> {
+    let path = action["path"]
+        .as_str()
+        .filter(|p| {
+            p.starts_with('/') && !p.starts_with("//") && p.len() <= 4096 && !p.contains('\\')
+        })
+        .ok_or_else(|| err("Expected an API path starting with /"))?;
+    let url = base.join(path).map_err(err)?;
+    if url.origin() != base.origin() || url.fragment().is_some() {
+        return Err(err("API path escaped connection origin"));
+    }
+    let method = action["method"].as_str().unwrap_or("GET");
+    if !matches!(method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+        return Err(err("Unsupported API method"));
+    }
+    if action
+        .get("body")
+        .is_some_and(|b| b.to_string().len() > 32768)
+    {
+        return Err(err("API body too large"));
+    }
+    Ok((url, method))
 }
 
 fn validate_auth(auth: &Value) -> io::Result<()> {
@@ -416,20 +458,7 @@ fn call(
     auth: &Value,
     stop: &std::sync::atomic::AtomicBool,
 ) -> io::Result<Value> {
-    let path = action["path"]
-        .as_str()
-        .filter(|p| {
-            p.starts_with('/') && !p.starts_with("//") && p.len() <= 4096 && !p.contains('\\')
-        })
-        .ok_or_else(|| err("Expected an API path starting with /"))?;
-    let url = base.join(path).map_err(err)?;
-    if url.origin() != base.origin() || url.fragment().is_some() {
-        return Err(err("API path escaped connection origin"));
-    }
-    let method = action["method"].as_str().unwrap_or("GET");
-    if !matches!(method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
-        return Err(err("Unsupported API method"));
-    }
+    let (url, method) = request_target(base, action)?;
     validate_auth(auth)?;
     let mut headers = Vec::new();
     if let Some(name) = auth["bearer_env"].as_str() {
@@ -498,6 +527,62 @@ fn call(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delete_proposals_bind_resolved_schema_parameters_origin_query_and_body() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        execute(
+            root.path(),
+            &json!({"tool":"app_connect","name":"api","base_url":"http://127.0.0.1:9"}),
+            true,
+            false,
+        )
+        .unwrap();
+        let schema = json!({"openapi":"3.0.0","paths":{"/items/{id}":{"delete":{
+            "parameters":[{"in":"path","name":"id","required":true,"schema":{"type":"string"}}],
+            "responses":{"200":{"description":"ok"}}
+        }}}});
+        let base = origin("http://127.0.0.1:9").unwrap();
+        let operations = crate::app_schema::discover(&schema, &base).unwrap();
+        let db = rusqlite::Connection::open(root.path().join("apps.sqlite3")).unwrap();
+        db.execute(
+            "INSERT INTO app_schemas VALUES('api',?1,?2,0)",
+            rusqlite::params![base.as_str(), serde_json::to_string(&operations).unwrap()],
+        )
+        .unwrap();
+        let action = json!({"tool":"app_invoke","name":"api","operation":"DELETE /items/{id}","parameters":{"path":{"id":"7"}}});
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut access = crate::broker::AppAccess::default();
+        let proposal =
+            execute_cancellable(root.path(), &action, true, false, &stop, &access).unwrap();
+        assert_eq!(proposal["needs_approval"]["path"], "/items/7");
+        access
+            .deletes
+            .push(serde_json::from_value(proposal["needs_approval"].clone()).unwrap());
+        let mut other = action.clone();
+        other["parameters"]["path"]["id"] = json!("8");
+        let denied = execute_cancellable(root.path(), &other, true, false, &stop, &access).unwrap();
+        assert_eq!(denied["needs_approval"]["path"], "/items/8");
+        for changed in [
+            json!({"method":"DELETE","path":"/items/7?hard=true"}),
+            json!({"method":"DELETE","path":"/items/7","body":{"hard":true}}),
+        ] {
+            assert!(authorized_call(&base, "api", &changed, &json!({}), &stop, &access).unwrap()["needs_approval"].is_object());
+        }
+        let other_origin = origin("http://127.0.0.1:10").unwrap();
+        assert!(
+            authorized_call(
+                &other_origin,
+                "api",
+                &json!({"method":"DELETE","path":"/items/7"}),
+                &json!({}),
+                &stop,
+                &access
+            )
+            .unwrap()["needs_approval"]
+                .is_object()
+        );
+    }
     #[test]
     fn refused_connection_is_known_not_applied() {
         let root = tempfile::tempdir().unwrap();

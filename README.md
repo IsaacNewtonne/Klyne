@@ -23,11 +23,12 @@ Klyne is under active development. Desktop automation currently targets Windows.
 
 ## Execution guarantees
 
-A September 2026 technical audit ([AUDIT-2026-09-13.md](AUDIT-2026-09-13.md)) drove nine upgrade phases, now implemented:
+A September 2026 technical audit ([AUDIT-2026-09-13.md](AUDIT-2026-09-13.md)) drove nine upgrade phases. The [UX and autonomy re-audit](docs/audit-2026-09-13-ux-autonomy.md) identifies remaining release blockers; passing fixtures does not establish unattended general-purpose reliability.
 
-- **Host-owned authority.** Shell programs run only with exact user-approved (program, arguments) grants; API secrets are bound to approved origins; DELETE calls and other unapproved actions pause for user approval in the pending-action panel — model proposals grant nothing. See `apps/studio/src/broker.rs`.
-- **Honest effects.** Every route reports typed effect states; post-dispatch observation failures preserve uncertainty instead of clearing pending work; task completions need operation-bound evidence receipts, and each step records whether its completion cited fresh evidence.
-- **Qualified extensions.** Saved tools run only after version-and-digest qualification plus user approval; MCP adapter installs are explicit operations; runtime upgrades need fresh test attestations with supervisor rollback.
+- **Choose command autonomy once.** Settings offers exact-command approval or autonomous Terminal commands for the conversation. Terminal off and read-only review still deny execution. Credentials remain origin-bound; DELETE approvals bind the resolved origin, path/query and body.
+- **Recorded effects.** Failed commands retain uncertain state in Studio and the core runtime. Controlled benchmark diagnostics have explicit host recovery rules. File writes and patches issue destination-bound receipts and receive fresh completion checks; broader results remain model-reviewed.
+- **Qualified extensions.** Tool qualification binds argv, the resolved executable, referenced file arguments and declared artifacts. Runtime attestations now execute approved test argv and require unchanged candidate bytes. Tests prove execution, not arbitrary test quality or OS isolation.
+- **Automatic crash recovery.** The supervisor restarts Studio with backoff, preserves checkpoints, and stops after three unsuccessful restart attempts in a crash loop.
 - **Verified in tiers.** Deterministic suites, Chrome-gated browser tests, ignored live tests, and Windows desktop checks are documented in [docs/test-tiers.md](docs/test-tiers.md) with environment-recorded baselines.
 
 Known limits: desktop/API consequential actions beyond shell and DELETE have no host-classifiable approval gate; unsupervised model task-success rates are not measured; supervised processes are lifetime-managed, not sandboxed.
@@ -40,10 +41,13 @@ Install a current stable Rust toolchain with edition-2024 support and the platfo
 git clone https://github.com/IsaacNewtonne/Klyne.git
 cd Klyne
 cargo build --locked -p klyne-studio --bins
-.\target\debug\klyne-supervisor.exe --root workspace/studio --port 4317
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-command.ps1
+klyne
 ```
 
-Open **http://127.0.0.1:4317**, select your provider in Settings, and check the connection. Enable only the tools needed for your task. Terminal and desktop access can act on your real computer; the public demo has neither capability.
+The Windows installer adds `klyne.cmd` beside Cargo in its existing PATH directory. From any folder, type `klyne` to open a dedicated app window using Edge or Chrome. Closing the last Klyne app window stops Studio, its supervisor, and their owned child processes, including running jobs. Your ordinary browser and independently running services stay open. You can close PowerShell while the app window remains open. Keep this checkout in place; the command points to its launcher. `klyne -NoBrowser` explicitly runs as a background server without window-close shutdown.
+
+Select your provider in Settings and check the connection. Enable only the tools needed for your task. Terminal and desktop access can act on your real computer; the public demo has neither capability.
 
 The runtime stores local conversations and generated artifacts under `workspace/`, which is excluded from Git. No model weights are bundled. Chrome or Edge is needed for browser workflows; Node/npm is needed for the curated browser MCP adapter. See [provider setup](docs/studio-providers.md) and [app connections](docs/app-connections.md).
 

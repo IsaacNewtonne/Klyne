@@ -31,9 +31,13 @@ fn connection(path: &Path, write: bool) -> io::Result<Connection> {
     Ok(db)
 }
 pub fn save(path: &Path, chat: &Chat) -> io::Result<()> {
-    save_inner(path, chat)
+    save_with_secrets(
+        path,
+        chat,
+        &crate::broker::secret_values(&chat.execution.secret_grants),
+    )
 }
-fn save_inner(path: &Path, chat: &Chat) -> io::Result<()> {
+pub(crate) fn save_with_secrets(path: &Path, chat: &Chat, secrets: &[String]) -> io::Result<()> {
     let mut db = connection(path, true)?;
     let tx = db.transaction().map_err(err)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY,payload TEXT NOT NULL);CREATE TABLE IF NOT EXISTS history(kind TEXT NOT NULL,seq INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(kind,seq));").map_err(err)?;
@@ -48,28 +52,49 @@ fn save_inner(path: &Path, chat: &Chat) -> io::Result<()> {
         .map_err(err)?
         .unwrap_or(Value::Null);
     let before = &prior["pending"];
-    let after = chat.pending.as_ref().unwrap_or(&Value::Null);
+    let mut after = chat.pending.clone().unwrap_or(Value::Null);
+    crate::broker::scrub_value(&mut after, secrets);
+    let after = &after;
     if before != after {
         if !before.is_null() && !after.is_null() {
             return Err(err("Cannot replace an unresolved action"));
         }
-        let (action, state, evidence) = if before.is_null() {
-            (after.clone(), "dispatched", Value::Null)
+        let (mut action, state, evidence) = if before.is_null() {
+            (
+                after.clone(),
+                if after.get("proposal").is_some() {
+                    "proposed"
+                } else {
+                    "dispatched"
+                },
+                Value::Null,
+            )
         } else {
             // A returned tool call is not proof of task success. Preserve the
             // observation or explicit reconciliation without calling it verified.
             let mut evidence = chat.evidence.last().cloned().unwrap_or(Value::Null);
-            let secrets = crate::broker::secret_values(&chat.execution.secret_grants);
-            crate::broker::scrub_value(&mut evidence, &secrets);
-            let state = if evidence["agent"] == "User reconciliation" {
+            crate::broker::scrub_value(&mut evidence, secrets);
+            let state = if before.get("proposal").is_some() {
+                if chat
+                    .execution
+                    .approval_queue
+                    .iter()
+                    .any(|p| p["request_id"] == before["request_id"])
+                {
+                    "queued"
+                } else {
+                    "resolved"
+                }
+            } else if evidence["agent"] == "User reconciliation" {
                 "reconciled"
             } else {
                 "returned"
             };
             let mut action = before.clone();
-            crate::broker::scrub_value(&mut action, &secrets);
+            crate::broker::scrub_value(&mut action, secrets);
             (action, state, evidence)
         };
+        crate::broker::scrub_value(&mut action, secrets);
         tx.execute(
             "INSERT INTO action_events(action,state,evidence) VALUES(?1,?2,?3)",
             params![action.to_string(), state, evidence.to_string()],
@@ -81,10 +106,7 @@ fn save_inner(path: &Path, chat: &Chat) -> io::Result<()> {
     // never persist. Values come from the process environment for names
     // the user bound, so only live secrets scrub — and only values long
     // enough to be unambiguous.
-    crate::broker::scrub_value(
-        &mut metadata,
-        &crate::broker::secret_values(&chat.execution.secret_grants),
-    );
+    crate::broker::scrub_value(&mut metadata, secrets);
     for kind in ["messages", "evidence"] {
         let entries = metadata.as_object_mut().unwrap().remove(kind).unwrap();
         let entries = entries.as_array().unwrap();

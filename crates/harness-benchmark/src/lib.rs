@@ -375,6 +375,24 @@ pub fn agent_runtime<M: Model>(
 ) -> io::Result<AgentRuntime<M, SqliteEventStore>> {
     let mut policy = PermissionPolicy::milestone_default(workspace);
     policy.allow_shell_with_arg_prefix("cargo", vec!["test".into()]);
+    // These host-created disposable fixtures deliberately fail tests before
+    // repair. Explicitly accept Cargo's diagnostic exit for each exact argv;
+    // arbitrary commands and interrupted processes remain unreconciled.
+    for task in std::fs::read_dir(workspace.join("tasks"))? {
+        let task = task?;
+        if task.file_type()?.is_dir() {
+            policy.allow_shell_failure_recovery(
+                "cargo",
+                vec![
+                    "test".into(),
+                    "--offline".into(),
+                    "--manifest-path".into(),
+                    format!("tasks/{}/Cargo.toml", task.file_name().to_string_lossy()),
+                ],
+                101,
+            );
+        }
+    }
     for name in BUILD_ENV_GRANTS {
         policy.allow_env(*name);
     }

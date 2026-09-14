@@ -122,6 +122,7 @@ pub struct PermissionPolicy {
     /// Exact hostnames fetchable over the network. Empty by default, and
     /// matching is exact (case-insensitive): subdomains are not implied.
     network_allowlist: BTreeSet<String>,
+    recoverable_shell_exits: Vec<(String, Vec<String>, i32)>,
 }
 
 impl PermissionPolicy {
@@ -140,6 +141,7 @@ impl PermissionPolicy {
             shell_arg_grants: std::collections::BTreeMap::new(),
             env_allowlist: BTreeSet::new(),
             network_allowlist: BTreeSet::new(),
+            recoverable_shell_exits: Vec::new(),
         }
     }
 
@@ -175,6 +177,33 @@ impl PermissionPolicy {
     /// Grant an environment variable name for forwarding to child processes.
     pub fn allow_env(&mut self, name: impl Into<String>) {
         self.env_allowlist.insert(name.into());
+    }
+
+    /// Host-owned exception for a known diagnostic fixture: a specific argv
+    /// and observed exit code may return to its repair loop. This neither
+    /// grants execution nor claims that the command had no effects.
+    pub fn allow_shell_failure_recovery(
+        &mut self,
+        program: &str,
+        args: Vec<String>,
+        exit_code: i32,
+    ) {
+        self.recoverable_shell_exits
+            .push((program.into(), args, exit_code));
+    }
+    pub(crate) fn accepts_shell_failure(&self, action: &Action, summary: &str) -> bool {
+        let Action::RunShell { program, args } = action else {
+            return false;
+        };
+        self.recoverable_shell_exits
+            .iter()
+            .any(|(allowed, argv, code)| {
+                allowed == program
+                    && argv == args
+                    && (summary.starts_with(&format!("{program} exited with exit code: {code};"))
+                        || summary
+                            .starts_with(&format!("{program} exited with exit status: {code};")))
+            })
     }
 
     /// Resolve the child environment: cleared process env plus allowlisted
@@ -229,6 +258,7 @@ impl PermissionPolicy {
         if capability == Capability::ShellExecute {
             self.shell_allowlist.clear();
             self.shell_arg_grants.clear();
+            self.recoverable_shell_exits.clear();
         }
     }
 
@@ -264,6 +294,7 @@ impl PermissionPolicy {
             env_allowlist: BTreeSet::new(),
             // Narrowed children fetch nothing until explicitly re-granted.
             network_allowlist: BTreeSet::new(),
+            recoverable_shell_exits: Vec::new(),
         })
     }
 

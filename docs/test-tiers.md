@@ -4,7 +4,14 @@
 fixture tests from environment-gated suites so a red run means a real
 regression, not a missing browser or GUI session.
 
-## Tier 0 — deterministic baseline (offline, no Chrome/GUI/live)
+## Mixed workspace baseline — offline dependencies, Chrome/GUI required
+
+Correction from the UX/autonomy re-audit: excluding `harness-browser` does
+not exclude browser use in Studio integration tests. This command launches
+Chrome in `chat`, `studio`, and `site`, and exercises desktop fallback. It
+is not a headless Tier 0 suite. `--offline` controls Cargo dependency access,
+not the capabilities exercised by tests. Separate headless test targets are
+still needed before claiming a deterministic CI tier.
 
 ```powershell
 cargo test --workspace --exclude harness-browser --locked --offline --no-fail-fast
@@ -36,7 +43,7 @@ cargo test -p harness-browser --test controlled --locked --offline -- --test-thr
 
 ```powershell
 $env:KLYNE_MCP_TEST_ROOT = (Resolve-Path .).Path
-cargo test -p klyne-studio --lib --locked --offline -- --ignored mcp::live_browser_roundtrip
+cargo test -p klyne-studio --bin klyne-studio --locked --offline -- --ignored mcp::tests::live_browser_roundtrip
 ```
 
 - `mcp::tests::live_browser_roundtrip` launches the installed browser MCP
@@ -165,7 +172,7 @@ powershell -NoProfile -File scripts/test_desktop_recovery.ps1
 
 Run `scripts/test-baseline.ps1` — it writes
 `workspace/test-baseline-<timestamp>.log` with `rustc -V`, `cargo -V`,
-active toolchain, OS build, Chrome version (if present), and the Tier 0
+active toolchain, OS build, Chrome version (if present), and the mixed baseline
 result. Attach that log to any baseline claim.
 
 ## Phase 8 conformance notes (2026-09-13)
@@ -203,7 +210,7 @@ What these tiers do and do not establish, stated plainly for release claims:
   actions in the release corpus, with exclusions and skipped live tests
   reported — not silently passed.
 
-## Phase 2 conformance notes (2026-09-13)
+## Phase 2 conformance notes (2026-09-13, historical)
 
 - Broker unit tests: exact-argv shell binding, name→origin secret binding
   (lookalikes refused, network/env directions separated), delete triples,
@@ -217,3 +224,8 @@ What these tiers do and do not establish, stated plainly for release claims:
   no host-classifiable approval gate; improvement flows keep their own
   gates; attestation honesty and exit-zero semantics still trust the
   operator/model loop.
+
+The [September 14 implementation notes](autonomy-implementation-2026-09-14.md)
+supersede the DELETE and attestation contracts above: DELETE now binds resolved
+origin/query/body as well, and attestation requires a host-executed successful
+test process. Semantic correctness still requires appropriate verification.

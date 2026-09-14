@@ -7,6 +7,110 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 #[ignore = "subprocess fixture"]
+fn mutate_then_fail_child() {
+    fs::write("partial-effect.txt", "changed before failure").unwrap();
+    std::process::exit(7);
+}
+
+#[test]
+fn nonzero_exit_preserves_effect_uncertainty() {
+    use harness_core::{EffectState, Tool, WorkspaceShellTool, effect_of_observation};
+    let root = Workspace::new();
+    let mut policy = root.policy();
+    let program = std::env::current_exe()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    policy.allow_shell_program(&program);
+    let result = WorkspaceShellTool::default().execute(
+        &Action::RunShell {
+            program,
+            args: vec![
+                "--ignored".into(),
+                "--exact".into(),
+                "mutate_then_fail_child".into(),
+            ],
+        },
+        &policy,
+    );
+    assert_eq!(
+        fs::read_to_string(root.0.join("partial-effect.txt")).unwrap(),
+        "changed before failure"
+    );
+    assert!(!result.ok);
+    assert_eq!(effect_of_observation(&result, true), EffectState::Unknown);
+}
+
+#[test]
+fn runtime_retains_failed_shell_action_across_restart() {
+    use harness_core::event_store::EventStore;
+    use harness_core::{
+        AgentRuntime, Model, Objective, Observation, SqliteEventStore, StepDecision,
+    };
+    struct Once(Action);
+    impl Model for Once {
+        fn name(&self) -> &str {
+            "failure fixture"
+        }
+        fn decide(&mut self, _: &Objective, history: &[(Action, Observation)]) -> StepDecision {
+            assert!(
+                history.is_empty(),
+                "must not call model again after uncertain effect"
+            );
+            StepDecision::Act(self.0.clone())
+        }
+    }
+    let root = Workspace::new();
+    let program = std::env::current_exe()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let action = Action::RunShell {
+        program: program.clone(),
+        args: vec![
+            "--ignored".into(),
+            "--exact".into(),
+            "mutate_then_fail_child".into(),
+        ],
+    };
+    let mut policy = root.policy();
+    policy.allow_shell_program(&program);
+    let database = root.0.join("run.sqlite3");
+    {
+        let mut runtime = AgentRuntime::new(
+            Once(action.clone()),
+            ToolRegistry::milestone_default(),
+            policy.clone(),
+            SqliteEventStore::open(&database).unwrap(),
+        );
+        assert!(
+            runtime
+                .run(Objective::new("run fixture"))
+                .unwrap_err()
+                .to_string()
+                .contains("uncertain")
+        );
+    }
+    let mut store = SqliteEventStore::open(&database).unwrap();
+    let state = store.load().unwrap().unwrap();
+    assert_eq!(state.pending, Some(action.clone()));
+    drop(store);
+    fs::write(root.0.join("partial-effect.txt"), "inspected, not replayed").unwrap();
+    let mut runtime = AgentRuntime::new(
+        Once(action),
+        ToolRegistry::milestone_default(),
+        policy,
+        SqliteEventStore::open(&database).unwrap(),
+    );
+    assert!(runtime.resume().is_err());
+    assert_eq!(
+        fs::read_to_string(root.0.join("partial-effect.txt")).unwrap(),
+        "inspected, not replayed"
+    );
+}
+
+#[test]
+#[ignore = "subprocess fixture"]
 fn inherited_pipe_child() {
     std::thread::sleep(Duration::from_secs(4));
 }

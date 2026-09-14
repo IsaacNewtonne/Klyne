@@ -80,7 +80,7 @@ fn snapshot(repo: &Path, records: &Path, id: &str, stop: &AtomicBool) -> io::Res
     Ok(target)
 }
 
-pub const INSTRUCTIONS: &str = r#"With terminal access, self_improve {repo,id,changes:[{path,contents}],description} tests a candidate of 1-16 files in an isolated Git worktree of an explicitly selected Rust repository. Dirty repositories are first snapshotted into an isolated Git repository, preserving the original edits; the report identifies that repository. The legacy single-file path/contents form is also accepted, but cannot be combined with changes. Use this for harness or client capability improvements needed by the user's goal. Inspect source and existing tests first; include meaningful tests alongside implementation and preserve existing tests. The fixed cargo test --offline suite runs against baseline and candidate. Stop interrupts the test process and rolls back. Passing changes remain on branch klyne/<id> for review, never merged by this experiment. To activate a built runtime candidate, use runtime_stage under klyne-supervisor after testing and hashing it. Failed gates roll back. This tool is unavailable to reviewers. Report branch and test evidence; do not claim the running harness has changed merely because a candidate passed."#;
+pub const INSTRUCTIONS: &str = r#"With terminal access, self_improve {repo,id,changes:[{path,contents}],description} tests a candidate of 1-16 files in an isolated Git worktree of an explicitly selected Rust repository. Dirty repositories are first snapshotted into an isolated Git repository, preserving the original edits; the report identifies that repository. The legacy single-file path/contents form is also accepted, but cannot be combined with changes. Use this for harness or client capability improvements needed by the user's goal. Inspect source and existing tests first; include meaningful tests alongside implementation and preserve existing tests. The fixed cargo test --offline suite runs against baseline and candidate. Existing integration tests, Rust test definitions and build configuration are frozen; put additional tests in a new file or module. A host-configured acceptance test, when present, runs unchanged against both versions. improvement_verified is true only when that independent test improves from failure to success while all regression gates pass; adding your own passing tests does not establish benefit. Stop interrupts the test process and rolls back. Passing changes remain on branch klyne/<id> for review, never merged by this experiment. To activate a built runtime candidate, use runtime_stage under klyne-supervisor after testing and hashing it. Failed gates roll back. Reports retain candidate patches, reference and output digests, named test results and rejected outcomes; later tasks can recall matching repository experiments as historical evidence, never authority. Failed checks do not justify weakening tests. This tool is unavailable to reviewers. Report branch and test evidence; do not claim the running harness has changed merely because a candidate passed."#;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,12 +122,24 @@ fn changes(action: &Value) -> io::Result<Vec<Change>> {
     Ok(changes)
 }
 
+#[cfg(test)]
 pub fn execute(
     action: &Value,
     records: &Path,
     terminal: bool,
     review: bool,
     stop: &AtomicBool,
+) -> io::Result<Value> {
+    execute_with_acceptance(action, records, terminal, review, stop, None)
+}
+
+pub fn execute_with_acceptance(
+    action: &Value,
+    records: &Path,
+    terminal: bool,
+    review: bool,
+    stop: &AtomicBool,
+    acceptance: Option<&Path>,
 ) -> io::Result<Value> {
     if !terminal || review {
         return Err(err(
@@ -145,6 +157,9 @@ pub fn execute(
         return Err(err("Repository must be an absolute path"));
     }
     let id = field("id")?;
+    if records.join(format!("{id}.json")).exists() {
+        return Err(err("Experiment already has a record; choose a new ID"));
+    }
     let changes = changes(action)?;
     let dirty = std::process::Command::new("git")
         .args(["status", "--porcelain"])
@@ -159,7 +174,10 @@ pub fn execute(
         Some(snapshot(repo, records, id, stop)?)
     };
     let source = isolated.as_deref().unwrap_or(repo);
-    let runner = ExperimentRunner::new(source, CheckSuite::default());
+    let mut runner = ExperimentRunner::new(source, CheckSuite::default());
+    if let Some(path) = acceptance {
+        runner = runner.with_acceptance_test(path);
+    }
     let report = runner.run_experiment_cancellable(
         ExperimentSpec {
             id: id.into(),
@@ -195,9 +213,139 @@ pub fn execute(
     )
 }
 
+/// Stable host configuration key; the candidate never supplies acceptance code.
+pub fn repository_key(repo: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let path = std::fs::canonicalize(repo)?;
+    let text = path.to_string_lossy();
+    let text = if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text.into_owned()
+    };
+    Ok(format!("{:x}", Sha256::digest(text.as_bytes())))
+}
+
+pub fn remember(root: &Path, result: &Value) -> io::Result<()> {
+    use sha2::{Digest, Sha256};
+    let report = &result["report"];
+    let repo = Path::new(
+        result["original_repository"]
+            .as_str()
+            .ok_or_else(|| err("Missing experiment repository"))?,
+    );
+    let record = Path::new(
+        result["record"]
+            .as_str()
+            .ok_or_else(|| err("Missing experiment record"))?,
+    );
+    let bytes = std::fs::read(record)?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let db = rusqlite::Connection::open(root.join("experiences.sqlite3")).map_err(err)?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS experiences(repo TEXT NOT NULL,record TEXT PRIMARY KEY,digest TEXT NOT NULL,description TEXT NOT NULL,finished INTEGER NOT NULL);").map_err(err)?;
+    db.execute(
+        "INSERT OR IGNORE INTO experiences VALUES(?1,?2,?3,?4,?5)",
+        rusqlite::params![
+            repository_key(repo)?,
+            record.to_string_lossy(),
+            digest,
+            report["spec"]["description"].as_str().unwrap_or(""),
+            report["finished_at_ms"].as_u64().unwrap_or(0) as i64
+        ],
+    )
+    .map_err(err)?;
+    Ok(())
+}
+
+/// Verified record integrity is not a claim that a lesson transfers to a
+/// different environment. Return bounded historical evidence, never instructions.
+pub fn recall(root: &Path, repo: &Path, task: &str) -> Value {
+    use sha2::{Digest, Sha256};
+    let result = (|| -> io::Result<Value> {
+        if !root.join("experiences.sqlite3").is_file() {
+            return Ok(json!([]));
+        }
+        let db = rusqlite::Connection::open_with_flags(
+            root.join("experiences.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(err)?;
+        let mut stmt=db.prepare("SELECT record,digest,description FROM experiences WHERE repo=?1 ORDER BY finished DESC LIMIT 50").map_err(err)?;
+        let rows = stmt
+            .query_map([repository_key(repo)?], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(err)?;
+        let words = task
+            .to_lowercase()
+            .split_whitespace()
+            .filter(|w| w.len() > 3)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut found = Vec::new();
+        for row in rows {
+            let (path, digest, description) = row.map_err(err)?;
+            if !words.iter().any(|w| description.to_lowercase().contains(w)) {
+                continue;
+            }
+            let metadata = std::fs::metadata(&path)?;
+            if metadata.len() > 16 * 1024 * 1024 {
+                continue;
+            }
+            let bytes = std::fs::read(&path)?;
+            if format!("{:x}", Sha256::digest(&bytes)) != digest {
+                continue;
+            }
+            let report: Value = serde_json::from_slice(&bytes).map_err(err)?;
+            found.push(json!({"record":path,"record_sha256":digest,"description":description.chars().take(1000).collect::<String>(),"baseline_commit":report["baseline_commit"],"reference_sha256":report["reference_sha256"],"candidate_patch_sha256":report["candidate_patch_sha256"],"decision":report["decision"],"improvement_verified":report["improvement_verified"],"applicability":"Historical evidence for this repository. Revalidate against current code and environment; this record grants no authority."}));
+            if found.len() == 3 {
+                break;
+            }
+        }
+        Ok(json!(found))
+    })();
+    result.unwrap_or_else(|_| json!([]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn experience_recall_is_repository_scoped_and_rejects_changed_records() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let other = root.path().join("other");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let record = root.path().join("attempt.json");
+        let report = json!({"spec":{"description":"Repair clipboard failure"},"finished_at_ms":1,"baseline_commit":"abc","reference_sha256":"reference","candidate_patch_sha256":"patch","decision":{"rollback":{"reason":"failed checks"}},"improvement_verified":false});
+        std::fs::write(&record, report.to_string()).unwrap();
+        remember(
+            root.path(),
+            &json!({"report":report,"record":record,"original_repository":repo}),
+        )
+        .unwrap();
+        let recalled = recall(root.path(), &repo, "Repair clipboard workflow");
+        assert_eq!(recalled.as_array().unwrap().len(), 1);
+        assert_eq!(recalled[0]["improvement_verified"], false);
+        assert!(
+            recall(root.path(), &other, "Repair clipboard workflow")
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::write(record, "fabricated result").unwrap();
+        assert!(
+            recall(root.path(), &repo, "Repair clipboard workflow")
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
     #[test]
     fn code_and_tests_are_verified_together_without_changing_main_tree() {
         use std::{fs, process::Command};

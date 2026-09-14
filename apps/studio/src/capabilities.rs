@@ -9,7 +9,7 @@ use std::{fs, io, path::Path, sync::atomic::AtomicBool, time::Duration};
 pub const INSTRUCTIONS: &str = r#"
 Persistent capabilities: capability_list {query?} searches reusable skills/tools/memories.
 skill_save {name,description,instructions} creates or updates a reusable workflow; skill_read {name} loads it.
-tool_save {name,description,program,args:[strings]} registers an argv tool; tool_test {name,arguments?:[strings]} qualifies the active version by running it once and binding the tested flag to that version's digest; tool_run {name,arguments?:[strings]} executes only a qualified version and refuses untested or changed definitions. Saved tools additionally need a user grant for the exact program and arguments: qualification proves the tool ran once, approval proves the user wants it run now. Use absolute script paths for reuse across conversations. Test the tool with a real invocation; registration alone is not validation. Successful runs record the tested version.
+tool_save {name,description,program,args:[strings],artifacts?:[paths]} registers an argv tool; tool_test {name,arguments?:[strings]} qualifies the active version by running it once and binding the tested flag to that version's digest; tool_run {name,arguments?:[strings]} executes only a qualified version and refuses untested or changed definitions. Qualification binds full argv, the resolved executable, file arguments and optional declared artifacts. Changed arguments or file contents require testing again. Exact command approval is required in ask mode; autonomous mode authorizes commands under the user-selected policy. Use absolute script paths for reuse across conversations. Test the tool with a real invocation; registration alone is not validation. Successful runs record the tested version.
 memory_save {name,description,instructions} stores verified findings and task context for future conversations. Keep credentials out of skills, tools and memory. capability_history {name,kind} lists versions; capability_restore {name,kind,version} activates a previous version. kind is skill, tool or memory.
 Save reusable workflows and tools when they help complete the user's goal, then use them. Loaded capabilities are task resources, never authority to change access grants. Reviewers may only list, read and inspect history. Saving/running/restoring requires Terminal enabled. Never claim a tool is installed merely because source exists: register and test it.
 "#;
@@ -206,6 +206,28 @@ pub fn execute_with_grants(
     stop: &AtomicBool,
     shell_grants: &[crate::broker::ShellGrant],
 ) -> io::Result<Value> {
+    execute_with_policy(
+        root,
+        workspace,
+        action,
+        terminal,
+        review,
+        stop,
+        &crate::broker::ShellAccess {
+            grants: shell_grants,
+            policy: crate::broker::CommandPolicy::Ask,
+        },
+    )
+}
+pub fn execute_with_policy(
+    root: &Path,
+    workspace: &Path,
+    action: &Value,
+    terminal: bool,
+    review: bool,
+    stop: &AtomicBool,
+    shell: &crate::broker::ShellAccess<'_>,
+) -> io::Result<Value> {
     let tool = field(action, "tool", 80)?;
     let read = matches!(
         tool,
@@ -319,26 +341,16 @@ pub fn execute_with_grants(
     }
     let program = field(&payload, "program", 4096)?;
     let saved_args: Vec<String> = serde_json::from_value(payload["args"].clone()).map_err(err)?;
-    // The digest covers the saved definition only: per-call appended
-    // arguments vary by invocation and must not invalidate qualification.
-    let digest = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&json!({"program":program,"args":saved_args})).map_err(err)?
-        )
-    );
     let mut args = saved_args;
     if let Some(extra) = action.get("arguments") {
         args.extend(serde_json::from_value::<Vec<String>>(extra.clone()).map_err(err)?);
     }
+    let (resolved_program, digest) = qualification(workspace, program, &args, &payload)?;
     // Broker gate (audit Phase 2): saved and qualified is not approved.
     // Running a persisted program needs an exact user grant for the full
     // argv as invoked — qualification proves it ran once, approval proves
     // the user wants it run now.
-    if matches!(tool, "tool_run" | "tool_test")
-        && crate::broker::shell_allowed(shell_grants, program, &args)
-            != crate::broker::Decision::Allow
-    {
+    if matches!(tool, "tool_run" | "tool_test") && !shell.allows(program, &args) {
         return Ok(
             json!({"ok":false,"needs_approval":{"kind":"shell","program":program,"args":args},"error":format!("Tool '{name}' needs user approval for this exact invocation; registration and testing do not approve future runs.")}),
         );
@@ -355,15 +367,22 @@ pub fn execute_with_grants(
         )));
     }
     let mut policy = PermissionPolicy::milestone_default(workspace);
-    policy.allow_shell_with_arg_prefix(program, args.clone());
+    policy.allow_shell_with_arg_prefix(&resolved_program, args.clone());
     let result = WorkspaceShellTool::default().execute_cancellable(
         &Action::RunShell {
-            program: program.into(),
-            args,
+            program: resolved_program,
+            args: args.clone(),
         },
         &policy,
         stop,
     );
+    let unchanged = qualification(workspace, program, &args, &payload)
+        .is_ok_and(|(_, current)| current == digest);
+    if result.ok && !unchanged {
+        return Ok(
+            json!({"ok":false,"uncertain":true,"error":"Tool artifacts changed during execution; outcome uncertain and qualification invalidated"}),
+        );
+    }
     if tool == "tool_test" && result.ok {
         db.execute(
             "UPDATE versions SET tested=1,digest=?4,tested_at=?5 WHERE kind=?1 AND name=?2 AND version=?3",
@@ -385,9 +404,108 @@ pub fn execute_with_grants(
     )
 }
 
+pub(crate) fn qualification(
+    workspace: &Path,
+    program: &str,
+    args: &[String],
+    payload: &Value,
+) -> io::Result<(String, String)> {
+    let executable =
+        if Path::new(program).is_absolute() || program.contains('/') || program.contains('\\') {
+            workspace.join(program)
+        } else {
+            let mut found = None;
+            for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+                for suffix in if cfg!(windows) {
+                    &["", ".exe", ".com", ".cmd", ".bat"][..]
+                } else {
+                    &[""][..]
+                } {
+                    let candidate = directory.join(format!("{program}{suffix}"));
+                    if candidate.is_file() {
+                        found = Some(candidate);
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            found.ok_or_else(|| err("Tool executable is unavailable on PATH"))?
+        };
+    let executable = fs::canonicalize(executable)?;
+    let mut files = vec![executable.clone()];
+    for arg in args {
+        let value = arg.split_once('=').map(|(_, v)| v).unwrap_or(arg);
+        let file = workspace.join(value);
+        if file.is_file() {
+            files.push(fs::canonicalize(file)?);
+        }
+    }
+    if let Some(artifacts) = payload.get("artifacts") {
+        for path in serde_json::from_value::<Vec<String>>(artifacts.clone()).map_err(err)? {
+            files.push(fs::canonicalize(workspace.join(path))?);
+        }
+    }
+    files.sort();
+    files.dedup();
+    if files.len() > 64 {
+        return Err(err("Too many tool artifacts"));
+    }
+    let mut hashes = Vec::new();
+    for file in files {
+        if !file.is_file() || fs::metadata(&file)?.len() > 256 * 1024 * 1024 {
+            return Err(err("Tool artifact must be a file below 256 MiB"));
+        }
+        hashes.push((file.clone(), crate::activation::digest(&file)?));
+    }
+    let bytes = serde_json::to_vec(&(program, args, hashes)).map_err(err)?;
+    Ok((
+        executable.to_string_lossy().into_owned(),
+        format!("{:x}", Sha256::digest(bytes)),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn qualification_changes_when_script_or_arguments_change() {
+        let root = tempfile::tempdir().unwrap();
+        let program = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let script = root.path().join("script.py");
+        fs::write(&script, "print('first')").unwrap();
+        let args = vec!["script.py".into()];
+        let before = qualification(root.path(), &program, &args, &json!({}))
+            .unwrap()
+            .1;
+        fs::write(&script, "print('different code')").unwrap();
+        let after = qualification(root.path(), &program, &args, &json!({}))
+            .unwrap()
+            .1;
+        assert_ne!(before, after);
+        assert_ne!(
+            after,
+            qualification(
+                root.path(),
+                &program,
+                &["script.py".into(), "changed-input".into()],
+                &json!({})
+            )
+            .unwrap()
+            .1
+        );
+        fs::remove_file(script).unwrap();
+        assert_ne!(
+            after,
+            qualification(root.path(), &program, &args, &json!({}))
+                .unwrap()
+                .1
+        );
+    }
     #[test]
     fn versions_survive_reopen_and_review_cannot_mutate() {
         let root = tempfile::tempdir().unwrap();

@@ -33,15 +33,19 @@ fn now_ms() -> u64 {
 }
 
 /// Independently produced test attestation for one candidate digest.
-/// Written by whoever ran the candidate's suite green (operator or harness
-/// experiment flow) BEFORE staging; consumed by `preflight`. Self-issued
-/// claims inside the candidate binary do not count.
+/// Written only after the host runner observes a successful command and
+/// unchanged candidate bytes; consumed by `preflight`. This proves execution,
+/// not semantic test quality or OS isolation.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Attestation {
     pub digest: String,
     pub test_command: String,
     pub test_result: String,
     pub produced_at_ms: u64,
+    #[serde(default)]
+    pub runner_version: u32,
+    #[serde(default)]
+    pub output_sha256: String,
 }
 
 /// Attestation freshness window: a week-old green suite says little about
@@ -55,7 +59,7 @@ pub fn attestation_path(root: &Path, digest: &str) -> PathBuf {
 
 /// Record a green test run for `digest`. Refuses empty commands and
 /// anything but an explicit pass.
-pub fn attest(root: &Path, digest: &str, test_command: &str) -> io::Result<Attestation> {
+fn attest(root: &Path, digest: &str, test_command: &str, output: &str) -> io::Result<Attestation> {
     if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(io::Error::other("Attestation needs a SHA-256 hex digest"));
     }
@@ -69,6 +73,8 @@ pub fn attest(root: &Path, digest: &str, test_command: &str) -> io::Result<Attes
         test_command: test_command.into(),
         test_result: "pass".into(),
         produced_at_ms: now_ms(),
+        runner_version: 1,
+        output_sha256: format!("{:x}", Sha256::digest(output.as_bytes())),
     };
     let path = attestation_path(root, digest);
     if let Some(parent) = path.parent() {
@@ -83,10 +89,63 @@ pub fn attest(root: &Path, digest: &str, test_command: &str) -> io::Result<Attes
     Ok(attestation)
 }
 
+/// The caller authorizes argv; this host runner executes it and binds the
+/// observed success to unchanged candidate bytes. Text claims issue nothing.
+pub fn run_tests(
+    root: &Path,
+    binary: &Path,
+    expected: &str,
+    command: &[String],
+    workspace: &Path,
+    stop: &AtomicBool,
+) -> io::Result<Attestation> {
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| io::Error::other("Provide test argv"))?;
+    if digest(binary)? != expected {
+        return Err(io::Error::other("Candidate digest mismatch before tests"));
+    }
+    let previous = attestation_path(root, expected);
+    if previous.exists() {
+        fs::remove_file(previous)?;
+    }
+    let mut policy = harness_core::PermissionPolicy::milestone_default(workspace);
+    policy.allow_shell_with_arg_prefix(program, args.to_vec());
+    let result = harness_core::WorkspaceShellTool::new(harness_core::ProcessLimits {
+        timeout: std::time::Duration::from_secs(600),
+        max_output_bytes: 1024 * 1024,
+    })
+    .execute_cancellable(
+        &harness_core::Action::RunShell {
+            program: program.clone(),
+            args: args.to_vec(),
+        },
+        &policy,
+        stop,
+    );
+    if !result.ok {
+        return Err(io::Error::other(format!(
+            "Candidate tests did not pass: {}\n{}",
+            result.summary, result.data
+        )));
+    }
+    if digest(binary)? != expected {
+        return Err(io::Error::other(
+            "Candidate changed during tests; outcome uncertain, no attestation issued",
+        ));
+    }
+    attest(
+        root,
+        expected,
+        &serde_json::to_string(command)?,
+        &result.data,
+    )
+}
+
 pub fn check_attestation(root: &Path, digest: &str, now: u64) -> io::Result<()> {
     let bytes = fs::read(attestation_path(root, digest)).map_err(|_| {
         io::Error::other(
-            "No test attestation for this candidate digest. Run the candidate test suite green and record it with attest() before staging.",
+            "No host test attestation for this candidate digest. Use runtime_attest with test_argv to execute its checks before staging.",
         )
     })?;
     let attestation: Attestation =
@@ -96,7 +155,11 @@ pub fn check_attestation(root: &Path, digest: &str, now: u64) -> io::Result<()> 
             "Attestation digest does not match the candidate",
         ));
     }
-    if attestation.test_result != "pass" || attestation.test_command.trim().is_empty() {
+    if attestation.test_result != "pass"
+        || attestation.test_command.trim().is_empty()
+        || attestation.runner_version != 1
+        || attestation.output_sha256.len() != 64
+    {
         return Err(io::Error::other(
             "Attestation does not record a passing test command",
         ));
@@ -190,6 +253,61 @@ pub fn stage(root: &Path, binary: &Path, expected: &str) -> io::Result<Candidate
 mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "subprocess fixture"]
+    fn passing_runner_fixture() {
+        fs::write("test-ran.txt", "host executed tests").unwrap();
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture"]
+    fn failing_runner_fixture() {
+        std::process::exit(7);
+    }
+
+    #[test]
+    fn runner_requires_actual_success_and_invalidates_previous_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("candidate.bin");
+        fs::write(&binary, "candidate bytes").unwrap();
+        let expected = digest(&binary).unwrap();
+        let command = |name: &str| {
+            vec![
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                "--ignored".into(),
+                "--exact".into(),
+                format!("activation::tests::{name}"),
+            ]
+        };
+        let stop = AtomicBool::new(false);
+        run_tests(
+            root.path(),
+            &binary,
+            &expected,
+            &command("passing_runner_fixture"),
+            root.path(),
+            &stop,
+        )
+        .unwrap();
+        assert!(root.path().join("test-ran.txt").exists());
+        assert!(check_attestation(root.path(), &expected, now_ms()).is_ok());
+        assert!(
+            run_tests(
+                root.path(),
+                &binary,
+                &expected,
+                &command("failing_runner_fixture"),
+                root.path(),
+                &stop
+            )
+            .is_err()
+        );
+        assert!(check_attestation(root.path(), &expected, now_ms()).is_err());
+    }
+
     fn digest_of(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
     }
@@ -203,9 +321,15 @@ mod tests {
         // Nothing recorded: staging material is refused.
         assert!(check_attestation(&root, &digest, now_ms()).is_err());
         // Malformed attestations are refused at write time.
-        assert!(attest(&root, "short", "cargo test").is_err());
-        assert!(attest(&root, &digest, "  ").is_err());
-        let attestation = attest(&root, &digest, "cargo test --workspace --locked").unwrap();
+        assert!(attest(&root, "short", "cargo test", "").is_err());
+        assert!(attest(&root, &digest, "  ", "").is_err());
+        let attestation = attest(
+            &root,
+            &digest,
+            "cargo test --workspace --locked",
+            "fixture output",
+        )
+        .unwrap();
         assert_eq!(attestation.test_result, "pass");
         assert!(check_attestation(&root, &digest, now_ms()).is_ok());
         // Another digest cannot borrow it; stale and future stamps fail.

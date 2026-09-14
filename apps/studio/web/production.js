@@ -27,11 +27,22 @@
   <dialog id="prod-inspector" aria-labelledby="prod-inspector-title"><form method="dialog" class="dialog-heading"><h2 id="prod-inspector-title">Inspect node</h2><button class="icon-button" aria-label="Close inspection">×</button></form><pre id="prod-inspector-body"></pre></dialog>
   </div>`;
   $('main').insertBefore(root,$('main').firstChild);
+  const continueButton = document.createElement('button');
+  continueButton.id = 'prod-continue'; continueButton.type = 'button'; continueButton.hidden = true;
+  root.querySelector('.prod-heading').append(continueButton);
+  continueButton.onclick = () => {
+    if(current?.snapshot?.pending || current?.snapshot?.status==='Needs input') {
+      conversation=true;render();
+      if(current.snapshot.pending) {$('pending-action').open=true;$('pending-action').scrollIntoView({block:'nearest'});}
+      else $('instruction').focus();
+    } else $('resume-chat').click();
+  };
   $('prod-inspector').querySelector('form').addEventListener('submit',()=>{inspect=null;});
   $('prod-inspector').addEventListener('cancel',()=>{inspect=null;});
   $('prod-surface').insertBefore($('prod-result'),root.querySelector('.prod-pipeline'));
   $('prod-details').onclick=()=>{const expanded=root.dataset.details!=='true';root.dataset.details=String(expanded);$('prod-details').setAttribute('aria-pressed',String(expanded));scheduleEdges();};
-  let current = null, selectedKey = null, conversation = false, online = true;
+  const defaultConversation=!!$('resume-chat');
+  let current = null, selectedKey = null, conversation = defaultConversation, online = true;
   let edgeFrame = 0, animations = [], previousSubmitting = false, inspect = null, viewTransition = null;
   function markup(element, html) { if(element.dataset.rendered !== html) {element.innerHTML=html;element.dataset.rendered=html;} }
   function actionName(action) {
@@ -89,20 +100,24 @@
   }
   function update(input) {
     const newSelection=input.selected!==selectedKey;
-    if(newSelection && !previousSubmitting) { cancelMotion();  conversation=false; inspect=null;  $('prod-inspector').close(); }
+    if(newSelection && !previousSubmitting) { cancelMotion();  conversation=defaultConversation; inspect=null;  $('prod-inspector').close(); }
     selectedKey=input.selected; current=input;
     const visible=!!input.selected || input.submitting;
     root.hidden=!visible;
-    if(!visible) {$('prod-inspector').close();cancelMotion();conversation=false;document.documentElement.classList.remove('production-on','production-busy');previousSubmitting=false;return;}
+    if(!visible) {$('prod-inspector').close();cancelMotion();conversation=defaultConversation;document.documentElement.classList.remove('production-on','production-busy');previousSubmitting=false;return;}
     const starting=input.submitting && !previousSubmitting;
     previousSubmitting=input.submitting;
-    if(starting) {conversation=false;morphView();} else render();
+    if(starting) {conversation=defaultConversation;morphView();} else render();
   }
   function render() {
     if(!current || root.hidden) return;
     const chat=current.snapshot;
     const status=current.submitting?'Receiving':chat?.status || 'Opening';
     const active=busy.has(status) || ['Receiving','Opening'].includes(status);
+    $('prod-details').hidden=conversation;
+    continueButton.hidden=conversation || active || !chat || status==='Completed' || !$('resume-chat');
+    continueButton.disabled=!!current.submitting;
+    continueButton.textContent=chat?.pending?.proposal?'Review action':chat?.pending?'Resolve action':status==='Needs input'?'Answer question':'Resume work';
     const pending=pendingOf(chat);
     const inTool=active && pending;
     const waiting=active && chat?.activity?.kind==='model' && !pending;
@@ -114,7 +129,7 @@
     document.documentElement.classList.toggle('production-busy',active && !conversation);
     root.dataset.status=status; root.dataset.live=String(active && online); root.dataset.view=conversation?'conversation':'production';
     $('prod-surface').hidden=conversation;
-    $('prod-view-toggle').textContent=conversation?'Production ↗':'Conversation ↗';
+    $('prod-view-toggle').textContent=conversation?'Activity ↗':'Conversation ↗';
     $('prod-view-toggle').setAttribute('aria-pressed',String(conversation));
     const labels={Receiving:'Receiving your instruction',Opening:'Opening saved work',Planning:'Understanding your request',Working:inTool?'Putting tools to work':'Executing the plan',Reviewing:'Checking the result',Completed:'Ready for you','Needs input':'Your input is needed',Blocked:'Work needs attention',Interrupted:'Saved work · interrupted',Stopping:'Stopping current work',Stopped:'Work is stopped',Upgrading:'Handing off the runtime'};
     $('prod-title').textContent=labels[status] || status;
@@ -122,7 +137,7 @@
     if($('prod-live').textContent!==live) $('prod-live').textContent=live;
     $('prod-metrics').textContent=tasks.length?`${tasks.filter(t=>t.status==='Done').length} of ${tasks.length} steps`: 'Preparing';
     $('prod-progress').max=Math.max(1,tasks.length);$('prod-progress').value=tasks.filter(t=>t.status==='Done').length;
-    $('prod-goal').textContent=current.submitting?current.message:lastUser?.text || chat?.title || 'Loading the saved instruction…';
+    $('prod-goal').textContent=current.submitting?current.message:chat?.execution?.original_request || lastUser?.text || chat?.title || 'Loading the saved instruction…';
     const stages=['Planning','Working','Reviewing','Completed'];
     const index=stages.indexOf(status);
     document.querySelectorAll('[data-stage]').forEach(node=>{const n=stages.indexOf(node.dataset.stage);node.dataset.state=n===index?'active':index>=0 && n<index?'done':'waiting';});

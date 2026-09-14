@@ -263,7 +263,20 @@ impl<M: Model, E: EventStore> AgentRuntime<M, E> {
             },
             &format!("{};{}", obs.summary, obs.data),
         )?;
+        let uncertain = crate::execution::effect_of_observation(&obs, true)
+            == crate::execution::EffectState::Unknown;
+        let accepted_diagnostic =
+            uncertain && self.policy.accepts_shell_failure(&action, &obs.summary);
         state.history.push((action, obs));
+        if uncertain && !accepted_diagnostic {
+            self.events.checkpoint(state)?;
+            return Err(io::Error::other(
+                "Action outcome is uncertain; inspect and reconcile before continuing",
+            ));
+        }
+        if accepted_diagnostic {
+            self.events.append("DiagnosticFailureAccepted", "Host policy permits repair after this exact diagnostic exit; effects are not asserted absent")?;
+        }
         state.pending = None;
         self.events.checkpoint(state)?;
         Ok(None)

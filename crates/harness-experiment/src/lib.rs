@@ -13,7 +13,10 @@
 //! Refusals are fail-closed: dirty repos, existing branches, unparseable
 //! suite output, and suite timeouts all abort without touching the repo.
 
+mod protection;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +45,10 @@ impl Default for CheckSuite {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuiteResult {
+    #[serde(default)]
+    pub tests: BTreeMap<String, String>,
+    #[serde(default)]
+    pub output_sha256: String,
     pub passed: u64,
     pub failed: u64,
     pub timed_out: bool,
@@ -65,6 +72,24 @@ pub struct ExperimentSpec {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExperimentReport {
+    #[serde(default)]
+    pub baseline_commit: String,
+    #[serde(default)]
+    pub reference_sha256: String,
+    #[serde(default)]
+    pub candidate_patch: String,
+    #[serde(default)]
+    pub candidate_patch_sha256: String,
+    #[serde(default)]
+    pub acceptance_sha256: Option<String>,
+    #[serde(default)]
+    pub acceptance_baseline: Option<SuiteResult>,
+    #[serde(default)]
+    pub acceptance_candidate: Option<SuiteResult>,
+    #[serde(default)]
+    pub improvement_verified: bool,
+    #[serde(default)]
+    pub reference_error: Option<String>,
     pub spec: ExperimentSpec,
     pub baseline: SuiteResult,
     pub candidate: SuiteResult,
@@ -121,8 +146,84 @@ fn parse_suite_output(combined: &str) -> Option<(u64, u64)> {
     found.then_some((passed, failed))
 }
 
+fn named_tests(output: &str) -> BTreeMap<String, String> {
+    let mut tests = BTreeMap::new();
+    for line in output.lines() {
+        if let Some((name, status)) = line
+            .trim()
+            .strip_prefix("test ")
+            .and_then(|s| s.split_once(" ... "))
+            && matches!(status, "ok" | "FAILED" | "ignored")
+        {
+            // Preserve multiplicity where separate test binaries share names.
+            let key = format!(
+                "{}#{}",
+                name,
+                tests
+                    .keys()
+                    .filter(|k: &&String| k.starts_with(&format!("{name}#")))
+                    .count()
+            );
+            tests.insert(key, status.into());
+        }
+    }
+    tests
+}
+
+fn run_acceptance(
+    root: &Path,
+    source: &[u8],
+    suite: &CheckSuite,
+    stop: &AtomicBool,
+) -> SuiteResult {
+    let path = root.join("tests/__klyne_acceptance.rs");
+    let result = (|| -> io::Result<SuiteResult> {
+        if path.exists() {
+            return Err(io::Error::other(
+                "Reserved acceptance test path already exists",
+            ));
+        }
+        let dir = root.join("tests");
+        if dir.exists() {
+            let meta = std::fs::symlink_metadata(&dir)?;
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if meta.file_attributes() & 0x400 != 0 {
+                    return Err(io::Error::other("Acceptance directory is a reparse point"));
+                }
+            }
+            if meta.file_type().is_symlink() {
+                return Err(io::Error::other("Acceptance directory is a symlink"));
+            }
+        } else {
+            std::fs::create_dir(&dir)?;
+        }
+        std::fs::write(&path, source)?;
+        let mut acceptance_suite = suite.clone();
+        acceptance_suite.argv = vec![
+            "test".into(),
+            "--offline".into(),
+            "--test".into(),
+            "__klyne_acceptance".into(),
+        ];
+        let mut result = run_suite(root, &acceptance_suite, stop);
+        if std::fs::read(&path).ok().as_deref() != Some(source) {
+            result.failed = result.failed.max(1);
+            result
+                .output_tail
+                .push_str("\nProtected acceptance test changed during execution");
+        }
+        std::fs::remove_file(&path)?;
+        Ok(result)
+    })();
+    result.unwrap_or_else(|e| skipped_suite(&e.to_string()))
+}
+
 fn skipped_suite(reason: &str) -> SuiteResult {
     SuiteResult {
+        tests: BTreeMap::new(),
+        output_sha256: String::new(),
         passed: 0,
         failed: 1,
         timed_out: false,
@@ -167,6 +268,8 @@ fn run_suite(dir: &Path, suite: &CheckSuite, stop: &AtomicBool) -> SuiteResult {
         Ok(child) => child,
         Err(e) => {
             return SuiteResult {
+                tests: BTreeMap::new(),
+                output_sha256: String::new(),
                 passed: 0,
                 failed: 1,
                 timed_out: false,
@@ -233,6 +336,8 @@ fn run_suite(dir: &Path, suite: &CheckSuite, stop: &AtomicBool) -> SuiteResult {
                     .collect();
                 tail = tail.chars().rev().collect();
                 return SuiteResult {
+                    tests: named_tests(&combined),
+                    output_sha256: format!("{:x}", Sha256::digest(combined.as_bytes())),
                     passed,
                     failed: if status.success() && !capture_failed && !stop.load(Ordering::SeqCst) {
                         failed
@@ -248,6 +353,8 @@ fn run_suite(dir: &Path, suite: &CheckSuite, stop: &AtomicBool) -> SuiteResult {
                 if started.elapsed() >= suite.timeout || stop.load(Ordering::SeqCst) {
                     stop_child(&mut child);
                     return SuiteResult {
+                        tests: BTreeMap::new(),
+                        output_sha256: String::new(),
                         passed: 0,
                         failed: 1,
                         timed_out: !stop.load(Ordering::SeqCst),
@@ -270,6 +377,8 @@ fn run_suite(dir: &Path, suite: &CheckSuite, stop: &AtomicBool) -> SuiteResult {
                     timed_out: false,
                     seconds: started.elapsed().as_secs_f64(),
                     output_tail: format!("suite supervision failed: {e}"),
+                    tests: BTreeMap::new(),
+                    output_sha256: String::new(),
                 };
             }
         }
@@ -279,6 +388,7 @@ fn run_suite(dir: &Path, suite: &CheckSuite, stop: &AtomicBool) -> SuiteResult {
 pub struct ExperimentRunner {
     repo: PathBuf,
     suite: CheckSuite,
+    acceptance: Option<PathBuf>,
 }
 
 impl ExperimentRunner {
@@ -286,7 +396,14 @@ impl ExperimentRunner {
         Self {
             repo: repo.into(),
             suite,
+            acceptance: None,
         }
+    }
+
+    /// Host-selected Rust integration test. Never supplied by a candidate.
+    pub fn with_acceptance_test(mut self, path: impl Into<PathBuf>) -> Self {
+        self.acceptance = Some(path.into());
+        self
     }
 
     fn worktree_path(&self, id: &str) -> PathBuf {
@@ -370,7 +487,47 @@ impl ExperimentRunner {
             }
             let _ = remove.arg(&worktree).current_dir(&self.repo).output();
         };
+        let baseline_commit = git(&self.repo, &["rev-parse", "HEAD"])?.trim().to_string();
+        let acceptance_source = self
+            .acceptance
+            .as_ref()
+            .map(|path| {
+                let metadata = std::fs::metadata(path)?;
+                if metadata.len() > 1024 * 1024 {
+                    return Err(io::Error::other("Acceptance source exceeds 1 MiB"));
+                }
+                std::fs::read(path)
+            })
+            .transpose();
+        let acceptance_source = match acceptance_source {
+            Ok(value) => value,
+            Err(error) => {
+                cleanup(true);
+                let _ = git(&self.repo, &["branch", "-D", &spec.branch]);
+                return Err(error);
+            }
+        };
         let baseline = run_suite(&self.repo, &self.suite, stop);
+        // Cargo may have generated a lockfile in the baseline. Both trees
+        // inherit that same resolved dependency set before mutation.
+        if self.repo.join("Cargo.lock").is_file() && !worktree.join("Cargo.lock").exists() {
+            std::fs::copy(self.repo.join("Cargo.lock"), worktree.join("Cargo.lock"))?;
+        }
+        let reference = match protection::Reference::capture(&worktree) {
+            Ok(value) => value,
+            Err(error) => {
+                cleanup(true);
+                let _ = git(&self.repo, &["branch", "-D", &spec.branch]);
+                return Err(error);
+            }
+        };
+        let reference_sha256 = reference.digest();
+        let acceptance_baseline = acceptance_source
+            .as_ref()
+            .filter(|_| baseline.failed == 0 && baseline.passed > 0 && !baseline.timed_out)
+            .map(|source| run_acceptance(&worktree, source, &self.suite, stop));
+        let mut reference_error = reference.verify(&worktree).err().map(|e| e.to_string());
+        let mut candidate_patch = String::new();
         let candidate = if baseline.failed > 0
             || baseline.passed == 0
             || baseline.timed_out
@@ -383,13 +540,64 @@ impl ExperimentRunner {
                 let _ = git(&self.repo, &["branch", "-D", &spec.branch]);
                 return Err(io::Error::other(format!("mutation failed: {e}")));
             }
-            run_suite(&worktree, &self.suite, stop)
+            git(&worktree, &["add", "-N", "--", "."])?;
+            candidate_patch = git(&worktree, &["diff", "--no-ext-diff", "--binary", "HEAD"])?;
+            reference_error = reference_error
+                .or_else(|| reference.verify(&worktree).err().map(|e| e.to_string()));
+            if let Some(error) = &reference_error {
+                skipped_suite(error)
+            } else {
+                run_suite(&worktree, &self.suite, stop)
+            }
         };
+        reference_error =
+            reference_error.or_else(|| reference.verify(&worktree).err().map(|e| e.to_string()));
+        let acceptance_candidate = acceptance_source
+            .as_ref()
+            .filter(|_| {
+                reference_error.is_none()
+                    && candidate.failed == 0
+                    && candidate.passed > 0
+                    && !candidate.timed_out
+            })
+            .map(|source| run_acceptance(&worktree, source, &self.suite, stop));
+        reference_error =
+            reference_error.or_else(|| reference.verify(&worktree).err().map(|e| e.to_string()));
+        let acceptance_ok = match (&acceptance_baseline, &acceptance_candidate) {
+            (Some(base), Some(next)) => {
+                !base.tests.is_empty()
+                    && base.tests.keys().eq(next.tests.keys())
+                    && !base.timed_out
+                    && next.failed == 0
+                    && !next.timed_out
+                    && next.tests.values().all(|v| v == "ok")
+            }
+            (None, None) => acceptance_source.is_none(),
+            _ => false,
+        };
+        let improvement_verified = acceptance_ok
+            && acceptance_baseline
+                .as_ref()
+                .is_some_and(|base| base.tests.values().any(|s| s == "FAILED"));
+        let retained_tests = !baseline.tests.is_empty()
+            && baseline
+                .tests
+                .iter()
+                .filter(|(_, status)| status.as_str() == "ok")
+                .all(|(name, _)| {
+                    candidate
+                        .tests
+                        .get(name)
+                        .is_some_and(|status| status == "ok")
+                });
         let decision = if stop.load(Ordering::SeqCst) {
             Decision::Rollback {
                 reason: "Stop requested; candidate was not promoted".into(),
             }
-        } else if baseline.failed > 0
+        } else if reference_error.is_some()
+            || !retained_tests
+            || !acceptance_ok
+            || baseline.failed > 0
             || baseline.timed_out
             || baseline.passed == 0
             || candidate.failed > 0
@@ -398,14 +606,14 @@ impl ExperimentRunner {
         {
             Decision::Rollback {
                 reason: format!(
-                    "gate refused: require nonempty passing baseline and candidate, with no lost tests; baseline {} failed, candidate {} failed",
+                    "gate refused: protected reference, named regression tests and host acceptance must pass; baseline {} failed, candidate {} failed",
                     baseline.failed, candidate.failed
                 ),
             }
         } else {
             Decision::Promote {
                 reason: format!(
-                    "no regressions (baseline {}/{} passed/failed, candidate {}/{}); wall time {:.1}s vs {:.1}s",
+                    "frozen regression checks passed (baseline {}/{} passed/failed, candidate {}/{}); wall time {:.1}s vs {:.1}s; branch retained for review, benefit requires independent acceptance evidence",
                     baseline.passed,
                     baseline.failed,
                     candidate.passed,
@@ -416,6 +624,18 @@ impl ExperimentRunner {
             }
         };
         let report = ExperimentReport {
+            baseline_commit,
+            reference_sha256,
+            candidate_patch_sha256: format!("{:x}", Sha256::digest(candidate_patch.as_bytes())),
+            candidate_patch,
+            acceptance_sha256: acceptance_source
+                .as_ref()
+                .map(|s| format!("{:x}", Sha256::digest(s))),
+            acceptance_baseline,
+            acceptance_candidate,
+            improvement_verified: improvement_verified
+                && matches!(decision, Decision::Promote { .. }),
+            reference_error,
             spec: spec.clone(),
             baseline,
             candidate,
@@ -467,10 +687,17 @@ impl ExperimentRunner {
     ) -> io::Result<PathBuf> {
         std::fs::create_dir_all(records_dir)?;
         let path = records_dir.join(format!("{}.json", report.spec.id));
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(report).map_err(io::Error::other)?,
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(
+            serde_json::to_string_pretty(report)
+                .map_err(io::Error::other)?
+                .as_bytes(),
         )?;
+        file.sync_all()?;
         Ok(path)
     }
 }

@@ -304,8 +304,11 @@ dependencies = [
 name = "harness-experiment"
 version = "0.1.0"
 dependencies = [
+ "quote",
  "serde",
  "serde_json",
+ "sha2",
+ "syn 2.0.119",
 ]
 
 [[package]]

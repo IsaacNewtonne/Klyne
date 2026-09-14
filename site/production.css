@@ -372,3 +372,12 @@
 #production:not([data-details=true]) #prod-edges{opacity:0}
 #production[data-details=true] .prod-pipeline{display:flex}
 #production[data-details=true] #prod-request{display:block}
+
+/* Conversation leads; orchestration remains available in Activity. */
+#production[data-view=conversation]{margin-bottom:8px}
+#production[data-view=conversation] .prod-heading>div,#production[data-view=conversation] .prod-meta{display:none}
+#production[data-view=conversation] .prod-heading{justify-content:flex-end;margin:0}
+.prod-heading{flex-wrap:wrap}
+#pending-proposal{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto}
+#execution-settings .access-controls{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+#worker-messages{font-size:12px;color:var(--muted)}

@@ -31,8 +31,13 @@ pub fn send(
         let mut operation = Box::pin(async {
             let mut response = build(client).send().await.map_err(|e| {
                 if e.is_connect() {
-                    io::Error::new(io::ErrorKind::ConnectionRefused,"Connection failed before request dispatch")
-                } else { io::Error::other("Request failed; external outcome may be uncertain") }
+                    io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        "Connection failed before request dispatch",
+                    )
+                } else {
+                    io::Error::other("Request failed; external outcome may be uncertain")
+                }
             })?;
             let status = response.status().as_u16();
             let mut bytes = Vec::new();

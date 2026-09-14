@@ -15,8 +15,9 @@ The server binds to loopback only. Use the printed IP address, not localhost.
 
 ## Chat workspace
 
-The home page is now a chat interface. Enter an instruction, choose optional
-Web or Terminal access, and send it. Model connection settings live in a dialog;
+The home page opens directly to the conversation. Enter an instruction and send
+it; worker messages and tasks are under Details. Access, project, command policy
+and budgets live in Settings; the composer shows an access summary. Model connection settings live in a dialog;
 Codex is the default, with Ollama and OpenCode available. The built-in file
 adapter is not an AI and is not offered for chat.
 
@@ -24,12 +25,18 @@ Studio calls an AI planner, one to six sequential worker roles, and a separate
 read-only reviewer. Workers share the selected project and grants. These are
 separate calls to the selected provider, not the core delegation scheduler.
 Written files receive exact read-back checks; broader completion is model-reviewed.
+Each role receives a host-generated policy snapshot. Tasks awaiting approval
+pause their dependents while other ready tasks continue; the next approval card
+appears when that independent work finishes.
 
 New turns default to no total step, elapsed-time or review-round ceiling. Settings
 can set explicit limits; zero disables that ceiling. Individual operations retain
 output and timeout bounds. Stop cancels supervised processes and model/API HTTP
 calls. Some synchronous browser/Git operations finish within their own timeout.
-There is no token or monetary budget in this Studio driver.
+Token and estimated-cost budgets are also available; zero disables them. These
+are driver limits, not guarantees of provider billing accuracy.
+Resume preserves the goal's usage counters; increase an exhausted budget in
+Settings to continue. A new goal starts fresh counters.
 
 History is persisted transactionally in metadata and individual message/evidence
 rows under `<root>/conversations/<id>/chat.sqlite3`. Recent context is bounded;
@@ -39,7 +46,17 @@ and recorded resolution before continuation; recovery never automatically replay
 them. An exclusive root lock prevents competing servers.
 
 Settings can select an absolute host project (requires Terminal), configure limits,
-or enable all four grants with **Enable trusted laptop access**. Terminal runs
+or enable all four access routes and autonomous commands with **Enable trusted laptop access**.
+New conversations default to asking for exact command approval. Selecting
+**Run autonomously** lets Terminal execute commands without individual prompts;
+secret transfers and destructive API calls retain their separate approvals.
+**Approve and continue** records the displayed proposal and resumes automatically.
+Cards expire after 15 minutes and bind the current policy and relevant command
+inputs. Expired or changed requests require a fresh proposal. See
+[shared policy and approval lifecycle](shared-policy-and-approvals.md) for the
+contracts, compatibility details and enforcement limits.
+Failed commands that may have changed external state stop for inspection.
+Terminal runs
 commands with host authority and a user/toolchain environment profile. Web offers
 HTTPS fetch and interactive isolated Chrome; attaching to existing CDP browsers
 and evaluating JavaScript additionally require Terminal. Desktop operates visible
@@ -51,7 +68,8 @@ bearer/header credentials. Installed apps remain available through the Apps pick
 Terminal-enabled workers can save, edit, test and restore versioned skills,
 executable tools and memory shared across conversations. They can test code
 changes in isolated experiments, including snapshots of dirty projects. Start
-through the supervisor for staged runtime activation and startup rollback:
+through the supervisor for staged runtime activation, startup rollback and up to
+three rapid crash restarts before a crash loop stops:
 
 ```powershell
 cargo build -p klyne-studio --bins --locked
@@ -61,6 +79,10 @@ cargo build -p klyne-studio --bins --locked
 The [upgrade guide](harness-upgrade-2026-09-11.md) documents the tool contracts,
 recovery behavior, verification and remaining limits. App sign-in and compatibility
 are app-specific; the native capability registry is not an MCP transport.
+
+The [September 14 implementation notes](autonomy-implementation-2026-09-14.md)
+describe the current approval, qualification, executed-test attestation and
+completion-receipt contracts, including migration from earlier records.
 
 The chat browser test verifies actual file creation through a scripted local
 model endpoint, conversation rendering, escaping, draft retention, settings,

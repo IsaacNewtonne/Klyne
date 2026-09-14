@@ -66,6 +66,70 @@ impl Drop for Supervisor {
         std::thread::sleep(Duration::from_millis(150));
     }
 }
+fn attest(app: &Supervisor, binary: &std::path::Path) {
+    let digest = format!("{:x}", Sha256::digest(fs::read(binary).unwrap()));
+    let command = json!([
+        std::env::current_exe().unwrap(),
+        "--ignored",
+        "--exact",
+        "attestation_test_fixture"
+    ]);
+    let result = Command::new(env!("CARGO_BIN_EXE_klyne-supervisor"))
+        .current_dir(app.root.path())
+        .arg("--root")
+        .arg(app.root.path())
+        .arg("--binary")
+        .arg(binary)
+        .args([
+            "--attest-digest",
+            &digest,
+            "--attest-command",
+            &command.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+#[test]
+#[ignore = "subprocess fixture"]
+fn attestation_test_fixture() {
+    fs::write("attestation-fixture-ran.txt", "fixture executed").unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn supervisor_restarts_crashes_and_stops_a_crash_loop() {
+    let mut app = Supervisor::new();
+    for attempt in 1..=4 {
+        let pid = app.health().unwrap()["pid"].as_u64().unwrap();
+        let result = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        if attempt <= 3 {
+            app.wait(|| app.health().is_some_and(|v| v["pid"].as_u64() != Some(pid)));
+            assert!(app.child.try_wait().unwrap().is_none());
+        } else {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while app.child.try_wait().unwrap().is_none() {
+                assert!(Instant::now() < deadline, "crash loop must stop");
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        }
+    }
+    let state: Value = serde_json::from_slice(
+        &fs::read(app.root.path().join("runtime/restart-status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["exhausted"], true);
+    assert_eq!(state["attempt"], 4);
+}
+
 #[test]
 fn supervisor_rejects_bad_digest_activates_and_rolls_back_failed_startup() {
     let app = Supervisor::new();
@@ -86,16 +150,7 @@ fn supervisor_rejects_bad_digest_activates_and_rolls_back_failed_startup() {
         })
     });
     app.wait(|| !app.root.path().join("runtime/pending.json").exists());
-    let digest = format!("{:x}", Sha256::digest(fs::read(binary).unwrap()));
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    fs::write(
-        app.root.path().join(format!("runtime/attestation-{digest}.json")),
-        json!({"digest":digest,"test_command":"cargo test --workspace --locked","test_result":"pass","produced_at_ms":now_ms}).to_string(),
-    )
-    .unwrap();
+    attest(&app, binary);
     app.stage(binary, None);
     app.wait(|| app.result().is_some_and(|v| v["rollback"] == false));
     let activated = app.health().unwrap()["pid"].clone();
@@ -120,12 +175,7 @@ fn supervisor_rejects_bad_digest_activates_and_rolls_back_failed_startup() {
     );
     // Every candidate needs its own attestation, including the failing one:
     // the gate binds attestation per digest, not per test.
-    let fails_digest = format!("{:x}", Sha256::digest(fs::read(&candidate).unwrap()));
-    fs::write(
-        app.root.path().join(format!("runtime/attestation-{fails_digest}.json")),
-        json!({"digest":fails_digest,"test_command":"rustc fails.rs","test_result":"pass","produced_at_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64}).to_string(),
-    )
-    .unwrap();
+    attest(&app, &candidate);
     app.stage(&candidate, None);
     app.wait(|| app.result().is_some_and(|v| v["rollback"] == true));
     app.wait(|| app.health().is_some());
