@@ -53,6 +53,27 @@ pub fn cosmetic_name_question(question: &str) -> bool {
     })
 }
 
+pub fn requests_tool_evidence(question: &str) -> bool {
+    let q = question.to_lowercase();
+    ["provide", "send me", "supply"]
+        .iter()
+        .any(|s| q.contains(s))
+        && ["browser_read", "browser_screenshot", "desktop_observe"]
+            .iter()
+            .any(|s| q.contains(s))
+}
+
+pub fn existing_browser_profile(goal: &str) -> bool {
+    let goal = goal.to_lowercase();
+    goal.contains("profile")
+        && ["chrome", "edge", "browser"]
+            .iter()
+            .any(|s| goal.contains(s))
+        && !["new profile", "isolated profile", "temporary profile"]
+            .iter()
+            .any(|s| goal.contains(s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +93,17 @@ mod tests {
             "Profile password 'Secret' or 'SECRET'?"
         ));
         assert!(!cosmetic_name_question("What message should I send?"));
+    }
+    #[test]
+    fn existing_profiles_and_tool_requests_are_explicit() {
+        assert!(existing_browser_profile(
+            "Open Chrome, my work profile, then the website"
+        ));
+        assert!(!existing_browser_profile("Open Chrome with a new profile"));
+        assert!(!existing_browser_profile("Read the customer profile"));
+        assert!(requests_tool_evidence(
+            "Please provide fresh browser_read evidence"
+        ));
+        assert!(!requests_tool_evidence("Please sign in to continue"));
     }
 }

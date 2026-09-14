@@ -50,3 +50,20 @@ itself or guarantee that a model will never ask another unnecessary question.
 A conversation regression covers clarification, invalid JSON, a redundant
 case question, and repair of unattempted work, while preserving a real sign-in
 question. No real communication account is accessed by this test.
+
+## Session selection and unsupported worker reports
+
+A request naming an existing browser profile cannot use `browser_open`, whose
+session is isolated. The host redirects that proposal to desktop observation
+when Desktop is enabled, so the worker can locate the requested browser session.
+Known authorized CDP endpoints remain available through browser_attach. Klyne
+does not copy cookies or enable debugging on a personal profile.
+
+A worker's send claim is rejected when its evidence contains only navigation,
+launch, focus or observation. It receives bounded correction attempts and stays
+unfinished if the claim persists. Navigation alone does not activate the
+no-repeat restriction intended for potentially consequential operations.
+Reviewers requesting internal tool output from the user receive a read-only
+tool call instead, bounded to avoid repeating the same observation indefinitely.
+Actual sign-in or access requirements may still need user input. These checks
+do not establish that every model can reliably operate every app.

@@ -799,6 +799,7 @@ impl Chats {
         };
         system.push_str(crate::broker::POLICY_INSTRUCTIONS);
         system.push_str(crate::clarification::INSTRUCTIONS);
+        system.push_str(" A requested existing browser profile is a session requirement: browser_open always uses an isolated profile and cannot satisfy it. Use desktop_observe and desktop controls for the existing browser, or browser_attach only with a known authorized CDP endpoint. Do not copy cookies or relaunch a user's profile for debugging. Reviewers must collect browser_read, browser_screenshot or desktop_observe evidence themselves, never ask the user to provide internal tool output. If the worker only opened a login page, request repair in the correct session; do not credit unobserved login, search or send claims.");
         system.push_str(r#" For results in any app, distinguish an observed outcome from a host-verified receipt. Before completing an app action, the independent reviewer must inspect the destination with a read-only tool. Cite review_observations indices using observed_results:[{effect:"send|open|click|delete|install|upload",target:"specific app and destination",observation:"exact visible result matching the requested content and target",evidence_index:0}] and outcome:"achieved". These are model-reviewed observations, never claims or host receipts. For sending, check the correct conversation/account and exact outgoing content; do not infer delivered/read status from a visible sent item. Do not resend to obtain verification. If the UI is hidden or ambiguous, report what is missing; do not invent an observation. File changes still require host file receipts. A Completion review rejection requests read-only verification or a corrected summary, not repetition of the original action."#);
         system.push_str(" Current access flags are authoritative; earlier messages about disabled access may be stale. The original_request is the goal, and later user messages clarify it. A clarification answered is not completion of the original goal. A reviewer must request repair tasks when the original goal remains unfinished. Disabled access is not evidence that an app is absent. The context usage block reports metered tokens and spend against turn budgets; prefer fewer information-dense actions as remaining_tokens runs low. Shell commands follow the user-selected command_policy: autonomous permits commands without repeated approval, ask requires exact user grants. Environment secrets and destructive API calls still require exact grants: if the host pauses for approval, do not repeat or rephrase the request — wait for the user's decision and then retry the identical proposal.");
         system.push_str(crate::capabilities::INSTRUCTIONS);
@@ -879,6 +880,35 @@ impl Chats {
                 });
             match parsed {
                 Ok(value) => {
+                    if role == "independent reviewer"
+                        && value["question"]
+                            .as_str()
+                            .is_some_and(crate::clarification::requests_tool_evidence)
+                    {
+                        let tool = if crate::clarification::existing_browser_profile(
+                            &chat.execution.original_request,
+                        ) && chat.access.desktop
+                        {
+                            Some("desktop_observe")
+                        } else if chat.access.web {
+                            Some("browser_read")
+                        } else if chat.access.desktop {
+                            Some("desktop_observe")
+                        } else {
+                            None
+                        };
+                        if let Some(tool) = tool {
+                            // One automatic read per request episode; repeated
+                            // requests must become actual repair or user input.
+                            if chat
+                                .evidence
+                                .last()
+                                .is_none_or(|e| e["agent"] != "Reviewer" || e["action"] != tool)
+                            {
+                                return Ok(json!({"decision":"verify","action":{"tool":tool}}));
+                            }
+                        }
+                    }
                     if !clarification_reconsidered
                         && attempt < 2
                         && value["question"]
@@ -988,6 +1018,7 @@ impl Chats {
                     chat.tasks[index].evidence_start = Some(chat.evidence.len());
                 }
                 self.save(chat)?;
+                let mut unsupported_completions = 0;
                 loop {
                     let task = chat.tasks[index].clone();
                     let recalled = crate::capabilities::recall_for_task(
@@ -1007,6 +1038,29 @@ impl Chats {
                     )?;
                     if decision["decision"] == "complete" {
                         let summary = required(&decision, "summary")?;
+                        if crate::completion_guard::delivery_claim(summary)
+                            && crate::completion_guard::only_app_navigation(
+                                chat.evidence
+                                    .get(task.evidence_start.unwrap_or(chat.evidence.len())..)
+                                    .unwrap_or(&[]),
+                            )
+                        {
+                            unsupported_completions += 1;
+                            chat.evidence.push(json!({"agent":"Worker check","action":"unsupported_completion","ok":false,"summary":"Opening or observing an app did not send a message. Continue the actual task in the requested session, or report the specific login/access blocker. Do not claim actions absent from tool evidence.","data":"The proposed success report was not accepted."}));
+                            self.save(chat)?;
+                            if unsupported_completions < 3 {
+                                continue;
+                            }
+                            chat.tasks[index].status = "Needs input".into();
+                            chat.status = "Needs input".into();
+                            push(
+                                chat,
+                                "assistant",
+                                "Klyne",
+                                "I opened or inspected the app, but did not complete the requested action. The model repeatedly reported unsupported success; progress is saved as unfinished.",
+                            );
+                            return Ok(());
+                        }
                         push(chat, "assistant", &task.agent, summary);
                         chat.tasks[index].status = "Done".into();
                         chat.tasks[index].evidence_end = Some(chat.evidence.len());
@@ -1329,6 +1383,26 @@ impl Chats {
             .as_str()
             .is_some_and(|t| t.starts_with("browser_"))
         {
+            if decision["action"]["tool"] == "browser_open"
+                && crate::clarification::existing_browser_profile(&chat.execution.original_request)
+            {
+                chat.evidence.push(json!({"agent":"Route controller","action":"browser_profile_route","ok":false,"summary":"browser_open uses an isolated session and cannot use the requested existing profile. Use desktop controls to locate the user's existing browser/profile, or attach only to a known authorized CDP endpoint.","data":"No navigation or message was performed."}));
+                self.save(chat)?;
+                if chat.access.desktop {
+                    return self.action(
+                        chat,
+                        stop,
+                        start,
+                        agent,
+                        &json!({"decision":"act","action":{"tool":"desktop_observe"}}),
+                        review,
+                    );
+                }
+                chat.status = "Needs input".into();
+                return Err(err(
+                    "Enable Desktop access to use the requested existing browser profile.",
+                ));
+            }
             if !matches!(decision["decision"].as_str(), Some("act" | "verify")) {
                 return Err(err("Invalid browser decision"));
             }

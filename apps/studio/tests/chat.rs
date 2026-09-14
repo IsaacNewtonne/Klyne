@@ -372,7 +372,7 @@ fn app_result_review_recovers_without_repeating_the_send() {
         json!({"decision":"act","action":{"tool":"browser_click","selector":"#send"}}),
         complete("The outgoing message is visible"),
         complete("The message was sent"),
-        json!({"decision":"verify","action":{"tool":"browser_read"}}),
+        json!({"decision":"needs_input","question":"Please provide fresh browser_read evidence."}),
         json!({"decision":"complete","outcome":"achieved","summary":"Hi is visible as an outgoing message in Recipient's conversation.","observed_results":[{"effect":"send","target":"Generic chat fixture / Recipient","observation":"Outgoing: Hi appears once","evidence_index":3}]}),
     ]);
     let mut body = request(&endpoint);
@@ -407,6 +407,46 @@ fn app_result_review_recovers_without_repeating_the_send() {
     )
     .unwrap();
     assert_eq!(context["review_observations"][0]["evidence_index"], 3);
+}
+
+#[test]
+fn opening_a_login_page_cannot_support_a_worker_send_claim() {
+    let s = Server::new();
+    let page = s.root.path().join("login.html");
+    fs::write(
+        &page,
+        "<!doctype html><title>Sign in</title><h1>Scan QR code to sign in</h1>",
+    )
+    .unwrap();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"browser_open","url":reqwest::Url::from_file_path(page).unwrap().as_str()}}),
+        complete("I logged in and sent the message to the group"),
+        json!({"decision":"needs_input","question":"Please sign in to the app."}),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Send hello to the group");
+    body["access"]["web"] = json!(true);
+    body["access"]["terminal"] = json!(true);
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Needs input", "{chat}");
+    assert_ne!(chat["tasks"][0]["status"], "Done");
+    assert!(
+        !chat["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["text"] == "I logged in and sent the message to the group")
+    );
+    assert!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "unsupported_completion")
+    );
+    fixture.join().unwrap();
 }
 
 #[test]

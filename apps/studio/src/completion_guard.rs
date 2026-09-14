@@ -10,10 +10,41 @@ pub fn delivery_claim(text: &str) -> bool {
             .any(|s| text.contains(s))
 }
 pub fn has_attempted_action(evidence: &[serde_json::Value]) -> bool {
+    if only_app_navigation(evidence) {
+        return false;
+    }
     evidence.iter().any(|e| {
         e["action"].is_string()
-            && !matches!(e["agent"].as_str(), Some("Completion review" | "Reviewer"))
+            && !matches!(
+                e["agent"].as_str(),
+                Some("Completion review" | "Reviewer" | "Route controller" | "Worker check")
+            )
     })
+}
+pub fn only_app_navigation(evidence: &[serde_json::Value]) -> bool {
+    let actions: Vec<_> = evidence
+        .iter()
+        .filter(|e| {
+            !matches!(
+                e["agent"].as_str(),
+                Some("Host verifier" | "Route controller" | "Worker check" | "Completion review")
+            )
+        })
+        .filter_map(|e| e["action"].as_str())
+        .collect();
+    !actions.is_empty()
+        && actions.iter().all(|a| {
+            matches!(
+                *a,
+                "browser_open"
+                    | "browser_read"
+                    | "browser_screenshot"
+                    | "desktop_observe"
+                    | "desktop_focus"
+                    | "desktop_apps"
+                    | "desktop_launch"
+            )
+        })
 }
 pub fn observation_candidates(evidence: &[serde_json::Value]) -> Vec<usize> {
     // A later worker operation invalidates an earlier destination observation.
@@ -382,6 +413,19 @@ mod tests {
             .is_err()
         );
         assert!(verify_claims(&json!({}), &[proof], &policy).is_err());
+    }
+    #[test]
+    fn navigation_and_routing_do_not_imply_a_send_attempt() {
+        let navigation = json!({"agent":"Assistant","action":"browser_open","ok":true});
+        assert!(only_app_navigation(std::slice::from_ref(&navigation)));
+        assert!(!has_attempted_action(std::slice::from_ref(&navigation)));
+        assert!(!has_attempted_action(&[
+            json!({"agent":"Route controller","action":"browser_profile_route","ok":false})
+        ]));
+        assert!(has_attempted_action(&[
+            navigation,
+            json!({"agent":"Assistant","action":"browser_click","ok":true})
+        ]));
     }
     #[test]
     fn invented_delivery_is_not_success() {
