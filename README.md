@@ -17,6 +17,7 @@ Run a sample task, switch between conversation and workspace, or open Details. T
 - **Tools with explicit access.** Files, browser automation, desktop controls, terminal commands, saved APIs, and curated MCP integrations.
 - **Recovery grounded in evidence.** Completed steps survive restarts. Known pre-dispatch connection failures can switch to desktop observation. Uncertain actions are preserved instead of blindly repeated.
 - **Checks beyond a model's claim.** Caller-owned file contracts, supported desktop focus/field checks, and a first Notepad save-reconciliation adapter.
+- **App results checked at the destination.** After desktop or browser actions, a reviewer inspects the result with read-only tools and cites the observed destination. This shared path supports different apps without a messaging-app allowlist. Observed results are labeled Reviewed; independent acceptance checks are labeled Verified. Missing evidence prompts a destination check, not another send.
 - **A quieter interface.** Visual progress, compact steps, optional details.
 - **One command to open, one window to close.** On Windows, `klyne` opens a dedicated app window. Closing its last window stops Klyne and its owned child processes, including running jobs.
 - **Independent work continues.** Tasks waiting for approval block their dependents while other ready tasks continue. Approval cards appear when the run pauses, and approval resumes the blocked work.

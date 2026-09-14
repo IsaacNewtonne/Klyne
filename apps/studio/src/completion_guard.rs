@@ -1,4 +1,4 @@
-//! Conservative guard for unsupported delivery claims, independent of access toggles.
+//! Separate independently verified effects from evidence-backed model review.
 pub fn delivery_claim(text: &str) -> bool {
     let text = text.to_lowercase();
     let message = ["message", "email", "e-mail", "sent to", "delivered to"]
@@ -9,17 +9,115 @@ pub fn delivery_claim(text: &str) -> bool {
             .iter()
             .any(|s| text.contains(s))
 }
-pub fn check(goal: &str, answer: &str) -> std::io::Result<()> {
-    if delivery_claim(goal) || delivery_claim(answer) {
+pub fn observation_candidates(evidence: &[serde_json::Value]) -> Vec<usize> {
+    // A later worker operation invalidates an earlier destination observation.
+    // Unknown tools are conservatively treated as operations, not read checks.
+    let last_operation = evidence.iter().rposition(|e| {
+        !matches!(
+            e["agent"].as_str(),
+            Some(
+                "Reviewer"
+                    | "Host verifier"
+                    | "Host reconciliation"
+                    | "Runtime check"
+                    | "Completion review"
+            )
+        ) && e["action"].is_string()
+    });
+    evidence
+        .iter()
+        .enumerate()
+        .filter_map(|(index, e)| {
+            let action = e["action"].as_str().unwrap_or("");
+            (last_operation.is_none_or(|last| index > last)
+                && e["agent"] == "Reviewer"
+                && e["ok"] == true
+                && (matches!(
+                    action,
+                    "desktop_observe" | "browser_read" | "browser_screenshot"
+                ) || action.starts_with("fetch:"))
+                && e["data"].as_str().is_some_and(|data| !data.is_empty()))
+            .then_some(index)
+        })
+        .collect()
+}
+
+fn observed_effect(
+    review: &serde_json::Value,
+    evidence: &[serde_json::Value],
+    effect: &str,
+) -> bool {
+    let candidates = observation_candidates(evidence);
+    review["observed_results"]
+        .as_array()
+        .is_some_and(|results| {
+            results.len() <= 32
+                && results.iter().any(|result| {
+                    result["effect"] == effect
+                        && ["target", "observation"].iter().all(|key| {
+                            result[key]
+                                .as_str()
+                                .is_some_and(|s| !s.trim().is_empty() && s.len() <= 4000)
+                        })
+                        && result["evidence_index"]
+                            .as_u64()
+                            .is_some_and(|i| candidates.contains(&(i as usize)))
+                        && review["outcome"] == "achieved"
+                })
+        })
+}
+
+pub fn check_review(
+    goal: &str,
+    review: &serde_json::Value,
+    evidence: &[serde_json::Value],
+) -> std::io::Result<()> {
+    let answer = review["summary"].as_str().unwrap_or("");
+    let app_action = evidence.iter().any(|e| {
+        let action = e["action"].as_str().unwrap_or("");
+        e["agent"] != "Reviewer"
+            && (action.starts_with("desktop_") || action.starts_with("browser_"))
+            && !matches!(
+                action,
+                "desktop_observe"
+                    | "desktop_apps"
+                    | "desktop_clipboard_get"
+                    | "browser_read"
+                    | "browser_screenshot"
+                    | "browser_close"
+            )
+    });
+    if app_action
+        && ![
+            "send", "open", "click", "delete", "install", "upload", "state",
+        ]
+        .iter()
+        .any(|effect| observed_effect(review, evidence, effect))
+    {
         return Err(crate::err(
-            "Message delivery is unverified. Klyne has no supported delivery receipt for this task and cannot confirm that a message was sent. Inspect the destination before retrying. If no action occurred, enable the required app or desktop access before continuing.",
+            "Inspect the app destination with a read-only tool and cite observed_results before completing. Check the saved action's result; do not perform it again.",
         ));
     }
-    Ok(())
+    if (delivery_claim(goal) || delivery_claim(answer))
+        && !observed_effect(review, evidence, "send")
+    {
+        return Err(crate::err(
+            "Check the destination with a read-only tool and cite the visible result in observed_results before finishing. Do not repeat the send. A visible outgoing message is an observed result, not proof of delivery or reading.",
+        ));
+    }
+    check_action_evidence_with_review(answer, evidence, Some(review))
 }
 /// Bind supported completion claims to host-produced destination receipts.
 /// Unstructured prose remains model-reviewed; it never creates a receipt.
+#[cfg(test)]
 pub fn check_action_evidence(answer: &str, evidence: &[serde_json::Value]) -> std::io::Result<()> {
+    check_action_evidence_with_review(answer, evidence, None)
+}
+fn check_action_evidence_with_review(
+    answer: &str,
+    evidence: &[serde_json::Value],
+    review: Option<&serde_json::Value>,
+) -> std::io::Result<()> {
     let lower = answer.to_lowercase();
     let groups: &[(&str, &[&str])] = &[
         (
@@ -77,6 +175,13 @@ pub fn check_action_evidence(answer: &str, evidence: &[serde_json::Value]) -> st
             .filter(|e| valid_receipt(e) && e["receipt"]["effect"] == *effect)
             .collect();
         if receipts.is_empty() {
+            // A model-reviewed UI result is useful without pretending it is a
+            // host receipt. File claims retain independent filesystem checks.
+            if *effect != "file_write"
+                && review.is_some_and(|r| observed_effect(r, evidence, effect))
+            {
+                continue;
+            }
             return Err(crate::err(format!(
                 "No verified {effect} receipt supports this completion. Inspect the destination and report only observed results."
             )));
@@ -269,8 +374,63 @@ mod tests {
     }
     #[test]
     fn invented_delivery_is_not_success() {
-        assert!(check("open zalo, send a message to joidi", "Task complete").is_err());
-        assert!(check("hi", "The message was successfully sent to him").is_err());
-        assert!(check("hi", "Hi!").is_ok());
+        assert!(check_review("send a message", &json!({"summary":"Task complete"}), &[]).is_err());
+        assert!(
+            check_review(
+                "hi",
+                &json!({"summary":"The message was successfully sent to him"}),
+                &[]
+            )
+            .is_err()
+        );
+        assert!(check_review("hi", &json!({"summary":"Hi!"}), &[]).is_ok());
+    }
+    #[test]
+    fn app_observations_are_reviewed_not_fabricated_receipts() {
+        let operation =
+            json!({"agent":"Assistant","action":"desktop_key","ok":true,"data":"key applied"});
+        let observation = json!({"agent":"Reviewer","action":"desktop_observe","ok":true,"data":"destination observation"});
+        for target in [
+            "Chat app / recipient",
+            "Mail app / sent folder",
+            "Browser chat / recipient",
+        ] {
+            let review = json!({"summary":"The outgoing message is visible in the requested conversation.","outcome":"achieved","observed_results":[{"effect":"send","target":target,"observation":"The requested text is visible as an outgoing message.","evidence_index":1}]});
+            assert!(
+                check_review(
+                    "send a message",
+                    &review,
+                    &[operation.clone(), observation.clone()]
+                )
+                .is_ok()
+            );
+            assert!(
+                check_review(
+                    "send a message",
+                    &review,
+                    &[observation.clone(), operation.clone()]
+                )
+                .is_err()
+            );
+            assert!(
+                check_review(
+                    "send a message",
+                    &review,
+                    &[operation.clone(), operation.clone()]
+                )
+                .is_err()
+            );
+            let mut failed = observation.clone();
+            failed["ok"] = json!(false);
+            assert!(check_review("send a message", &review, &[operation.clone(), failed]).is_err());
+        }
+        for effect in ["open", "delete", "install", "upload", "click"] {
+            let review = json!({"outcome":"achieved","observed_results":[{"effect":effect,"target":"Any app / destination","observation":"Expected result visible","evidence_index":1}]});
+            assert!(observed_effect(
+                &review,
+                &[operation.clone(), observation.clone()],
+                effect
+            ));
+        }
     }
 }

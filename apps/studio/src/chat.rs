@@ -130,6 +130,34 @@ pub struct Chat {
     #[serde(default)]
     pub desktop_previous: Option<Value>,
 }
+fn migrate_legacy_completion_rejection(chat: &mut Chat) -> bool {
+    if chat.status != "Blocked"
+        || chat.pending.is_some()
+        || chat.tasks.is_empty()
+        || chat.tasks.iter().any(|t| t.status != "Done")
+        || !chat.messages.last().is_some_and(|m| {
+            m.role == "assistant"
+                && m.agent == "Klyne"
+                && m.text.starts_with(
+                    "Message delivery is unverified. Klyne has no supported delivery receipt",
+                )
+        })
+    {
+        return false;
+    }
+    chat.status = "Needs input".into();
+    chat.execution.failure = Some(crate::failure_policy::decide(
+        crate::failure_policy::FailureKind::VerificationNeeded,
+    ));
+    push(
+        chat,
+        "assistant",
+        "Klyne",
+        "The earlier completion warning came from an overly strict check. Your action steps are saved. Resume will review the destination without repeating them; this update has not sent anything.",
+    );
+    true
+}
+
 pub struct Chats {
     browsers: crate::browser_tools::Browsers,
     root: PathBuf,
@@ -159,6 +187,10 @@ impl Chats {
             let Ok(mut chat) = load else {
                 continue;
             };
+            if migrate_legacy_completion_rejection(&mut chat) {
+                self.save(&chat)?;
+                continue;
+            }
             if chat.status == "Stopping" {
                 chat.status = "Stopped".into();
                 self.save(&chat)?;
@@ -565,7 +597,15 @@ impl Chats {
             chat.execution.desktop_fallbacks.clear();
             chat.execution.review_round = 0;
         }
-        chat.execution.failure = None;
+        if !resume
+            || chat
+                .execution
+                .failure
+                .as_ref()
+                .is_none_or(|f| f.kind != crate::failure_policy::FailureKind::VerificationNeeded)
+        {
+            chat.execution.failure = None;
+        }
         if !resume {
             chat.used = 0;
             chat.prompt_tokens = 0;
@@ -735,6 +775,20 @@ impl Chats {
         context["command_policy"] = json!(chat.execution.command_policy);
         context["host_policy"] = chat.execution.policy_snapshot.clone();
         context["role_read_only"] = json!(role == "independent reviewer");
+        if role == "independent reviewer" {
+            let evidence = chat
+                .evidence
+                .get(chat.execution.evidence_start..)
+                .unwrap_or(&[]);
+            context["review_observations"] = json!(
+                crate::completion_guard::observation_candidates(evidence)
+                    .into_iter()
+                    .rev()
+                    .take(6)
+                    .map(|index| json!({"evidence_index":index,"action":evidence[index]["action"]}))
+                    .collect::<Vec<_>>()
+            );
+        }
         context["recovery_decision"] =
             serde_json::to_value(&chat.execution.failure).map_err(err)?;
         context["desktop_fallbacks"] = json!(chat.execution.desktop_fallbacks);
@@ -744,6 +798,7 @@ impl Chats {
             RULES.to_owned()
         };
         system.push_str(crate::broker::POLICY_INSTRUCTIONS);
+        system.push_str(r#" For results in any app, distinguish an observed outcome from a host-verified receipt. Before completing an app action, the independent reviewer must inspect the destination with a read-only tool. Cite review_observations indices using observed_results:[{effect:"send|open|click|delete|install|upload",target:"specific app and destination",observation:"exact visible result matching the requested content and target",evidence_index:0}] and outcome:"achieved". These are model-reviewed observations, never claims or host receipts. For sending, check the correct conversation/account and exact outgoing content; do not infer delivered/read status from a visible sent item. Do not resend to obtain verification. If the UI is hidden or ambiguous, report what is missing; do not invent an observation. File changes still require host file receipts. A Completion review rejection requests read-only verification or a corrected summary, not repetition of the original action."#);
         system.push_str(" Current access flags are authoritative; earlier messages about disabled access may be stale. The original_request is the goal, and later user messages clarify it. A clarification answered is not completion of the original goal. A reviewer must request repair tasks when the original goal remains unfinished. Disabled access is not evidence that an app is absent. The context usage block reports metered tokens and spend against turn budgets; prefer fewer information-dense actions as remaining_tokens runs low. Shell commands follow the user-selected command_policy: autonomous permits commands without repeated approval, ask requires exact user grants. Environment secrets and destructive API calls still require exact grants: if the host pauses for approval, do not repeat or rephrase the request — wait for the user's decision and then retry the identical proposal.");
         system.push_str(crate::capabilities::INSTRUCTIONS);
         if chat.contract.is_some() {
@@ -1003,6 +1058,10 @@ impl Chats {
             }
             chat.status = "Reviewing".into();
             self.save(chat)?;
+            let verification_only =
+                chat.execution.failure.as_ref().is_some_and(|f| {
+                    f.kind == crate::failure_policy::FailureKind::VerificationNeeded
+                });
             let mut verification_failures = 0;
             loop {
                 let review=self.request(chat,stop,start,"independent reviewer",json!({"brief":"Check the actual results against the user's request. Read artifacts using tools where relevant. Worker claims alone are not proof of created files. You may perform read-only actions, request repairs, or return the complete user-facing answer. Do not claim that model review proves correctness.","task_windows":task_windows(&chat.tasks, &chat.evidence),"note":"Each task reports evidence_bound: whether its completion cited fresh successful tool evidence from its own window. Prefer repair tasks for Done steps whose goal needed action but whose completion is unbound."}))?;
@@ -1018,20 +1077,42 @@ impl Chats {
                         } else {
                             &chat.execution.original_request
                         };
-                        crate::completion_guard::check(goal, required(&review, "summary")?)?;
-                        crate::completion_guard::check_action_evidence(
-                            required(&review, "summary")?,
-                            chat.evidence
-                                .get(chat.execution.evidence_start..)
-                                .unwrap_or(&[]),
-                        )?;
-                        crate::completion_guard::verify_claims(
-                            &review,
-                            chat.evidence
-                                .get(chat.execution.evidence_start..)
-                                .unwrap_or(&[]),
-                            &PermissionPolicy::milestone_default(&chat.workspace),
-                        )?;
+                        required(&review, "summary")?;
+                        let evidence = chat
+                            .evidence
+                            .get(chat.execution.evidence_start..)
+                            .unwrap_or(&[]);
+                        let completion_check =
+                            crate::completion_guard::check_review(goal, &review, evidence)
+                                .and_then(|()| {
+                                    crate::completion_guard::verify_claims(
+                                        &review,
+                                        evidence,
+                                        &PermissionPolicy::milestone_default(&chat.workspace),
+                                    )
+                                });
+                        if let Err(error) = completion_check {
+                            verification_failures += 1;
+                            chat.execution.failure = Some(crate::failure_policy::decide(
+                                crate::failure_policy::FailureKind::VerificationNeeded,
+                            ));
+                            chat.evidence.push(json!({"agent":"Completion review","action":"completion_check","ok":false,"summary":error.to_string(),"data":"Read-only verification is needed. Do not repeat the action."}));
+                            if verification_failures < 3 {
+                                self.save(chat)?;
+                                continue;
+                            }
+                            chat.execution.failure = Some(crate::failure_policy::decide(
+                                crate::failure_policy::FailureKind::VerificationNeeded,
+                            ));
+                            chat.status = "Needs input".into();
+                            push(
+                                chat,
+                                "assistant",
+                                "Klyne",
+                                "The action steps are saved, but I could not confirm the final result. Check the destination or make it visible so I can review it. I have not repeated the action.",
+                            );
+                            return Ok(());
+                        }
                         if let Some(contract) = chat.contract.as_ref() {
                             guard(chat, stop, start)?;
                             let mut read_policy =
@@ -1066,9 +1147,25 @@ impl Chats {
                                 "Desktop result was not confirmed as achieved. Progress is saved; the task needs review or more work.",
                             ));
                         }
+                        if review["observed_results"].is_array() {
+                            chat.evidence.push(json!({"agent":"Reviewer","action":"result_review","ok":true,"summary":"App result reviewed against destination observations; not an independent receipt","data":review["observed_results"].to_string()}));
+                        }
                         push(chat, "assistant", "Klyne", required(&review, "summary")?);
                         chat.status = "Completed".into();
                         chat.execution.failure = None;
+                        return Ok(());
+                    }
+                    Some("repair") if verification_only || verification_failures > 0 => {
+                        chat.execution.failure = Some(crate::failure_policy::decide(
+                            crate::failure_policy::FailureKind::VerificationNeeded,
+                        ));
+                        chat.status = "Needs input".into();
+                        push(
+                            chat,
+                            "assistant",
+                            "Klyne",
+                            "The result needs a destination check, not another attempt. Make the destination visible and resume to review the saved work.",
+                        );
                         return Ok(());
                     }
                     Some("repair")
@@ -2722,6 +2819,34 @@ mod tests {
             activity: None,
             execution: Execution::default(),
         }
+    }
+    #[test]
+    fn legacy_completion_warning_migrates_without_replaying_or_claiming_success() {
+        let mut chat = budget_chat(0, 0.0);
+        chat.status = "Blocked".into();
+        chat.tasks = tasks(
+            &json!({"tasks":[{"agent":"Assistant","instruction":"Send the requested message"}]}),
+        )
+        .unwrap();
+        chat.tasks[0].status = "Done".into();
+        push(
+            &mut chat,
+            "assistant",
+            "Klyne",
+            "Message delivery is unverified. Klyne has no supported delivery receipt for this task",
+        );
+        let mut pending = chat.clone();
+        pending.pending = Some(json!({"action":"desktop_key"}));
+        assert!(!migrate_legacy_completion_rejection(&mut pending));
+        assert!(migrate_legacy_completion_rejection(&mut chat));
+        assert_eq!(chat.status, "Needs input");
+        assert_eq!(chat.tasks[0].status, "Done");
+        assert_eq!(
+            chat.execution.failure.as_ref().unwrap().kind,
+            crate::failure_policy::FailureKind::VerificationNeeded
+        );
+        assert!(chat.result.is_none() && chat.evidence.is_empty());
+        assert!(!migrate_legacy_completion_rejection(&mut chat));
     }
     #[test]
     fn waiting_for_desktop_does_not_block_admission_status_or_stop() {

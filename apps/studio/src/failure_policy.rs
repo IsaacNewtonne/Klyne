@@ -11,6 +11,7 @@ pub enum FailureKind {
     RecoveryExhausted,
     MissingInput,
     ApprovalNeeded,
+    VerificationNeeded,
     Unclassified,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -71,6 +72,11 @@ pub fn decide(kind: FailureKind) -> FailureDecision {
             NextStep::Inspect,
             false,
             "Inspect the recorded error and evidence. No automatic retry or route switch is authorized by an unclassified failure.",
+        ),
+        FailureKind::VerificationNeeded => (
+            NextStep::Inspect,
+            false,
+            "Check the destination or make it visible for review. Resume checks the saved result; do not repeat the action just to verify it.",
         ),
     };
     FailureDecision {

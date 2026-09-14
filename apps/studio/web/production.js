@@ -135,8 +135,9 @@
     $('prod-title').textContent=labels[status] || status;
     const live=online?(waiting?`Thinking · ${chat.activity.agent || chat.activity.role}`:inTool?`Using ${pending.name}`:status):'Connection lost · showing last known state';
     if($('prod-live').textContent!==live) $('prod-live').textContent=live;
-    $('prod-metrics').textContent=tasks.length?`${tasks.filter(t=>t.status==='Done').length} of ${tasks.length} steps`: 'Preparing';
-    $('prod-progress').max=Math.max(1,tasks.length);$('prod-progress').value=tasks.filter(t=>t.status==='Done').length;
+    const doneSteps=tasks.filter(t=>t.status==='Done').length;
+    $('prod-metrics').textContent=tasks.length?`${doneSteps} of ${tasks.length} action steps${status!=='Completed' && doneSteps===tasks.length?' · final review pending':''}`: 'Preparing';
+    $('prod-progress').max=Math.max(1,tasks.length+1);$('prod-progress').value=doneSteps+(status==='Completed'?1:0);
     $('prod-goal').textContent=current.submitting?current.message:chat?.execution?.original_request || lastUser?.text || chat?.title || 'Loading the saved instruction…';
     const stages=['Planning','Working','Reviewing','Completed'];
     const index=stages.indexOf(status);
@@ -161,7 +162,7 @@
     $('prod-result').hidden=!terminal; $('prod-open-result').hidden=!terminal;
     if(terminal) {
       $('prod-result-icon').textContent=status==='Completed'?'✓':'!';
-      $('prod-result-title').textContent=status==='Completed'?(chat.result?.outcome==='verified'?'Klyne - Verified':'Klyne'):labels[status] || status;
+      $('prod-result-title').textContent=status==='Completed'?(chat.result?.outcome==='verified'?'Klyne - Verified':chat.result?.outcome==='reviewed'?'Klyne - Reviewed':'Klyne'):labels[status] || status;
       $('prod-result-text').textContent=chat.messages?.filter(m=>m.agent==='Klyne').at(-1)?.text || 'Progress is saved. Use the controls below to continue.';
       if(chat.execution?.failure?.guidance)$('prod-result-text').textContent+='\n\nNext: '+chat.execution.failure.guidance;
     }

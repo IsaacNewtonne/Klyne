@@ -270,26 +270,91 @@ fn contract_verifies_actual_file_and_survives_loading() {
 }
 
 #[test]
-fn invented_message_delivery_with_no_tools_is_blocked() {
+fn invented_message_delivery_requests_verification_without_replaying() {
     let s = Server::new();
     let (endpoint, fixture) = model(vec![
         plan(),
         complete("Message sent"),
         complete("The message was successfully sent to him"),
+        complete("The message was successfully sent to him"),
+        complete("The message was successfully sent to him"),
+        json!({"decision":"repair","summary":"Try sending again","tasks":[{"agent":"Assistant","instruction":"Send again"}]}),
     ]);
     let mut body = request(&endpoint);
     body["message"] = json!("Open Zalo, send a message to Joidi saying hello");
     let created = s.api("/api/chats", Some(body));
     let chat = s.wait(created["id"].as_str().unwrap());
-    assert_eq!(chat["status"], "Blocked", "{chat}");
+    assert_eq!(chat["status"], "Needs input", "{chat}");
     assert!(
         chat["messages"].as_array().unwrap().last().unwrap()["text"]
             .as_str()
             .unwrap()
-            .contains("delivery is unverified")
+            .contains("could not confirm")
     );
-    assert!(chat["evidence"].as_array().unwrap().is_empty());
+    assert_eq!(chat["execution"]["failure"]["kind"], "verification_needed");
+    assert!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["action"] == "completion_check")
+    );
+    let id = created["id"].as_str().unwrap();
+    resume(&s, &endpoint, id, false, false);
+    let resumed = s.wait(id);
+    assert_eq!(resumed["status"], "Needs input", "{resumed}");
+    assert_eq!(resumed["tasks"], chat["tasks"]);
+    assert_eq!(resumed["evidence"], chat["evidence"]);
     fixture.join().unwrap();
+}
+
+#[test]
+fn app_result_review_recovers_without_repeating_the_send() {
+    let s = Server::new();
+    let page = s.root.path().join("generic-chat.html");
+    fs::write(&page, r#"<!doctype html><title>Generic chat fixture</title><h1>Recipient</h1><button id="send" onclick="document.querySelector('#messages').textContent += 'Outgoing: Hi; '">Send Hi</button><div id="messages"></div>"#).unwrap();
+    let url = reqwest::Url::from_file_path(&page).unwrap();
+    let (endpoint, fixture) = model(vec![
+        json!({"summary":"Send then inspect","tasks":[{"agent":"Assistant","instruction":"Send Hi once to Recipient in the fixture app"}]}),
+        json!({"decision":"act","action":{"tool":"browser_open","url":url.as_str()}}),
+        json!({"decision":"act","action":{"tool":"browser_click","selector":"#send"}}),
+        complete("The outgoing message is visible"),
+        complete("The message was sent"),
+        json!({"decision":"verify","action":{"tool":"browser_read"}}),
+        json!({"decision":"complete","outcome":"achieved","summary":"Hi is visible as an outgoing message in Recipient's conversation.","observed_results":[{"effect":"send","target":"Generic chat fixture / Recipient","observation":"Outgoing: Hi appears once","evidence_index":3}]}),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Send Hi to Recipient in the fixture chat");
+    body["access"]["web"] = json!(true);
+    body["access"]["terminal"] = json!(true);
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(chat["result"]["outcome"], "reviewed");
+    let evidence = chat["evidence"].as_array().unwrap();
+    assert_eq!(
+        evidence
+            .iter()
+            .filter(|e| e["action"] == "browser_click")
+            .count(),
+        1
+    );
+    let observed = evidence
+        .iter()
+        .find(|e| e["action"] == "browser_read")
+        .unwrap()["data"]
+        .as_str()
+        .unwrap();
+    assert_eq!(observed.matches("Outgoing: Hi").count(), 1);
+    assert!(evidence.iter().any(|e| e["action"] == "result_review"));
+    let calls = fixture.join().unwrap();
+    let context: Value = serde_json::from_str(
+        calls.last().unwrap()["messages"][1]["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(context["review_observations"][0]["evidence_index"], 3);
 }
 
 #[test]
@@ -1636,7 +1701,7 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     .unwrap();
     assert_eq!(b.eval("document.querySelector('#task-indicator').textContent==='Finished' && document.title==='Finished - Klyne'").unwrap(),true);
     // Presentation fixtures exercise a pending tool and a blocked result without executing it.
-    assert_eq!(b.eval("getComputedStyle(document.querySelector('.prod-worker small')).display==='none' && document.querySelector('#prod-progress').value===2").unwrap(),true);
+    assert_eq!(b.eval("getComputedStyle(document.querySelector('.prod-worker small')).display==='none' && document.querySelector('#prod-progress').value===document.querySelector('#prod-progress').max").unwrap(),true);
     b.click("#prod-details").unwrap();
     assert_eq!(b.eval("document.querySelector('#prod-details').getAttribute('aria-pressed')==='true' && getComputedStyle(document.querySelector('.prod-worker small')).display!=='none'").unwrap(),true);
     b.click("#prod-details").unwrap();
@@ -1655,6 +1720,8 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
             .unwrap(),
         true
     );
+    b.eval("presentation.status='Needs input';presentation.tasks.forEach(t=>t.status='Done');productionView.update({snapshot:presentation,selected:presentation.id,submitting:false})").unwrap();
+    assert_eq!(b.eval("document.querySelector('#prod-progress').value < document.querySelector('#prod-progress').max && document.querySelector('#prod-metrics').textContent.includes('final review pending')").unwrap(), true);
     // Blocked work must expose its next action in the default workspace view.
     b.eval("polling=true;snapshot=structuredClone(presentation);snapshot.status='Interrupted';snapshot.pending={proposal:{kind:'shell',program:'cargo',args:['test']}};snapshot.execution.max_tokens=1234;snapshot.execution.max_cost_usd=0.25;configuredChat=null;render()").unwrap();
     assert_eq!(b.eval("document.querySelector('#prod-continue').checkVisibility() && document.querySelector('#prod-continue').textContent==='Review action'").unwrap(),true);
