@@ -1688,11 +1688,10 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
         "snapshot?.activity?.kind==='model' && document.querySelector('#prod-core-state').textContent==='Thinking'",
     );
     assert_eq!(
-        b.eval("document.querySelector('#production').dataset.view==='conversation'")
+        b.eval("document.querySelector('#production').dataset.view==='production'")
             .unwrap(),
         true
     );
-    b.click("#prod-view-toggle").unwrap();
     assert_eq!(b.eval("!document.querySelector('#production').hidden && !document.querySelector('#stop-chat').hidden").unwrap(),true);
     let artifacts =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workspace/studio-qa");

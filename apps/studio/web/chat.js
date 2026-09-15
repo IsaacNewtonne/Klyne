@@ -561,6 +561,7 @@ $('chat-delete-yes').onclick=()=>manageChat('delete');
     loadPending=true;
     try {
       const load=await api('/api/runtime/load');
+      window.dispatchEvent(new CustomEvent('klyne-telemetry',{detail:load}));
       if(typeof load.cpu_percent==='number' && Number.isFinite(load.cpu_percent)) {
         cpuFraction=Math.max(0,Math.min(1,load.cpu_percent/100));
         loadLabel.textContent=`Studio CPU · ${load.cpu_percent.toFixed(1)}%`;
@@ -568,7 +569,7 @@ $('chat-delete-yes').onclick=()=>manageChat('delete');
         cpuFraction=0;
         loadLabel.textContent=load.available?'Studio CPU · measuring…':'Studio CPU · unavailable';
       }
-    } catch (_) { cpuFraction=0; loadLabel.textContent='Studio CPU · unavailable'; }
+    } catch (_) { cpuFraction=0; loadLabel.textContent='Studio CPU · unavailable'; window.dispatchEvent(new CustomEvent('klyne-telemetry',{detail:{cpu_percent:null}})); }
     finally { loadPending=false; if(!document.hidden) loadTimer=setTimeout(sampleLoad,2000); }
   }
   document.addEventListener('visibilitychange', () => { clearTimeout(loadTimer); if(!document.hidden) sampleLoad(); });

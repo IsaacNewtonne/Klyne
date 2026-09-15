@@ -27,6 +27,47 @@
   <dialog id="prod-inspector" aria-labelledby="prod-inspector-title"><form method="dialog" class="dialog-heading"><h2 id="prod-inspector-title">Inspect node</h2><button class="icon-button" aria-label="Close inspection">×</button></form><pre id="prod-inspector-body"></pre></dialog>
   </div>`;
   $('main').insertBefore(root,$('main').firstChild);
+  root.dataset.theme='ember-console';
+  $('prod-core').insertAdjacentHTML('afterbegin','<canvas id="prod-reactor" aria-hidden="true"></canvas><div class="reactor-wordmark">KLYNE<small>YOUR IDEAS, IN MOTION</small></div>');
+  root.querySelector('.prod-assignment-panel').insertAdjacentHTML('afterbegin','<section class="prod-health"><p class="prod-eyebrow">SYSTEM PULSE</p><div class="prod-gauge"><strong id="prod-cpu">—</strong><span>Studio CPU</span></div><dl><dt>Connection</dt><dd id="prod-health-connection">Connected</dd><dt>Tools in use</dt><dd id="prod-health-tools">0</dd><dt>Observations</dt><dd id="prod-health-evidence">0</dd></dl><p class="prod-health-note">Live process measurement</p></section>');
+  root.querySelector('.prod-heading').insertAdjacentHTML('beforeend','<button id="prod-stop" type="button" hidden>■ Stop</button>');
+  $('prod-stop').onclick=()=>($('stop-chat') || $('demo-stop'))?.click();
+  window.addEventListener('klyne-telemetry',event=>{
+    const value=event.detail?.cpu_percent;
+    $('prod-cpu').textContent=typeof value==='number' && Number.isFinite(value)?`${value.toFixed(1)}%`:'—';
+    root.querySelector('.prod-gauge').style.setProperty('--cpu',`${typeof value==='number'?Math.max(0,Math.min(100,value))*3.6:0}deg`);
+  });
+  const reactor=$('prod-reactor'), brush=reactor.getContext('2d');
+  let reactorFrame=0,lastReactorFrame=0;
+  function drawReactor(now) {
+    reactorFrame=0;
+    if(document.hidden || root.hidden || conversation) return;
+    const alive=root.dataset.live==='true' && !motion.matches;
+    if(now-lastReactorFrame >= 33 || !alive) {
+      lastReactorFrame=now;
+      const box=reactor.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,1.5);
+      const w=Math.max(1,Math.round(box.width*dpr)),h=Math.max(1,Math.round(box.height*dpr));
+      if(reactor.width!==w || reactor.height!==h){reactor.width=w;reactor.height=h;}
+      brush.clearRect(0,0,w,h);
+      const x=w/2,y=h/2,r=Math.min(w,h)*.31,t=alive?now/1800:0;
+      const glow=brush.createRadialGradient(x,y,r*.7,x,y,r*1.6);
+      glow.addColorStop(0,'#ff510000');glow.addColorStop(.45,alive?'#ff62002e':'#ff620010');glow.addColorStop(1,'#ff510000');brush.fillStyle=glow;brush.fillRect(0,0,w,h);
+      for(let arm=0;arm<8;arm++){
+        const side=arm<4?-1:1,level=arm%4;
+        brush.beginPath();brush.moveTo(x+side*r*.8,y+(level-1.5)*r*.35);
+        brush.bezierCurveTo(x+side*r*1.5,y+Math.sin(t+arm)*r*.3,x+side*r*1.4,(level+.5)*h/4,side<0?0:w,(level+.5)*h/4);
+        brush.strokeStyle=alive?'#ff782aaa':'#8b492650';brush.lineWidth=dpr;brush.shadowColor='#ff6000';brush.shadowBlur=alive?12:0;brush.stroke();
+      }
+      for(let ring=0;ring<4;ring++){
+        brush.beginPath();for(let i=0;i<=220;i++){const a=i/220*Math.PI*2;const jitter=Math.sin(a*17+t*2+ring)*.018+Math.sin(a*31-t*3)*.009;const radius=r*(1+ring*.048+jitter);const px=x+Math.cos(a)*radius,py=y+Math.sin(a)*radius;i?brush.lineTo(px,py):brush.moveTo(px,py);}
+        brush.strokeStyle=['#ffe0a5','#ffb045','#ff661c','#b94b20'][ring];brush.lineWidth=(ring===0?2:1)*dpr;brush.shadowBlur=alive?15:3;brush.stroke();
+      }
+      brush.shadowBlur=0;
+      for(let i=0;i<65;i++){const a=i*2.399+t*.08,rr=r*(.8+((i*17%61)/61)*.72),spark=alive?(Math.sin(t*2+i)+1)/2:.12;brush.fillStyle=`rgba(255,${120+i%100},40,${spark*.65})`;brush.fillRect(x+Math.cos(a)*rr,y+Math.sin(a)*rr,dpr*(i%3===0?2:1),dpr);}
+    }
+    if(alive) reactorFrame=requestAnimationFrame(drawReactor);
+  }
+  function refreshReactor(){cancelAnimationFrame(reactorFrame);reactorFrame=requestAnimationFrame(drawReactor);}
   const continueButton = document.createElement('button');
   continueButton.id = 'prod-continue'; continueButton.type = 'button'; continueButton.hidden = true;
   root.querySelector('.prod-heading').append(continueButton);
@@ -107,7 +148,7 @@
     if(!visible) {$('prod-inspector').close();cancelMotion();conversation=defaultConversation;document.documentElement.classList.remove('production-on','production-busy');previousSubmitting=false;return;}
     const starting=input.submitting && !previousSubmitting;
     previousSubmitting=input.submitting;
-    if(starting) {conversation=defaultConversation;morphView();} else render();
+    if(starting) {conversation=false;morphView();} else {if(newSelection && busy.has(input.snapshot?.status))conversation=false;render();}
   }
   function render() {
     if(!current || root.hidden) return;
@@ -144,6 +185,11 @@
     document.querySelectorAll('[data-stage]').forEach(node=>{const n=stages.indexOf(node.dataset.stage);node.dataset.state=n===index?'active':index>=0 && n<index?'done':'waiting';});
     $('prod-core-state').textContent=!online?'Disconnected':waiting?'Thinking':inTool?'Acting':({Planning:'Planning',Working:'Working',Reviewing:'Reviewing',Completed:'Complete',Receiving:'Connecting',Opening:'Opening',Upgrading:'Upgrading'})[status] || 'On hold';
     $('prod-core').dataset.active=String(active && online);
+    $('prod-stop').hidden=!active;
+    $('prod-health-connection').textContent=online?'Connected':'Disconnected';
+    $('prod-health-connection').dataset.online=String(online);
+    $('prod-health-tools').textContent=inTool?'1':'0';
+    $('prod-health-evidence').textContent=String(evidence.length);
     $('prod-provider').textContent=({codex:'Codex',ollama:'Ollama',opencode:'OpenCode'})[provider.kind] || 'Model connection';
     $('prod-model').textContent=provider.model || 'Provider default model';
     $('prod-request').textContent=!online?'Waiting for Studio to reconnect':waiting?`${chat.activity.role} request · ${Math.max(0,Math.floor((Date.now()-Number(chat.activity.started_at))/1000))}s awaiting response`:inTool?pending.name:status==='Completed'?'Response received and reviewed':active?'Waiting for the next runtime update':'No model request in progress';
@@ -157,7 +203,7 @@
       return `<button id="prod-cap-${key}" class="prod-capability" data-inspect="cap:${key}" data-state="${state}"><span>${icon}</span><strong>${label}</strong><small>${state==='active'?'In use':observed.length?`${observed.length} observed`:enabled?'Available':'Access off'}</small></button>`;
     }).join(''));
     $('prod-observation-count').textContent=evidence.length?`${evidence.length} recorded`:'Waiting for evidence';
-    markup($('prod-events'),evidence.length?evidence.slice(-4).reverse().map((event,i)=>`<button class="prod-event" data-inspect="event:${evidence.length-1-i}" data-ok="${!!event.ok}"><span>${event.ok?'✓':'!'}</span><span><strong>${esc(event.action)}</strong><small>${esc(event.agent)} · ${esc(event.summary)}</small></span><span>↗</span></button>`).join(''):'<p class="prod-empty">Tool calls and checks will appear here as they finish.</p>');
+    markup($('prod-events'),evidence.length?evidence.slice(-8).reverse().map((event,i)=>`<button class="prod-event" data-inspect="event:${evidence.length-1-i}" data-ok="${!!event.ok}"><span>${event.ok?'✓':'!'}</span><span><strong>${esc(event.action)}</strong><small>${esc(event.agent)} · ${esc(event.summary)}</small></span><span>${event.ok?'Recorded':'Needs review'}</span></button>`).join(''):'<p class="prod-empty">Live activity will appear as tools finish. Give Klyne a goal to begin.</p>');
     const terminal=!active && !!chat;
     $('prod-result').hidden=!terminal; $('prod-open-result').hidden=!terminal;
     if(terminal) {
@@ -170,6 +216,7 @@
     if(inspect) showInspector(inspect,false);
     scheduleEdges();
     requestAnimationFrame(fit);
+    refreshReactor();
   }
   function scheduleEdges() {cancelAnimationFrame(edgeFrame);edgeFrame=requestAnimationFrame(edges);}
   function fit() {
