@@ -7,6 +7,20 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+#[test]
+fn toolchain_environment_is_explicit_and_does_not_include_credentials() {
+    let workspace = Workspace::new();
+    let mut parent = PermissionPolicy::milestone_default(&workspace.0);
+    let mut child = PermissionPolicy::milestone_default(&workspace.0);
+    assert!(child.grant_env_from(&parent, "RUSTUP_HOME").is_err());
+    parent.allow_toolchain_environment();
+    for name in ["RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN", "INCLUDE", "LIB"] {
+        assert!(child.grant_env_from(&parent, name).is_ok());
+    }
+    for name in ["OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN"] {
+        assert!(child.grant_env_from(&parent, name).is_err());
+    }
+}
 struct Workspace(PathBuf);
 impl Workspace {
     fn new() -> Self {

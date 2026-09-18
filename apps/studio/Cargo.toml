@@ -5,7 +5,7 @@ edition = "2024"
 default-run = "klyne-studio"
 
 [dependencies]
-tokio = { version = "1.53.1", features = ["rt", "time", "net"] }
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "time", "net"] }
 sha2 = "0.10"
 harness-browser = { path = "../../crates/harness-browser" }
 harness-core = { path = "../../crates/harness-core" }

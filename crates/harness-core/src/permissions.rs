@@ -179,6 +179,19 @@ impl PermissionPolicy {
         self.env_allowlist.insert(name.into());
     }
 
+    /// Opt in to the local user/build environment for an authorized process.
+    /// Credentials are deliberately excluded; this is not environment inheritance.
+    pub fn allow_toolchain_environment(&mut self) {
+        for name in [
+            "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH",
+            "TEMP", "TMP", "HOME", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN",
+            "RUSTC", "RUSTDOC", "INCLUDE", "LIB", "LIBPATH", "VCINSTALLDIR",
+            "VCToolsInstallDir", "WindowsSdkDir", "WindowsSDKVersion", "UCRTVersion",
+            "UniversalCRTSdkDir",
+            "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData", "SystemDrive",
+        ] { self.allow_env(name); }
+    }
+
     /// Host-owned exception for a known diagnostic fixture: a specific argv
     /// and observed exit code may return to its repair loop. This neither
     /// grants execution nor claims that the command had no effects.

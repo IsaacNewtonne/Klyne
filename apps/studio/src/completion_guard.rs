@@ -1,4 +1,13 @@
 //! Separate independently verified effects from evidence-backed model review.
+pub fn requires_desktop_outcome(evidence: &[serde_json::Value]) -> bool {
+    evidence.iter().any(|e| {
+        e["agent"] != "Reviewer"
+            && e["action"].as_str().is_some_and(|action| {
+                action.starts_with("desktop_")
+                    && !matches!(action, "desktop_observe" | "desktop_apps" | "desktop_clipboard_get")
+            })
+    })
+}
 pub fn delivery_claim(text: &str) -> bool {
     let text = text.to_lowercase();
     let message = ["message", "email", "e-mail", "sent to", "delivered to"]
@@ -43,6 +52,7 @@ pub fn only_app_navigation(evidence: &[serde_json::Value]) -> bool {
                     | "desktop_focus"
                     | "desktop_apps"
                     | "desktop_launch"
+                    | "evidence_read"
             )
         })
 }
@@ -59,7 +69,7 @@ pub fn observation_candidates(evidence: &[serde_json::Value]) -> Vec<usize> {
                     | "Runtime check"
                     | "Completion review"
             )
-        ) && e["action"].is_string()
+        ) && e["action"].is_string() && e["action"] != "evidence_read"
     });
     evidence
         .iter()
@@ -348,6 +358,14 @@ mod tests {
     use serde_json::json;
     fn receipt(path: &str) -> serde_json::Value {
         json!({"agent":"Runtime check","ok":true,"receipt":{"version":1,"effect":"file_write","target":path}})
+    }
+    #[test]
+    fn conversational_replies_do_not_require_desktop_outcomes() {
+        assert!(!requires_desktop_outcome(&[]));
+        assert!(!requires_desktop_outcome(&[json!({"action":"desktop_observe","agent":"Reviewer"})]));
+        assert!(!requires_desktop_outcome(&[json!({"action":"desktop_apps","agent":"Assistant"})]));
+        assert!(requires_desktop_outcome(&[json!({"action":"desktop_type","agent":"Assistant"})]));
+        assert!(check_review("hi", &json!({"decision":"complete","summary":"Hi! How can I help?"}), &[]).is_ok());
     }
     #[test]
     fn unrelated_actions_and_targets_never_confirm_saves() {

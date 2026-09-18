@@ -24,16 +24,16 @@ fetch('/api/recovery').then(r=>r.ok?r.json():null).then(info=>{
   if(Number.isInteger(port) && port>0 && port<65536) recoveryLink.href=`http://127.0.0.1:${port}/`;
 }).catch(()=>{});
 const linkedChat = new URLSearchParams(location.hash.slice(1)).get('chat');
-let selected = linkedChat && /^[0-9-]{1,79}$/.test(linkedChat) ? linkedChat : null, snapshot = null, chats = [], polling = false, submitting = false, revision = 0, toastTimer;
+let selected = linkedChat && /^[0-9-]{1,79}$/.test(linkedChat) ? linkedChat : null, snapshot = null, chats = [], polling = false, submitting = false, revision = 0, toastTimer, pulseSeq = 0;
 const taskIndicator=document.createElement('span');
 taskIndicator.id='task-indicator';taskIndicator.setAttribute('role','status');taskIndicator.setAttribute('aria-live','polite');
 $('connection').after(taskIndicator);
 let online=false;
 function renderStatus(){
   const activeChats=chats.filter(c=>['Planning','Working','Reviewing','Stopping','Upgrading'].includes(c.status));
-  const state=!online?'offline':submitting?'working':running(snapshot)||snapshot?.status==='Upgrading'?'working':snapshot?.status==='Completed'?'finished':['Blocked','Interrupted','Needs input','Stopped'].includes(snapshot?.status)?'attention':activeChats.length?'working':'ready';
+  const state=!online?'offline':window.klyneActivity?.state().mode==='waiting'?'waiting':submitting?'waiting':running(snapshot)||snapshot?.status==='Upgrading'?'working':snapshot?.status==='Completed'?'finished':['Blocked','Interrupted','Needs input','Stopped'].includes(snapshot?.status)?'attention':activeChats.length?'working':'ready';
   taskIndicator.dataset.state=state;
-  const label={offline:'Offline',working:'Working',finished:'Finished',attention:snapshot?.status==='Needs input'?'Needs your input':snapshot?.status==='Stopped'?'Stopped':'Needs attention',ready:'Ready'}[state];
+  const label={offline:'Offline',waiting:'Waiting',working:'Working',finished:'Finished',attention:snapshot?.status==='Needs input'?'Needs your input':snapshot?.status==='Stopped'?'Stopped':'Needs attention',ready:'Ready'}[state];
   taskIndicator.textContent=label;
   taskIndicator.title=state==='working'?(snapshot?.activity?.agent||`${activeChats.length || 1} active task`):state==='finished'?'The selected task finished. Open its result for details.':label;
   document.title=`${label} - Klyne`;
@@ -61,12 +61,20 @@ function renderList() {
   setMarkup($('chat-list'), filtered.map(chat=>`<div class="chat-row"><button class="chat-item" data-chat="${escape(chat.id)}" data-state="${escape(chat.status)}" aria-current="${selected===chat.id}"><strong>${escape(chat.title)}</strong><small>${escape(chat.status)}</small></button><button class="chat-options" data-options="${escape(chat.id)}" aria-label="Options for ${escape(chat.title)}" aria-haspopup="dialog">⋯</button></div>`).join('') || `<p>${chats.length?'No matching conversations.':'Your conversations will appear here.'}</p>`);
   const count = document.querySelector('.conversation-count');
   if(count) count.textContent = filtered.length;
+  const currentRow=[...$('chat-list').querySelectorAll('[data-chat]')].find(row=>row.dataset.chat===selected);
+  if(currentRow && snapshot && running(snapshot)){
+    const a=window.klyneActivity?.state(),tool=a?.operations[0]?.tool;
+    const label=a?.mode==='waiting'?'Waiting':snapshot.status==='Reviewing'?'Reviewing':tool==='browser'?'Browsing':tool?'Executing':'Thinking';
+    currentRow.querySelector('small').textContent=label;
+    currentRow.dataset.activity=a?.mode||'working';
+  }
   if(focused) [...$('chat-list').querySelectorAll('[data-chat]')].find(button=>button.dataset.chat===focused)?.focus({preventScroll:true});
 }
 function render() {
   hydrateExecution(snapshot);
-  renderStatus();
   window.productionView?.update({snapshot,selected,submitting,message:$('instruction').value,provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,desktop:$('access-desktop').checked,apps:$('access-apps').checked}});
+  renderStatus();
+  renderList();
   const active=running(snapshot);
   $('writing-mode').disabled=active || submitting;
   $('welcome').hidden=!!selected; $('conversation').hidden=!selected;
@@ -90,7 +98,7 @@ function render() {
     panel.querySelector('label').textContent=approval?'Note (optional)':'What did you verify?';
     $('resolve-action').textContent=approval && $('pending-disposition').value==='approved'?'Approve and continue':'Record decision';
   }
-  $('instruction').placeholder=active?'You can draft your next instruction while Klyne works…':selected?'Add an instruction or ask a follow-up…':'Describe what you’d like to do…';
+  $('instruction').placeholder=snapshot?.status==='Needs input'||snapshot?.pending?.proposal?'Klyne needs your input…':active?'You can draft your next instruction while Klyne works…':selected?'Add an instruction or ask a follow-up…':'Describe what you’d like to do…';
   $('composer-hint').textContent=active?'Your team is working · You can stop at any time':'Enter to send · Shift + Enter for a new line';
   for(const id of ['access-web','access-terminal','access-desktop','access-apps','command-policy','max-tokens','max-cost']) $(id).disabled=active || submitting;
   if(!snapshot) { $('messages').replaceChildren(); delete $('messages').dataset.markup; $('work-panel').hidden=true; return; }
@@ -120,14 +128,33 @@ async function refresh() {
   polling=true;
   try {
     const data=await api('/api/chats'); chats=data.chats; renderList();
-    if(selected) { const id=selected, fresh=await api(`/api/chats/${id}`); if(selected===id) {snapshot=fresh;render();} }
+    if(selected) {
+      const id=selected;
+      // Sequenced pulse first: skip the full snapshot while neither the
+      // status nor the event sequence advanced. Any pulse failure, status
+      // change or new event falls back to the full snapshot.
+      let full=snapshot===null;
+      try {
+        const pulse=await api(`/api/chats/${id}/pulse?since=${pulseSeq}`);
+        if(selected!==id) return;
+        if(pulse.status!==snapshot?.status||pulse.seq!==pulseSeq) full=true;
+        else pulseSeq=pulse.seq;
+        if(full) {
+          const fresh=await api(`/api/chats/${id}`);
+          if(selected!==id) return;
+          snapshot=fresh;pulseSeq=pulse.seq;render();
+        }
+      } catch(e) {
+        const fresh=await api(`/api/chats/${id}`); if(selected===id) {snapshot=fresh;render();}
+      }
+    }
     online=true;renderStatus();$('connection').textContent='Connected';$('connection').dataset.state='connected';window.productionView?.connection(true);
   } catch(e) { online=false;renderStatus();$('connection').textContent='Offline · retrying';$('connection').dataset.state='offline';window.productionView?.connection(false); }
   finally {polling=false;}
 }
 function closeSidebar() {$('sidebar').classList.remove('open');$('menu').setAttribute('aria-expanded','false');}
 async function select(id) {
-  drafts.set(selected,$('instruction').value);selected=id;snapshot=null;
+  drafts.set(selected,$('instruction').value);selected=id;snapshot=null;pulseSeq=0;
   $('instruction').value=drafts.get(id)||'';$('form-error').textContent='';closeSidebar();render();renderList();
   if(!id) { $('command-policy').value='ask';$('max-tokens').value=0;$('max-cost').value=0;$('instruction').focus();return; }
   try { const fresh=await api(`/api/chats/${id}`);if(id!==selected)return;snapshot=fresh;
@@ -204,6 +231,7 @@ $('apps-button').onclick=async()=>{
 async function loadApiConnections(){
   try{
     const result=await api('/api/apps');
+    window.dispatchEvent(new CustomEvent('klyne-connections',{detail:result.connections}));
     setMarkup($('api-connections'),result.connections.map(app=>`<div class="api-row"><div class="app-copy"><strong>${escape(app.name)}</strong><small>${escape(app.base_url)} · ${app.inspected_at?'Schema saved; operations untested':'Not inspected'}</small></div><div class="api-actions"><button data-api="${escape(app.name)}" data-action="use">Use</button><button data-api="${escape(app.name)}" data-action="inspect">Discover</button>${app.inspected_at?`<button data-api="${escape(app.name)}" data-action="operations">Operations</button>`:''}<button data-api="${escape(app.name)}" data-action="forget">Forget</button></div></div>`).join('')||'<p class="settings-copy">No API connections saved yet.</p>');
   }catch(e){$('api-status').textContent=e.message;}
 }
@@ -335,7 +363,7 @@ try{if(localStorage.getItem('klyne-trusted-laptop')==='true'){for(const id of ['
   const firePointer = {x:0,y:0,vx:0,time:0,active:false};
   let cursorLean = 0, cursorHeat = 0;
   addEventListener('pointermove', event => {
-    if(event.pointerType === 'touch' || motion.matches) return;
+    if(motion.matches) return;
     const now=performance.now(), elapsed=Math.max(16,now-firePointer.time)/1000;
     firePointer.vx=firePointer.active ? Math.max(-900,Math.min(900,(event.clientX-firePointer.x)/elapsed)) : 0;
     firePointer.x=event.clientX; firePointer.y=event.clientY; firePointer.time=now; firePointer.active=true;
@@ -343,6 +371,8 @@ try{if(localStorage.getItem('klyne-trusted-laptop')==='true'){for(const id of ['
   function releaseFirePointer() { firePointer.active=false; firePointer.vx=0; }
   document.documentElement.addEventListener('pointerleave',releaseFirePointer);
   addEventListener('blur',releaseFirePointer);
+  addEventListener('pointerup', event => { if(event.pointerType === 'touch') releaseFirePointer(); });
+  addEventListener('pointercancel',releaseFirePointer);
   function influence() {
     let strength=0, lean=0;
     if(firePointer.active && !motion.matches && !document.hidden) {
@@ -418,20 +448,22 @@ try{if(localStorage.getItem('klyne-trusted-laptop')==='true'){for(const id of ['
     }
   }
   function tick(time) {
+    if (document.hidden || motion.matches || (document.querySelector('#welcome').hidden && window.klyneActivity?.state().mode!=='working')) { raf = 0; return; }
     if (time - last >= 80) { advance(); draw(); last = time; }
     raf = requestAnimationFrame(tick);
   }
   function sync() {
     cancelAnimationFrame(raf);
-    const paused = document.hidden || motion.matches;
+    const paused = document.hidden || motion.matches || (document.querySelector('#welcome').hidden && window.klyneActivity?.state().mode!=='working');
     if(paused) { releaseFirePointer(); cursorLean=cursorHeat=0; }
-    document.documentElement.classList.toggle('effects-paused', paused);
+    document.documentElement.classList.toggle('effects-paused', document.hidden || motion.matches);
     const sidebarVisible = mobile.matches ? document.querySelector('#sidebar').classList.contains('open') : !document.querySelector('#sidebar').classList.contains('collapsed');
     if (!paused && (!document.querySelector('#welcome').hidden || sidebarVisible)) raf = requestAnimationFrame(tick);
   }
   size();
   for (let i = 0; i < 70; i++) advance();
   draw(); sync();
+  window.klyneActivity?.subscribe(sync);
   motion.addEventListener('change', sync);
   mobile.addEventListener('change', sync);
   document.addEventListener('visibilitychange', sync);
@@ -540,20 +572,13 @@ $('chat-delete-yes').onclick=()=>manageChat('delete');
   applyWidth(width, false); applyCollapsed();
 })();
 
-// Ambient embers: one lightweight canvas behind the interface.
+// Measured process telemetry, independent of visual activity.
 (() => {
-  const canvas = document.createElement('canvas');
-  canvas.id = 'ambient-embers'; canvas.setAttribute('aria-hidden', 'true');
-  document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d'); if (!ctx) { canvas.remove(); return; }
-  const motion = matchMedia('(prefers-reduced-motion: reduce)');
-  let width = 0, height = 0, raf = 0, previous = 0;
-  const particles = [];
-  let cpuFraction = 0, displayedLoad = 0, particleBudget = 60, baselineEmbers = 24;
+
   let loadTimer = 0, loadPending = false;
   const loadLabel = document.createElement('span');
   loadLabel.id = 'runtime-load'; loadLabel.textContent = 'Studio CPU · measuring…';
-  loadLabel.title = 'Studio process CPU as a share of total CPU capacity. Separate model servers, child processes, GPU work and cloud inference are not included. Ember density increases during active tasks, with additional response to this reading.';
+  loadLabel.title = 'Studio process CPU as a share of total CPU capacity. Separate model servers, child processes, GPU work and cloud inference are not included. This meter reports measured usage only.';
   document.querySelector('.sidebar-bottom').replaceChildren(Object.assign(document.createElement('span'), {className:'local-dot'}),loadLabel);
   async function sampleLoad() {
     clearTimeout(loadTimer);
@@ -563,20 +588,38 @@ $('chat-delete-yes').onclick=()=>manageChat('delete');
       const load=await api('/api/runtime/load');
       window.dispatchEvent(new CustomEvent('klyne-telemetry',{detail:load}));
       if(typeof load.cpu_percent==='number' && Number.isFinite(load.cpu_percent)) {
-        cpuFraction=Math.max(0,Math.min(1,load.cpu_percent/100));
+
         loadLabel.textContent=`Studio CPU · ${load.cpu_percent.toFixed(1)}%`;
       } else {
-        cpuFraction=0;
+
         loadLabel.textContent=load.available?'Studio CPU · measuring…':'Studio CPU · unavailable';
       }
-    } catch (_) { cpuFraction=0; loadLabel.textContent='Studio CPU · unavailable'; window.dispatchEvent(new CustomEvent('klyne-telemetry',{detail:{cpu_percent:null}})); }
+      loadLabel.textContent += Number.isFinite(load.gpu_percent) ? ' / GPU '+load.gpu_percent.toFixed(0)+'%' : ' / GPU unavailable';
+      loadLabel.title = 'CPU: Studio process. GPU: whole NVIDIA GPU utilization (busiest adapter), including other apps; not a per-model measurement.';
+    } catch (_) {  loadLabel.textContent='Studio CPU · unavailable'; window.dispatchEvent(new CustomEvent('klyne-telemetry',{detail:{cpu_percent:null}})); }
     finally { loadPending=false; if(!document.hidden) loadTimer=setTimeout(sampleLoad,2000); }
   }
   document.addEventListener('visibilitychange', () => { clearTimeout(loadTimer); if(!document.hidden) sampleLoad(); });
   sampleLoad();
+  // Workspace particles belong to the central reactor and real active operations.
+
+})();
+
+
+// Welcome-screen ambience is independent of task telemetry. Keep this animated
+// while the welcome screen is visible; task particles belong to the ASCII sun.
+(() => {
+  const canvas = document.createElement('canvas');
+  canvas.id = 'ambient-embers'; canvas.setAttribute('aria-hidden', 'true');
+  document.body.prepend(canvas);
+  const ctx = canvas.getContext('2d'); if (!ctx) { canvas.remove(); return; }
+  const motion = matchMedia('(prefers-reduced-motion: reduce)');
+  let width = 0, height = 0, raf = 0, previous = 0;
+  const particles = [];
+  let cpuFraction = 0, displayedLoad = 0, particleBudget = 60, baselineEmbers = 24;
   const pointer = {x:0, y:0, active:false, vx:0, vy:0, time:0};
   addEventListener('pointermove', event => {
-    if(event.pointerType === 'touch' || motion.matches) return;
+    if(motion.matches || canvas.hidden) return;
     const now = performance.now(), elapsed = Math.max(16, now-pointer.time)/1000;
     pointer.vx = pointer.active ? Math.max(-700,Math.min(700,(event.clientX-pointer.x)/elapsed)) : 0;
     pointer.vy = pointer.active ? Math.max(-700,Math.min(700,(event.clientY-pointer.y)/elapsed)) : 0;
@@ -585,6 +628,8 @@ $('chat-delete-yes').onclick=()=>manageChat('delete');
   function releasePointer() { pointer.active=false; pointer.vx=pointer.vy=0; }
   document.documentElement.addEventListener('pointerleave',releasePointer);
   addEventListener('blur',releasePointer);
+  addEventListener('pointercancel',releasePointer);
+  addEventListener('pointerup',event=>{if(event.pointerType==='touch')releasePointer();});
   function spawn(initial = false) {
     return {x:Math.random()*width,y:initial?Math.random()*height:height+12,
       speed:12+Math.random()*34,drift:(Math.random()-.5)*18,
@@ -642,6 +687,7 @@ $('chat-delete-yes').onclick=()=>manageChat('delete');
     }
   }
   function tick(time) {
+    if(document.hidden || motion.matches || canvas.hidden){raf=0;return;}
     if(time-previous>=32) {
       draw(previous?Math.min((time-previous)/1000,.06):0);
       previous=time;
@@ -651,11 +697,13 @@ $('chat-delete-yes').onclick=()=>manageChat('delete');
   function sync() {
     cancelAnimationFrame(raf); previous=0;
     releasePointer();
-    if(!document.hidden && !motion.matches) raf=requestAnimationFrame(tick);
+    canvas.hidden=document.querySelector('#welcome').hidden;
+    if(!document.hidden && !motion.matches && !canvas.hidden) raf=requestAnimationFrame(tick);
     else draw(0);
   }
   addEventListener('resize',resize);
   document.addEventListener('visibilitychange',sync);
   motion.addEventListener('change',sync);
+  new MutationObserver(sync).observe(document.querySelector('#welcome'),{attributes:true,attributeFilter:['hidden']});
   resize(); sync();
 })();

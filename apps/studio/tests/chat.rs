@@ -8,6 +8,104 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn preference_question(question: &str) -> Value {
+    json!({"decision":"needs_input","question":question,"blocker":{"kind":"user_preference","missing":"user choice for this fixture","why_user":"The fixture requires a choice not supplied in the original request"}})
+}
+
+#[test]
+fn unfamiliar_tool_questions_recover_into_discovery_without_user_input() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        json!({"question":"Which tool should I use to inspect the project?"}),
+        plan(),
+        json!({"decision":"needs_input","question":"Please provide the directory listing."}),
+        json!({"decision":"act","action":{"tool":"list_dir","path":"."}}),
+        json!({"decision":"act","action":{"tool":"evidence_read","index":0}}),
+        complete("The workspace has been inspected."),
+        complete("The workspace has been inspected."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Inspect the workspace directory");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let calls = fixture.join().unwrap();
+    for index in [1, 3] {
+        let context: Value = serde_json::from_str(calls[index]["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert!(context["blocker_check"].is_object());
+        assert_eq!(context["available_tools"]["workspace_root"], ".");
+        assert!(context["available_tools"]["workspace_files"].as_array().unwrap().contains(&json!("list_dir")));
+        assert!(context["available_tools"].get("terminal").is_none());
+    }
+    assert!(!chat["evidence"].as_array().unwrap().is_empty());
+    assert!(!chat["messages"].as_array().unwrap().iter().any(|m| m["text"].as_str().unwrap_or("").contains("Please provide")));
+}
+
+#[test]
+fn invalid_invocation_is_corrected_before_dispatch_and_diagnosis_is_saved() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"read_file"}}),
+        json!({"decision":"act","action":{"tool":"list_dir","path":"."}}),
+        complete("Inspected the directory."),
+        complete("Inspected the directory."),
+    ]);
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let id = created["id"].as_str().unwrap();
+    let chat = s.wait(id);
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let calls = fixture.join().unwrap();
+    let corrected: Value = serde_json::from_str(calls[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert!(corrected["response_correction"].is_object());
+    let events = chat["execution"]["diagnostics"]["events"].as_array().unwrap();
+    let failure = events.iter().find(|e| e["check"] == "decision_schema").unwrap();
+    assert_eq!(failure["state"], "decision_corrected");
+    assert!(failure["resolved_by"].is_number());
+    assert!(chat["evidence"].as_array().unwrap().iter().all(|e| !e["action"].as_str().unwrap_or("").starts_with("read_file")));
+    let reloaded = s.api(&format!("/api/chats/{id}"), None);
+    assert_eq!(reloaded["execution"]["diagnostics"], chat["execution"]["diagnostics"]);
+}
+
+#[test]
+fn retry_feedback_redacts_granted_secrets_before_model_dispatch() {
+    let secret = "synthetic-retry-secret-123456789";
+    unsafe { std::env::set_var("KLYNE_RETRY_TEST_SECRET", secret); }
+    let s = Server::new();
+    unsafe { std::env::remove_var("KLYNE_RETRY_TEST_SECRET"); }
+    let (endpoint, fixture) = model(vec![
+        json!({"decision":"complete","summary":secret}), // Invalid planner response.
+        plan(),
+        complete("Hello."),
+        complete("Hello."),
+    ]);
+    let mut body = request(&endpoint);
+    body["grants"] = json!({"secrets":[{"name":"KLYNE_RETRY_TEST_SECRET","origins":["http://127.0.0.1/"]}]});
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let requests = fixture.join().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(requests.iter().all(|r| !r.to_string().contains(secret)));
+    assert!(requests[1].to_string().contains("[redacted]"));
+    let retry: Value = serde_json::from_str(requests[1]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(retry["failure_diagnostics"]["recent_checks"][0]["state"], "open");
+    assert!(!chat.to_string().contains(secret));
+}
+
+#[test]
+fn repeated_unsupported_questions_stop_without_dispatch_or_false_success() {
+    let s = Server::new();
+    let q = json!({"question":"Can you list the tools for me?"});
+    let (endpoint, fixture) = model(vec![q.clone(), q.clone(), q]);
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_ne!(chat["status"], "Completed");
+    assert!(chat["evidence"].as_array().unwrap().is_empty());
+    assert_eq!(chat["execution"]["diagnostics"]["events"].as_array().unwrap().iter().filter(|e| e["state"] == "open").count(), 3);
+    assert_eq!(fixture.join().unwrap().len(), 3);
+}
+
 fn read_body(stream: &mut TcpStream) -> String {
     stream.set_nonblocking(false).unwrap();
     stream
@@ -251,7 +349,6 @@ fn contract_verifies_actual_file_and_survives_loading() {
         plan(),
         json!({"decision":"act","action":{"tool":"write_file","path":"proof.txt","contents":"checked"}}),
         complete("Written"),
-        complete("Here is proof.txt"),
     ]);
     let mut body = request(&endpoint);
     body["message"] = json!("Create the requested artifact");
@@ -266,7 +363,16 @@ fn contract_verifies_actual_file_and_survives_loading() {
         s.api(&format!("/api/chats/{id}"), None)["result"],
         chat["result"]
     );
-    fixture.join().unwrap();
+    // Host-contract fast path: plan + worker act + worker complete, with no
+    // model review round once fresh evidence verifies the contract.
+    let calls = fixture.join().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(chat["execution"]["model_timings"].as_array().unwrap().len(), 3);
+    let trace = &chat["execution"]["trace"];
+    assert!(!trace["request_id"].as_str().unwrap_or("").is_empty());
+    assert!(trace["tool_calls"].as_array().unwrap().iter().any(|t| t["tool"] == "write_file"));
+    assert!(!trace["observations"].as_array().unwrap().is_empty());
+    assert!(trace["milestones"]["verified_completion_ms"].is_number());
 }
 
 #[test]
@@ -310,16 +416,62 @@ fn invented_message_delivery_requests_verification_without_replaying() {
 }
 
 #[test]
+fn profile_question_before_inspection_uses_the_available_recovery_path() {
+    for desktop in [true, false] {
+        let s = Server::new();
+        let question = "I need to locate the Chrome profile named 'mrmuller'. Which specific profile(s) should I open? Please provide the exact profile name(s) (case-sensitive). Please confirm whether you want me to list them.";
+        let mut replies = vec![plan(), json!({"decision":"needs_input","question":question})];
+        replies.push(preference_question("Which account should I use?"));
+        let (endpoint, fixture) = model(replies);
+        let mut body = request(&endpoint);
+        body["message"] = json!("Open Chrome, mrmuller profile, then open WhatsApp");
+        body["access"]["desktop"] = json!(desktop);
+        let created = s.api("/api/chats", Some(body));
+        let chat = s.wait(created["id"].as_str().unwrap());
+        assert_eq!(chat["status"], "Needs input", "{chat}");
+        let calls = fixture.join().unwrap();
+        assert_eq!(calls.len(), 3);
+        if desktop {
+            let context: Value = serde_json::from_str(calls[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
+            assert!(context["profile_inspection_check"]["instruction"].as_str().unwrap().contains("Use the profile name already supplied"));
+            assert!(chat["messages"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().contains("Which account"));
+        }
+    }
+}
+
+#[test]
+fn current_browser_url_question_is_reconsidered_before_pausing() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"needs_input","question":"What is the current URL showing in the address bar? I need to verify we're on the right page before navigating to whatsapp.com."}),
+        preference_question("Which account should I use?"),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Open Chrome with my work profile, then open WhatsApp");
+    body["access"]["desktop"] = json!(true);
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Needs input", "{chat}");
+    let messages = chat["messages"].as_array().unwrap();
+    assert!(messages.last().unwrap()["text"].as_str().unwrap().contains("Which account"));
+    assert!(!messages.iter().any(|m| m["text"].as_str().unwrap_or("").contains("What is the current URL")));
+    let calls = fixture.join().unwrap();
+    let context: Value = serde_json::from_str(calls[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert!(context["clarification_check"]["instruction"].as_str().unwrap().contains("Obtain observable browser state yourself"));
+}
+
+#[test]
 fn clarified_display_name_reconsiders_case_and_repairs_unattempted_work() {
     let s = Server::new();
     let (endpoint, fixture) = model(vec![
         plan(),
         complete("I will send the requested message"),
-        json!({"decision":"needs_input","question":"Is Team Chat a group?"}),
+        preference_question("Is Team Chat a group?"),
         json!({"invalid":"response"}),
         json!({"decision":"needs_input","question":"Is the group 'TEAM CHAT' or 'Team Chat'?"}),
         json!({"decision":"repair","summary":"Use the confirmed group and inspect the app","tasks":[{"agent":"Assistant","instruction":"Inspect the app and send the authorized message to the confirmed group"}]}),
-        json!({"decision":"needs_input","question":"Please sign in to the app to continue."}),
+        preference_question("Which account should I use?"),
     ]);
     let mut body = request(&endpoint);
     body["message"] = json!("Send hello to Team Chat");
@@ -336,7 +488,7 @@ fn clarified_display_name_reconsiders_case_and_repairs_unattempted_work() {
         chat["messages"].as_array().unwrap().last().unwrap()["text"]
             .as_str()
             .unwrap()
-            .contains("sign in")
+            .contains("Which account")
     );
     assert!(
         !chat["messages"]
@@ -422,7 +574,7 @@ fn opening_a_login_page_cannot_support_a_worker_send_claim() {
         plan(),
         json!({"decision":"act","action":{"tool":"browser_open","url":reqwest::Url::from_file_path(page).unwrap().as_str()}}),
         complete("I logged in and sent the message to the group"),
-        json!({"decision":"needs_input","question":"Please sign in to the app."}),
+        json!({"decision":"needs_input","question":"Please sign in to the app.","blocker":{"kind":"authentication","missing":"authenticated session","why_user":"The observed page requires sign-in","evidence_indices":[0]}}),
     ]);
     let mut body = request(&endpoint);
     body["message"] = json!("Send hello to the group");
@@ -456,7 +608,6 @@ fn restart_reconciles_saved_document_from_file_without_desktop_input() {
         plan(),
         json!({"decision":"fail","reason":"Simulated interruption"}),
         complete("Saved document already verified"),
-        complete("Document ready"),
     ]);
     let mut body = request(&endpoint);
     body["message"] = json!("Save the document");
@@ -537,7 +688,9 @@ fn restart_reconciles_saved_document_from_file_without_desktop_input() {
             .any(|e| e["action"] == "desktop_key" || e["action"] == "desktop_observe")
     );
     assert_eq!(done["result"]["outcome"], "verified");
-    fixture.join().unwrap();
+    // The reconciled save verifies the contract, so the host completes
+    // without a further model review round.
+    assert_eq!(fixture.join().unwrap().len(), 3);
 }
 
 #[test]
@@ -579,7 +732,7 @@ fn missing_input_resumes_the_same_step_without_replanning() {
     let s = Server::new();
     let (endpoint, fixture) = model(vec![
         plan(),
-        json!({"decision":"needs_input","question":"Which title should I use?"}),
+        preference_question("Which title should I use?"),
         complete("Title accepted"),
         complete("Finished"),
     ]);
@@ -683,8 +836,11 @@ fn recovery_uses_an_independent_provider_and_preserves_the_primary_choice() {
 
 #[test]
 fn recovery_records_an_exhausted_model_failure_without_replaying_tools() {
+    let secret = format!("incident-secret-{}", "sensitive-fragment-".repeat(40));
+    unsafe { std::env::set_var("KLYNE_INCIDENT_TEST_SECRET", &secret); }
     let s = Server::new();
-    let (primary, primary_calls) = model(vec![Value::Null]);
+    unsafe { std::env::remove_var("KLYNE_INCIDENT_TEST_SECRET"); }
+    let (primary, primary_calls) = model(vec![json!({"tasks":[], "summary":format!("{}{}", "x".repeat(8000), secret)})]);
     let (fallback, fallback_calls) = model(vec![json!({"tasks":[]})]);
     fs::create_dir_all(s.root.path().join("recovery")).unwrap();
     fs::write(
@@ -693,7 +849,9 @@ fn recovery_records_an_exhausted_model_failure_without_replaying_tools() {
             .to_string(),
     )
     .unwrap();
-    let chat = s.api("/api/chats", Some(request(&primary)));
+    let mut body = request(&primary);
+    body["grants"] = json!({"secrets":[{"name":"KLYNE_INCIDENT_TEST_SECRET","origins":["http://127.0.0.1/"]}]});
+    let chat = s.api("/api/chats", Some(body));
     let chat = s.wait(chat["id"].as_str().unwrap());
     assert_eq!(chat["status"], "Blocked", "{chat}");
     assert!(chat["evidence"].as_array().unwrap().is_empty());
@@ -704,6 +862,8 @@ fn recovery_records_an_exhausted_model_failure_without_replaying_tools() {
     let incident: Value =
         serde_json::from_slice(&fs::read(incidents[0].as_ref().unwrap().path()).unwrap()).unwrap();
     assert_eq!(incident["failure"]["kind"], "model_request");
+    assert!(!incident.to_string().contains("sensitive-fragment"));
+    assert!(incident.to_string().contains("[redacted]"));
     assert_eq!(incident["failure"]["pending"], Value::Null);
     assert_eq!(
         incident["failure"]["messages_count"].as_u64().unwrap() + 1,
@@ -1346,6 +1506,9 @@ fn delete_calls_pause_for_exact_approval_without_replay() {
                 }
                 Err(_) => break,
             };
+            // Accepted sockets inherit nonblocking mode on Windows. The
+            // fixture reads a complete header and must wait for its bytes.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -1437,7 +1600,7 @@ fn chat_plans_executes_repairs_reviews_and_preserves_followup_context() {
         complete("Greeting improved"),
         json!({"decision":"act","action":{"tool":"read_file","path":"greeting.txt"}}),
         complete("Hello, friend! Saved and reviewed in greeting.txt."),
-        json!({"question":"What name should I add to the greeting?"}),
+        preference_question("What name should I add to the greeting?"),
     ]);
     let created = s.api("/api/chats", Some(request(&endpoint)));
     let id = created["id"].as_str().unwrap();
@@ -1566,15 +1729,18 @@ fn chat_denies_access_and_reviewer_writes_and_rejects_unknown_tools() {
 #[test]
 fn chat_stop_during_planning_prevents_work() {
     let s = Server::new();
+    let marker = s.root.path().join("planning-request-received");
     let mut reply = plan();
+    reply["_marker"] = json!(marker);
     reply["_delay_ms"] = json!(500);
     reply["_disconnect_ok"] = json!(true);
     let (endpoint, model) = model(vec![reply]);
     let created = s.api("/api/chats", Some(request(&endpoint)));
     let id = created["id"].as_str().unwrap();
-    // Wait until the decision reservation is durable, so Stop lands mid-call.
+    // The durable reservation precedes dispatch; wait for the fixture to
+    // receive the request so Stop really lands mid-call rather than before it.
     let start = Instant::now();
-    while s.api(&format!("/api/chats/{id}"), None)["used"] != 1 {
+    while !marker.exists() {
         assert!(start.elapsed() < Duration::from_secs(5));
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -1592,9 +1758,9 @@ fn chat_stop_during_planning_prevents_work() {
 fn prompt_maker_persists_and_applies_instructions_and_sampling_only_in_that_mode() {
     let s = Server::new();
     let (endpoint, model) = model(vec![
-        json!({"question":"What should the prompt achieve?"}),
-        json!({"question":"Who is the audience?"}),
-        json!({"question":"What would you like to do?"}),
+        preference_question("What should the prompt achieve?"),
+        preference_question("Who is the audience?"),
+        preference_question("What would you like to do?"),
     ]);
     let mut body = request(&endpoint);
     body["prompt_maker"] = json!(true);
@@ -1685,7 +1851,7 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     b.click("#send").unwrap();
     browser_wait(
         &mut b,
-        "snapshot?.activity?.kind==='model' && document.querySelector('#prod-core-state').textContent==='Thinking'",
+        "snapshot?.activity?.kind==='model' && document.querySelector('#prod-core-state').textContent==='WAITING - Model response'",
     );
     assert_eq!(
         b.eval("document.querySelector('#production').dataset.view==='production'")
@@ -1703,7 +1869,7 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     .unwrap();
     browser_wait(
         &mut b,
-        "document.querySelectorAll('.prod-worker').length===2 && document.querySelector('#prod-cap-files').dataset.state==='used'",
+        "document.querySelectorAll('.prod-worker').length===2 && snapshot.evidence.some(e=>e.action.startsWith('write_file:')) && ['ready','complete','active'].includes(document.querySelector('#prod-cap-files').dataset.state)",
     );
     browser_wait(
         &mut b,
@@ -1722,6 +1888,8 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
         "!document.querySelector('#production').hidden && document.querySelectorAll('.prod-worker').length===2",
     );
     b.set_reduced_motion(true).unwrap();
+    b.click("#prod-view-toggle").unwrap();
+    assert_eq!(b.eval("document.querySelector('#production').dataset.view==='conversation'").unwrap(),true);
     b.click("#prod-view-toggle").unwrap();
     b.set_reduced_motion(false).unwrap();
     b.click("#prod-cap-files").unwrap();
@@ -1776,14 +1944,14 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     b.set_viewport(1536, 960).unwrap();
     browser_wait(
         &mut b,
-        "snapshot?.status==='Completed' && !document.querySelector('#prod-result').hidden",
+        "snapshot?.status==='Completed' && document.querySelector('#prod-output-content').getBoundingClientRect().width>0",
     );
-    assert_eq!(b.eval("document.querySelector('#prod-result-text').textContent.includes('Your file is ready') && document.querySelectorAll('.prod-worker[data-state=Done]').length===2 && document.querySelector('#stop-chat').hidden").unwrap(),true);
+    assert_eq!(b.eval("document.querySelector('#prod-output-content').textContent.includes('Your file is ready') && document.querySelectorAll('.prod-worker[data-state=Done]').length===2 && document.querySelector('#stop-chat').hidden").unwrap(),true);
     b.eval("document.querySelector('#main').scrollTop=0")
         .unwrap();
     browser_wait(
         &mut b,
-        "document.querySelectorAll('.prod-morph-vessel').length===0 && Number(getComputedStyle(document.querySelector('#prod-result')).opacity)===1",
+        "document.querySelectorAll('.prod-morph-vessel').length===0 && Number(getComputedStyle(document.querySelector('#prod-output-content')).opacity)===1",
     );
     fs::write(
         artifacts.join("production-completed.png"),
@@ -1792,27 +1960,29 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     .unwrap();
     assert_eq!(b.eval("document.querySelector('#task-indicator').textContent==='Finished' && document.title==='Finished - Klyne'").unwrap(),true);
     // Presentation fixtures exercise a pending tool and a blocked result without executing it.
-    assert_eq!(b.eval("getComputedStyle(document.querySelector('.prod-worker small')).display==='none' && document.querySelector('#prod-progress').value===document.querySelector('#prod-progress').max").unwrap(),true);
-    b.click("#prod-details").unwrap();
-    assert_eq!(b.eval("document.querySelector('#prod-details').getAttribute('aria-pressed')==='true' && getComputedStyle(document.querySelector('.prod-worker small')).display!=='none'").unwrap(),true);
-    b.click("#prod-details").unwrap();
+    assert_eq!(b.eval("document.querySelector('#prod-progress').value===document.querySelector('#prod-progress').max").unwrap(),true);
+    b.click("#prod-open-steps").unwrap();
+    assert_eq!(b.eval("document.querySelector('#prod-inspector').open && document.querySelector('#prod-inspector-title').textContent==='Steps' && document.querySelector('#prod-inspector-body').textContent.includes('greeting.txt')").unwrap(),true);
+    b.click("#prod-inspector button").unwrap();
     b.set_reduced_motion(true).unwrap();
-    b.eval("window.presentation=structuredClone(snapshot);presentation.status='Working';presentation.tasks[0].status='Working';presentation.pending={agent:'Writer',action:{tool:'skill_read',name:'project-check'}};productionView.update({snapshot:presentation,selected:presentation.id,submitting:false})").unwrap();
-    assert_eq!(b.eval("document.querySelector('#prod-cap-skills').dataset.state==='active' && document.querySelector('#prod-core-state').textContent==='Acting'").unwrap(),true);
+    b.eval("window.presentation=structuredClone(snapshot);presentation.activity_events=[];presentation.activity=null;presentation.status='Working';presentation.tasks[0].status='Working';presentation.pending={agent:'Writer',action:{tool:'skill_read',name:'project-check'}};productionView.update({snapshot:presentation,selected:presentation.id,submitting:false})").unwrap();
+    assert_eq!(b.eval("document.querySelector('#prod-cap-skills').dataset.state==='active' && document.querySelector('#prod-core-state').textContent==='WORKING'").unwrap(),true);
     assert_eq!(b.eval("[['files','read_file'],['terminal','run_shell'],['browser','browser_fill'],['desktop','desktop_observe'],['apps','app_invoke'],['skills','tool_run'],['memory','memory_read'],['runtime','runtime_stage']].every(([id,tool])=>{presentation.pending={agent:'Writer',action:{tool}};productionView.update({snapshot:presentation,selected:presentation.id,submitting:false});return document.querySelector('#prod-cap-'+id).dataset.state==='active'})").unwrap(),true);
     assert_eq!(b.eval("getComputedStyle(document.querySelector('.core-fire')).animationName==='none' && document.querySelectorAll('.prod-morph-vessel').length===0").unwrap(),true);
     assert_eq!(b.eval("[{RunShell:{program:'cargo',args:['test']}},'shell:cargo test'].every(action=>{presentation.pending={agent:'Writer',action};productionView.update({snapshot:presentation,selected:presentation.id,submitting:false});return document.querySelector('#prod-cap-terminal').dataset.state==='active'})").unwrap(),true);
     assert_eq!(b.eval("[{FetchUrl:{url:'https://example.com'}},'fetch:https://example.com'].every(action=>{presentation.pending={agent:'Writer',action};productionView.update({snapshot:presentation,selected:presentation.id,submitting:false});return document.querySelector('#prod-cap-browser').dataset.state==='active'})").unwrap(),true);
     b.eval("presentation.status='Blocked';productionView.update({snapshot:presentation,selected:presentation.id,submitting:false})").unwrap();
-    assert_eq!(b.eval("document.querySelector('#production').dataset.live==='false' && document.querySelector('#prod-core-state').textContent==='On hold'").unwrap(),true);
+    assert_eq!(b.eval("document.querySelector('#production').dataset.live==='false' && document.querySelector('#prod-core-state').textContent==='NEEDS ATTENTION'").unwrap(),true);
     b.eval("productionView.connection(false)").unwrap();
     assert_eq!(
         b.eval("document.querySelector('#prod-live').textContent.includes('Connection lost')")
             .unwrap(),
         true
     );
-    b.eval("presentation.status='Needs input';presentation.tasks.forEach(t=>t.status='Done');productionView.update({snapshot:presentation,selected:presentation.id,submitting:false})").unwrap();
-    assert_eq!(b.eval("document.querySelector('#prod-progress').value < document.querySelector('#prod-progress').max && document.querySelector('#prod-metrics').textContent.includes('final review pending')").unwrap(), true);
+    b.eval("productionView.connection(true);presentation.status='Needs input';presentation.tasks.forEach(t=>t.status='Done');productionView.update({snapshot:presentation,selected:presentation.id,submitting:false})").unwrap();
+    // The meter counts action steps. Finished steps must still expose the
+    // unfinished review and input state rather than claim overall completion.
+    assert_eq!(b.eval("document.querySelector('#prod-progress').value===document.querySelector('#prod-progress').max && document.querySelector('#prod-metrics').textContent.includes('final review pending') && document.querySelector('#prod-core-state').textContent==='NEEDS YOUR INPUT'").unwrap(), true);
     // Blocked work must expose its next action in the default workspace view.
     b.eval("polling=true;snapshot=structuredClone(presentation);snapshot.status='Interrupted';snapshot.pending={proposal:{kind:'shell',program:'cargo',args:['test']}};snapshot.execution.max_tokens=1234;snapshot.execution.max_cost_usd=0.25;configuredChat=null;render()").unwrap();
     assert_eq!(b.eval("document.querySelector('#prod-continue').checkVisibility() && document.querySelector('#prod-continue').textContent==='Review action'").unwrap(),true);
@@ -1861,7 +2031,7 @@ fn chat_browser_conversation_settings_controls_and_mobile() {
     b.eval("window.ambientFrame=document.querySelector('#ambient-embers').toDataURL();window.fireFrame=document.querySelector('.ascii-fire').toDataURL();window.emberAngle=getComputedStyle(document.querySelector('#chat-form'),'::before').getPropertyValue('--ember-angle')").unwrap();
     browser_wait(
         &mut b,
-        "document.querySelector('#ambient-embers').toDataURL()!==window.ambientFrame && getComputedStyle(document.querySelector('#ambient-embers')).pointerEvents==='none' && document.querySelector('.ascii-fire').toDataURL()!==window.fireFrame && getComputedStyle(document.querySelector('#chat-form'),'::before').getPropertyValue('--ember-angle')!==window.emberAngle",
+        "document.querySelector('#ambient-embers').toDataURL()!==window.ambientFrame && getComputedStyle(document.querySelector('#ambient-embers')).pointerEvents==='none' && document.querySelector('.ascii-fire').toDataURL()!==window.fireFrame && getComputedStyle(document.querySelector('#chat-form'),'::before').animationName==='none'",
     );
     b.set_reduced_motion(true).unwrap();
     browser_wait(
@@ -2057,7 +2227,7 @@ fn reviewer_clarification_pauses_and_resumes_original_goal() {
     let (endpoint, fixture) = model(vec![
         plan(),
         complete("Draft"),
-        json!({"decision":"needs_input","question":"Which version?"}),
+        preference_question("Which version?"),
         complete("Final answer"),
     ]);
     let created = s.api("/api/chats", Some(request(&endpoint)));

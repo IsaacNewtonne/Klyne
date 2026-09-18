@@ -4,6 +4,10 @@
 fixture tests from environment-gated suites so a red run means a real
 regression, not a missing browser or GUI session.
 
+The [September 17 completeness audit](audit-completeness-2026-09-17.md) records
+the latest full-workspace run and updated activity UI assertions. Historical
+UI exclusions in earlier reports do not define the current regression gate.
+
 ## Mixed workspace baseline — offline dependencies, Chrome/GUI required
 
 Correction from the UX/autonomy re-audit: excluding `harness-browser` does

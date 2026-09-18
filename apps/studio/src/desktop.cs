@@ -31,15 +31,20 @@ public static class KlyneDesktop {
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr window,int show);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
-    [DllImport("user32.dll")] static extern bool GetCursorPos(out Point point);
+    [DllImport("user32.dll",SetLastError=true)] static extern bool GetCursorPos(out Point point);
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern uint SendInput(uint count,Input[] inputs,int size);
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     static KlyneDesktop() { SetProcessDPIAware(); }
     public static void CheckEmergency() {
-        Point cursor; GetCursorPos(out cursor);
-        if((GetAsyncKeyState(0x13)&0x8000)!=0 || (cursor.X>=0 && cursor.X<=2 && cursor.Y>=0 && cursor.Y<=2))
-            throw new InvalidOperationException("Emergency stop: Pause key or pointer at the primary screen's top-left corner.");
+        const string stop = "Emergency stop: Pause key or pointer at the primary screen's top-left corner.";
+        if ((GetAsyncKeyState(0x13)&0x8000)!=0)
+            throw new InvalidOperationException(stop + " Trigger: Pause key is pressed.");
+        Point cursor;
+        if (!GetCursorPos(out cursor))
+            throw new InvalidOperationException("Desktop safety check unavailable: Windows could not read the pointer position (error " + Marshal.GetLastWin32Error() + "). Desktop input was not authorized. Check that the interactive desktop is unlocked and accessible.");
+        if(cursor.X>=0 && cursor.X<=2 && cursor.Y>=0 && cursor.Y<=2)
+            throw new InvalidOperationException(stop + " Trigger: pointer at (" + cursor.X + ", " + cursor.Y + ").");
     }
     // User-input takeover detection (audit Phase 6): the desktop is shared
     // with the user, so every input primitive snapshots the pointer before

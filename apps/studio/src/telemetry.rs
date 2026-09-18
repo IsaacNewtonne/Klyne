@@ -57,12 +57,57 @@ struct Sample {
 fn percentage(cpu_delta: f64, elapsed: f64, cores: usize) -> f64 {
     (100.0 * cpu_delta.max(0.0) / elapsed.max(0.001) / cores.max(1) as f64).clamp(0.0, 100.0)
 }
+
+fn parse_gpu(output: &str) -> Option<f64> {
+    output.lines().filter_map(|line| line.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
+        .reduce(f64::max)
+}
+
+fn gpu_percent() -> Option<f64> {
+    static GPU: OnceLock<Mutex<Option<(Instant, f64)>>> = OnceLock::new();
+    let cache = GPU.get_or_init(|| {
+        std::thread::spawn(|| loop {
+            use std::process::{Command, Stdio};
+            let mut command = Command::new("nvidia-smi");
+            command.args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
+                .stdout(Stdio::piped()).stderr(Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x08000000);
+            }
+            let value = command.spawn().ok().and_then(|mut child| {
+                let started = Instant::now();
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => return if status.success() {
+                            child.wait_with_output().ok().and_then(|o| parse_gpu(&String::from_utf8_lossy(&o.stdout)))
+                        } else { None },
+                        Ok(None) if started.elapsed().as_secs_f64() < 1.5 =>
+                            std::thread::sleep(std::time::Duration::from_millis(50)),
+                        _ => { let _ = child.kill(); let _ = child.wait(); return None; }
+                    }
+                }
+            });
+            if let Some(cache) = GPU.get() {
+                *cache.lock().unwrap() = value.map(|v| (Instant::now(), v));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        });
+        Mutex::new(None)
+    });
+    cache.lock().unwrap().as_ref()
+        .filter(|(at, _)| at.elapsed().as_secs() < 6).map(|(_, v)| *v)
+}
+
 pub fn read() -> Value {
     static SAMPLE: OnceLock<Mutex<Option<Sample>>> = OnceLock::new();
     let mut sample = SAMPLE.get_or_init(|| Mutex::new(None)).lock().unwrap();
+    let gpu = gpu_percent();
     let cores = std::thread::available_parallelism().map_or(1, usize::from);
     let Some(seconds) = cpu_seconds() else {
-        return json!({"cpu_percent":null,"scope":"studio_process","available":false});
+        return json!({"gpu_percent":gpu,"gpu_scope":"machine_nvidia_max","cpu_percent":null,"scope":"studio_process","available":false});
     };
     let now = Instant::now();
     let percent = match sample.as_ref() {
@@ -89,12 +134,17 @@ pub fn read() -> Value {
             None
         }
     };
-    json!({"cpu_percent":percent,"scope":"studio_process","available":true,"logical_cpus":cores})
+    json!({"gpu_percent":gpu,"gpu_scope":"machine_nvidia_max","cpu_percent":percent,"scope":"studio_process","available":true,"logical_cpus":cores})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gpu_samples_reject_unavailable_and_invalid_values() {
+        assert_eq!(parse_gpu("0\n87\n"), Some(87.0));
+        assert_eq!(parse_gpu("[N/A]\nNaN\n101\n-1"), None);
+    }
     #[test]
     fn cpu_is_normalized_by_elapsed_time_and_machine_capacity() {
         assert_eq!(percentage(2.0, 2.0, 8), 12.5);

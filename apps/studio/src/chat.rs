@@ -62,6 +62,12 @@ pub struct Task {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Execution {
+    pub model_timings: Vec<crate::performance::ModelSample>,
+    /// Per-goal latency trace: request/model/tool/observation IDs, stage
+    /// timers and responsiveness milestones. Content-free.
+    #[serde(default)]
+    pub trace: crate::performance::Trace,
+    pub diagnostics: crate::diagnostics::Journal,
     /// Host-generated policy projection and durable approval queue. Model
     /// decisions never deserialize into these authority fields.
     pub policy_snapshot: Value,
@@ -104,6 +110,9 @@ pub struct Chat {
     pub result: Option<TaskResult>,
     #[serde(default)]
     pub activity: Option<Value>,
+    /// Host-recorded visual telemetry; never supplied to the model as instructions.
+    #[serde(default)]
+    pub activity_events: Vec<Value>,
     #[serde(default)]
     pub execution: Execution,
     #[serde(default)]
@@ -188,12 +197,12 @@ impl Chats {
                 continue;
             };
             if migrate_legacy_completion_rejection(&mut chat) {
-                self.save(&chat)?;
+                self.save(&mut chat)?;
                 continue;
             }
             if chat.status == "Stopping" {
                 chat.status = "Stopped".into();
-                self.save(&chat)?;
+                self.save(&mut chat)?;
                 continue;
             }
             if !matches!(
@@ -214,7 +223,7 @@ impl Chats {
                     chat.evidence.push(json!({"agent":"Host reconciliation","action":"document_save_reconcile","ok":true,"summary":"Saved file satisfies the caller's contract. Save was not repeated.","data":serde_json::to_string(&result).map_err(err)?}));
                     chat.pending = None;
                     chat.execution.failure = None;
-                    self.save(&chat)?;
+                    self.save(&mut chat)?;
                 }
                 if chat.pending.is_some() {
                     if !chat.access.desktop
@@ -249,7 +258,7 @@ impl Chats {
                     chat.evidence.push(json!({"agent":"Host reconciliation","action":"restart_reconcile","ok":true,"summary":"Original process and fresh destination state match the interrupted operation. No input replayed.","data":pending.to_string()}));
                     chat.pending = None;
                     chat.execution.failure = None;
-                    self.save(&chat)?;
+                    self.save(&mut chat)?;
                 }
             }
             // Recover up to the runtime's admission limit; further work can be resumed manually.
@@ -276,11 +285,80 @@ impl Chats {
         safe_dir(&dir)?;
         Ok(dir)
     }
-    fn save(&self, chat: &Chat) -> io::Result<()> {
-        crate::chat_store::save(&self.directory(&chat.id)?.join("chat.sqlite3"), chat)
+    fn save(&self, chat: &mut Chat) -> io::Result<()> {
+        // Stage-1 baseline checkpoint: stamp observation IDs, detect
+        // responsiveness milestones and time the durable write itself.
+        // Stamping is positional and idempotent: entries keep the first ID
+        // assigned, and reordered history never reuses an ID.
+        let wall_ms = crate::performance::now_ms();
+        if chat.execution.trace.goal_started_wall_ms == 0 {
+            chat.execution.trace.goal_started_wall_ms = wall_ms;
+        }
+        let at_ms = chat.execution.trace.at_ms(wall_ms);
+        for entry in chat.evidence.iter_mut() {
+            if entry.get("observation_id").is_none() {
+                let id = chat.execution.trace.alloc("obs");
+                entry["observation_id"] = json!(id.clone());
+                chat.execution.trace.observations.push(
+                    crate::performance::ObservationSample {
+                        id,
+                        action: entry["action"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned(),
+                        at_ms,
+                    },
+                );
+            }
+        }
+        let trace = &mut chat.execution.trace;
+        if trace.milestones.first_feedback_ms.is_none()
+            && chat.messages.iter().any(|m| m.role == "assistant")
+        {
+            trace.milestones.first_feedback_ms = Some(at_ms);
+        }
+        if trace.milestones.first_action_ms.is_none()
+            && chat.evidence.iter().any(|e| {
+                e["action"]
+                    .as_str()
+                    .is_some_and(crate::performance::is_action_evidence)
+            })
+        {
+            trace.milestones.first_action_ms = Some(at_ms);
+        }
+        if trace.milestones.verified_completion_ms.is_none()
+            && chat
+                .result
+                .as_ref()
+                .is_some_and(|r| matches!(r.outcome, TaskOutcome::Verified))
+        {
+            trace.milestones.verified_completion_ms = Some(at_ms);
+        }
+        let checkpoint_started = Instant::now();
+        let saved = crate::chat_store::save(
+            &self.directory(&chat.id)?.join("chat.sqlite3"),
+            chat,
+        );
+        chat.execution.trace.stage.db_checkpoint_ms = chat
+            .execution
+            .trace
+            .stage
+            .db_checkpoint_ms
+            .saturating_add(
+                checkpoint_started
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
+            );
+        saved
     }
-    pub fn get(&self, id: &str) -> io::Result<Chat> {
+    /// Sequenced activity pulse for cheap UI polling. The `id` is validated
+    /// like any conversation path; an unknown conversation errors.
+    pub fn pulse(&self, id: &str, since: u64) -> io::Result<Value> {
         let dir = self.directory(id)?;
+        crate::chat_store::pulse(&dir.join("chat.sqlite3"), since)
+    }
+    pub fn get(&self, id: &str) -> io::Result<Chat> {        let dir = self.directory(id)?;
         let mut chat = crate::chat_store::load(&dir.join("chat.sqlite3"))?;
         if matches!(
             chat.status.as_str(),
@@ -323,7 +401,7 @@ impl Chats {
                     .filter(|s| !s.is_empty() && s.chars().count() <= 120)
                     .ok_or_else(|| err("Use a title of 1–120 characters"))?;
                 chat.title = title.into();
-                self.save(&chat)?;
+                self.save(&mut chat)?;
                 Ok(json!({"renamed":true}))
             }
             Some("delete") if body["confirmed"] == true => {
@@ -377,7 +455,7 @@ impl Chats {
             }
             if disposition != "approved" && disposition != "abandon" {
                 chat.pending = Some(pending);
-                self.save(&chat)?;
+                self.save(&mut chat)?;
                 return Err(err(
                     "Approval proposals resolve as approved or abandon only",
                 ));
@@ -393,7 +471,7 @@ impl Chats {
                     }
                     chat.evidence.push(json!({"agent":"User approval","action":pending["proposal"],"ok":false,"summary":reason.to_string(),"data":"No approval granted. Request a fresh proposal."}));
                     chat.status = "Interrupted".into();
-                    self.save(&chat)?;
+                    self.save(&mut chat)?;
                     return Ok(
                         json!({"id":id,"resolved":true,"approved":false,"renewal_required":true,"replayed":false}),
                     );
@@ -416,7 +494,7 @@ impl Chats {
                 task.evidence_start = None;
             }
             chat.status = "Stopped".into();
-            self.save(&chat)?;
+            self.save(&mut chat)?;
             return Ok(json!({"id":id,"resolved":true,"replayed":false}));
         }
         if disposition == "approved" {
@@ -429,7 +507,7 @@ impl Chats {
             "Interrupted"
         }
         .into();
-        self.save(&chat)?;
+        self.save(&mut chat)?;
         Ok(json!({"id":id,"resolved":true,"replayed":false}))
     }
     pub fn stop(&self, id: &str) -> io::Result<Value> {
@@ -516,6 +594,7 @@ impl Chats {
                 workspace,
                 desktop_previous: None,
                 activity: None,
+                activity_events: Vec::new(),
                 execution: Execution::default(),
             }
         };
@@ -580,6 +659,17 @@ impl Chats {
             ));
         }
         if !resume {
+            chat.execution.diagnostics.begin_goal();
+            chat.execution.model_timings.clear();
+            // A fresh goal starts a fresh latency trace. Resumes continue
+            // the same goal's trace so retries stay attributable.
+            chat.execution.trace = crate::performance::Trace::default();
+            static REQUEST_NEXT: AtomicU64 = AtomicU64::new(0);
+            chat.execution.trace.request_id = format!(
+                "req-{}",
+                REQUEST_NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            chat.execution.trace.goal_started_wall_ms = crate::performance::now_ms();
             chat.execution.approval_queue.clear();
             chat.execution.original_request = text.into();
             chat.execution.evidence_start = chat.evidence.len();
@@ -621,7 +711,7 @@ impl Chats {
             agent: "You".into(),
             text: text.into(),
         });
-        self.save(&chat)?;
+        self.save(&mut chat)?;
         let id = chat.id.clone();
         let stop = Arc::new(AtomicBool::new(false));
         active.insert(id.clone(), stop.clone());
@@ -632,6 +722,8 @@ impl Chats {
                 // Wait in the admitted worker, never under the shared active
                 // lock: status and Stop must remain responsive while queued.
                 let _desktop_lease = if chat.access.desktop {
+                    chat.activity = Some(json!({"kind":"waiting","role":"desktop access"}));
+                    service.save(&mut chat)?;
                     let wait_start = Instant::now();
                     Some(loop {
                         if stop.load(Ordering::SeqCst) {
@@ -648,6 +740,8 @@ impl Chats {
                 } else {
                     None
                 };
+                chat.activity = None;
+                service.save(&mut chat)?;
                 service.drive(&mut chat, &stop)
             }));
             match result {
@@ -717,7 +811,7 @@ impl Chats {
                     task.status = chat.status.clone();
                 }
             }
-            let _ = service.save(&chat);
+            let _ = service.save(&mut chat);
             service.active.lock().unwrap().remove(&chat.id);
         });
         Ok(json!({"id":id}))
@@ -733,24 +827,15 @@ impl Chats {
         guard(chat, stop, start)?;
         chat.execution.policy_snapshot = shared_policy(chat);
         chat.used += 1;
+        // Preparation covers context assembly, policy refresh, secret
+        // scrubbing and budget fitting below; transport is timed separately.
+        let preparation_started = Instant::now();
         chat.activity = Some(
             json!({"kind":"model","role":role,"agent":extra["agent"],"started_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()}),
         );
         self.save(chat)?;
         let mut context = json!({"role":role,"access":chat.access,"original_goal":chat.execution.original_request,"messages":chat.messages.iter().rev().take(18).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>(),"tasks":chat.tasks,"observations":chat.evidence.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>(),"assignment":extra,"remaining_steps":if chat.limit==0 {Value::Null} else {json!(chat.limit.saturating_sub(chat.used))},"usage":{"prompt_tokens":chat.prompt_tokens,"completion_tokens":chat.completion_tokens,"cost_usd":chat.cost_usd,"max_tokens":chat.execution.max_tokens,"max_cost_usd":chat.execution.max_cost_usd},"capabilities":crate::capabilities::context(&self.root).unwrap_or(json!([]))});
-        // Keep durable history on disk while fitting the active model context.
-        while context.to_string().len() > 90_000 {
-            if context["observations"]
-                .as_array()
-                .is_some_and(|a| a.len() > 1)
-            {
-                context["observations"].as_array_mut().unwrap().remove(0);
-            } else if context["messages"].as_array().is_some_and(|a| a.len() > 2) {
-                context["messages"].as_array_mut().unwrap().remove(0);
-            } else {
-                break;
-            }
-        }
+        // Budget the complete request below, including policy and retry feedback.
         if chat.access.desktop {
             if let Some(observation) = chat.desktop_previous.as_ref() {
                 context["desktop_current"] = desktop::model_observation(observation);
@@ -792,6 +877,10 @@ impl Chats {
         context["recovery_decision"] =
             serde_json::to_value(&chat.execution.failure).map_err(err)?;
         context["desktop_fallbacks"] = json!(chat.execution.desktop_fallbacks);
+        context["tool_operating_context"] = crate::autonomy::context(&chat.evidence, chat.execution.evidence_start);
+        context["failure_diagnostics"] = chat.execution.diagnostics.context();
+        context["available_tools"] = crate::autonomy::available_tools(chat.access.web, chat.access.terminal, chat.access.apps, chat.access.desktop);
+        context["capabilities_scope"] = json!("Saved extensions only. Empty means no saved extensions, not no tools. See available_tools for built-in tools.");
         let mut system = if chat.prompt_maker {
             format!("{RULES}\n{PROMPT_MAKER}")
         } else {
@@ -799,9 +888,10 @@ impl Chats {
         };
         system.push_str(crate::broker::POLICY_INSTRUCTIONS);
         system.push_str(crate::clarification::INSTRUCTIONS);
+        system.push_str(crate::autonomy::INSTRUCTIONS);
         system.push_str(" A requested existing browser profile is a session requirement: browser_open always uses an isolated profile and cannot satisfy it. Use desktop_observe and desktop controls for the existing browser, or browser_attach only with a known authorized CDP endpoint. Do not copy cookies or relaunch a user's profile for debugging. Reviewers must collect browser_read, browser_screenshot or desktop_observe evidence themselves, never ask the user to provide internal tool output. If the worker only opened a login page, request repair in the correct session; do not credit unobserved login, search or send claims.");
         system.push_str(r#" For results in any app, distinguish an observed outcome from a host-verified receipt. Before completing an app action, the independent reviewer must inspect the destination with a read-only tool. Cite review_observations indices using observed_results:[{effect:"send|open|click|delete|install|upload",target:"specific app and destination",observation:"exact visible result matching the requested content and target",evidence_index:0}] and outcome:"achieved". These are model-reviewed observations, never claims or host receipts. For sending, check the correct conversation/account and exact outgoing content; do not infer delivered/read status from a visible sent item. Do not resend to obtain verification. If the UI is hidden or ambiguous, report what is missing; do not invent an observation. File changes still require host file receipts. A Completion review rejection requests read-only verification or a corrected summary, not repetition of the original action."#);
-        system.push_str(" Current access flags are authoritative; earlier messages about disabled access may be stale. The original_request is the goal, and later user messages clarify it. A clarification answered is not completion of the original goal. A reviewer must request repair tasks when the original goal remains unfinished. Disabled access is not evidence that an app is absent. The context usage block reports metered tokens and spend against turn budgets; prefer fewer information-dense actions as remaining_tokens runs low. Shell commands follow the user-selected command_policy: autonomous permits commands without repeated approval, ask requires exact user grants. Environment secrets and destructive API calls still require exact grants: if the host pauses for approval, do not repeat or rephrase the request — wait for the user's decision and then retry the identical proposal.");
+        system.push_str(" Enabled access permits tools when needed; it does not mean the user requested desktop work. Greetings and conversational answers require no desktop action or achieved desktop outcome. Current access flags are authoritative; earlier messages about disabled access may be stale. The original_request is the goal, and later user messages clarify it. A clarification answered is not completion of the original goal. A reviewer must request repair tasks when the original goal remains unfinished. Disabled access is not evidence that an app is absent. The context usage block reports metered tokens and spend against turn budgets; prefer fewer information-dense actions as remaining_tokens runs low. Shell commands follow the user-selected command_policy: autonomous permits commands without repeated approval, ask requires exact user grants. Environment secrets and destructive API calls still require exact grants: if the host pauses for approval, do not repeat or rephrase the request — wait for the user's decision and then retry the identical proposal.");
         system.push_str(crate::capabilities::INSTRUCTIONS);
         if chat.contract.is_some() {
             system.push_str(" The task_contract is caller-owned and immutable for this task. Fulfill every acceptance criterion. The host independently verifies them before success. Failed Host verification observations require repair; do not repeat a completion claim without fixing the result.");
@@ -827,14 +917,14 @@ impl Chats {
         if role == "planner" {
             system.push_str(r#"\nYour current role is PLANNER. Return only {"summary":"short approach","tasks":[{"agent":"Assistant","instruction":"concrete task and acceptance criteria"}]} with one to six tasks, or {"question":"essential clarification"}. Each task may specify depends_on:[1-based task IDs]. Use depends_on:[] for independent tasks; omit it only for sequential work. Do not return worker decisions or an empty tasks array. For a greeting such as hi, assign one Assistant task to reply naturally; no tools or files are needed."#);
         }
-        let screenshot = (chat.access.desktop && screenshot.is_file()).then_some(screenshot);
-        // Prompt-side secret hygiene (audit Phase 2): granted secret values
-        // never reach model context, even inside echoed tool output. The
-        // durable copy is scrubbed at persistence in chat_store::save.
-        crate::broker::scrub_value(
-            &mut context,
-            &crate::broker::secret_values(&chat.execution.secret_grants),
-        );
+        if role == "worker" {
+            system.push_str(r#" Your current role is WORKER. Execute the assigned step using the available built-in tools. A plan is already in place. Return {"decision":"act","action":{"tool":"tool_name",...arguments}} for the next operation, not another plan or a request to perform it yourself. For a workspace listing the concrete action is {"decision":"act","action":{"tool":"list_dir","path":"."}}. No Terminal access is needed for workspace file tools. If the next action is known and authorized, perform it; never copy the plan into a question. Complete only after the requested result is observed."#);
+        }
+        if role == "conversation" {
+            system = "Return only JSON: {\"decision\":\"complete\",\"summary\":\"your brief greeting to the user\"}. This is a greeting only. Do not perform or claim actions. No tools are available.".into();
+            context = json!({"role":role,"original_request":chat.execution.original_request});
+        }
+        let screenshot = (role != "conversation" && chat.access.desktop && screenshot.is_file()).then_some(screenshot);
         let root = self
             .root
             .parent()
@@ -843,7 +933,31 @@ impl Chats {
         let mut failures = Vec::new();
         let mut responses = Vec::new();
         let mut clarification_reconsidered = false;
+        let diagnostic_episode = chat.execution.diagnostics.next_id;
         for attempt in 0..3 {
+            // Retry feedback includes model output and validation errors;
+            // refresh diagnostics and scrub on every attempt, not only entry.
+            context["failure_diagnostics"] = chat.execution.diagnostics.context();
+            crate::broker::scrub_value(
+                &mut context,
+                &crate::broker::secret_values(&chat.execution.secret_grants),
+            );
+            if let Some(activity) = chat.activity.as_mut() {
+                activity["provider"] = serde_json::to_value(&provider).map_err(err)?;
+            }
+            self.save(chat)?;
+            let prompt_bytes = crate::performance::fit_context(&system, &mut context)?;
+            let preparation_ms = preparation_started
+                .elapsed()
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            chat.execution.trace.stage.preparation_ms = chat
+                .execution
+                .trace
+                .stage
+                .preparation_ms
+                .saturating_add(preparation_ms);
+            let model_started = Instant::now();
             let response = provider.respond(
                 &chat.workspace,
                 &system,
@@ -852,10 +966,35 @@ impl Chats {
                 screenshot.as_deref(),
                 stop,
             );
+            let model_ms = model_started
+                .elapsed()
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            chat.execution.trace.stage.model_request_ms = chat
+                .execution
+                .trace
+                .stage
+                .model_request_ms
+                .saturating_add(model_ms);
             // Accrue metered usage into durable turn totals before anything
             // else: budgets in guard() see every model call, including ones
             // whose output later fails validation (audit Phase 7).
-            if let Ok((_, usage)) = &response {
+            let call_id = chat.execution.trace.alloc("model");
+            chat.execution.model_timings.push(crate::performance::ModelSample {
+                role: role.to_owned(), attempt: attempt + 1,
+                elapsed_ms: model_ms,
+                prompt_bytes, transport_ok: response.is_ok(),
+                provider: response.as_ref().map(|output| output.2.clone()).unwrap_or_default(),
+                call_id,
+                preparation_ms,
+                task_step: extra["step"].as_u64(),
+                input_tokens: response.as_ref().map(|output| output.1.prompt_tokens).unwrap_or(0),
+                output_tokens: response.as_ref().map(|output| output.1.completion_tokens).unwrap_or(0),
+            });
+            if chat.execution.model_timings.len() > 128 {
+                chat.execution.model_timings.remove(0);
+            }
+            if let Ok((_, usage, _)) = &response {
                 chat.prompt_tokens += usage.prompt_tokens;
                 chat.completion_tokens += usage.completion_tokens;
                 chat.cost_usd += usage.cost_usd;
@@ -869,7 +1008,11 @@ impl Chats {
                 response
                     .as_ref()
                     .ok()
-                    .map(|output| output.0.chars().take(8192).collect::<String>()),
+                    .map(|output| {
+                        let mut safe = json!(output.0);
+                        crate::broker::scrub_value(&mut safe, &crate::broker::secret_values(&chat.execution.secret_grants));
+                        safe.as_str().unwrap_or("").chars().take(8192).collect::<String>()
+                    }),
             );
             let transport_failed = response.is_err();
             let parsed = response
@@ -905,9 +1048,30 @@ impl Chats {
                                 .last()
                                 .is_none_or(|e| e["agent"] != "Reviewer" || e["action"] != tool)
                             {
+                                chat.execution.diagnostics.record(diagnostic_episode, role, chat.evidence.len(), "review_observation", None);
+                                self.save(chat)?;
                                 return Ok(json!({"decision":"verify","action":{"tool":tool}}));
                             }
                         }
+                    }
+                    if !clarification_reconsidered && attempt < 2
+                        && chat.access.desktop
+                        && crate::clarification::existing_browser_profile(&chat.execution.original_request)
+                        && value["question"].as_str().is_some_and(|question| {
+                            crate::clarification::browser_route_question(question)
+                                || crate::clarification::browser_state_question(question)
+                                || (chat.evidence.is_empty()
+                                    && crate::clarification::profile_inspection_question(question))
+                        })
+                    {
+                        clarification_reconsidered = true;
+                        chat.execution.diagnostics.record(diagnostic_episode, role, chat.evidence.len(), "browser_inspection", Some("Requested browser information can be inspected with enabled tools."));
+                        self.save(chat)?;
+                        context["profile_inspection_check"] = json!({"instruction":"Use the profile name already supplied in the conversation. Before asking for profile names or permission to list them, inspect the browser and its visible profiles using authorized tools. Do not claim multiple matches without observations. Profile display names do not require case-sensitive clarification. Return an inspection action (or a concrete inspection task if planning), then continue the original goal. Only ask about ambiguity supported by actual inspection, or a concrete access blocker."});
+                        context["clarification_check"] = json!({"proposed_question":value["question"],"instruction":"The user already requested an existing browser profile. Inspect that browser with desktop_observe, identify the requested profile, then open a new tab in that same window. Obtain observable browser state yourself; do not ask the user to transcribe the address bar, current URL or page title. The old tab's URL is not a prerequisite for navigating to the requested destination. Do not ask the user to choose internal connection methods or tab IDs. Do not use an isolated browser profile. Reviewers should request repair work for unfinished navigation. Preserve emergency stops and uncertain pending actions; report a concrete access or identity blocker if inspection cannot proceed."});
+                        chat.used += 1;
+                        guard(chat, stop, start)?;
+                        continue;
                     }
                     if !clarification_reconsidered
                         && attempt < 2
@@ -916,10 +1080,26 @@ impl Chats {
                             .is_some_and(crate::clarification::cosmetic_name_question)
                     {
                         clarification_reconsidered = true;
+                        chat.execution.diagnostics.record(diagnostic_episode, role, chat.evidence.len(), "supplied_information", Some("Cosmetic clarification requires reconsideration against the supplied name."));
+                        self.save(chat)?;
                         context["clarification_check"] = json!({"proposed_question":value["question"],"instruction":"Reconsider this cosmetic display-name question. Apply the user's existing answer and inspect the destination. Return an action or plan; reviewers should request repair work if no tool action happened. Ask only if actual observed destinations remain ambiguous. Preserve exact message content and account identifiers."});
                         chat.used += 1;
                         guard(chat, stop, start)?;
                         continue;
+                    }
+                    let supplied_information = chat.messages.iter().filter(|m| m.role == "user")
+                        .map(|m| m.text.as_str()).collect::<Vec<_>>().join("\n");
+                    if let Some(problem) = crate::autonomy::blocker_problem(&value, &chat.evidence, &supplied_information)
+                        .or_else(|| crate::diagnostics::provenance_problem(&value, chat.execution.evidence_start, chat.evidence.len())) {
+                        chat.execution.diagnostics.record(diagnostic_episode, role, chat.evidence.len(), "blocker_provenance", Some(problem));
+                        self.save(chat)?;
+                        if attempt < 2 {
+                            context["blocker_check"] = json!({"proposed":value,"problem":problem,"instruction":"Continue with discovery or inspection if possible. Otherwise supply a supported blocker using the operating contract. Do not repeat an unsupported question."});
+                            chat.used += 1;
+                            guard(chat, stop, start)?;
+                            continue;
+                        }
+                        return Err(err("The model could not justify its request for user input after recovery. The task remains unfinished; no unsupported question was forwarded."));
                     }
                     if attempt > 0 && !failures.is_empty() {
                         push(
@@ -930,9 +1110,23 @@ impl Chats {
                         );
                         self.save(chat)?;
                     }
+                    chat.execution.diagnostics.record(diagnostic_episode, role, chat.evidence.len(), "decision", None);
+                    self.save(chat)?;
                     return Ok(value);
                 }
-                Err(error) => failures.push(error.to_string()),
+                Err(error) => {
+                    // Scrub before the journal truncates: a truncated credential
+                    // would no longer match the persistence scrubber's value.
+                    let mut diagnostic_error = json!(error.to_string());
+                    crate::broker::scrub_value(&mut diagnostic_error, &crate::broker::secret_values(&chat.execution.secret_grants));
+                    chat.execution.diagnostics.record(diagnostic_episode, role, chat.evidence.len(), if transport_failed { "model_transport" } else { "decision_schema" }, diagnostic_error.as_str());
+                    // Failed attempts are reported, never excluded: failures
+                    // count every failed attempt, retries count recoveries.
+                    chat.execution.trace.failures =
+                        chat.execution.trace.failures.saturating_add(1);
+                    self.save(chat)?;
+                    failures.push(error.to_string());
+                }
             }
             if attempt == 0 {
                 let fallback = crate::recovery::fallback(root);
@@ -955,6 +1149,8 @@ impl Chats {
                         "Recovery",
                         "The model response failed validation or connection. Retrying the model request; no tool action is being repeated.",
                     );
+                    chat.execution.trace.retries =
+                        chat.execution.trace.retries.saturating_add(1);
                     self.save(chat)?;
                     continue;
                 }
@@ -964,15 +1160,13 @@ impl Chats {
         // Only model transport/format failures enter automatic repair. Tool
         // denial, Stop, budgets, and uncertain side effects are never retried here.
         if !stop.load(Ordering::SeqCst) {
-            let _ = crate::recovery::record(
-                root,
-                &chat.id,
-                json!({
+            let mut incident = json!({
                     "kind":"model_request", "errors":failures, "responses":responses, "role":role,
                     "provider":chat.provider, "system":system, "context":context,
                     "pending":chat.pending, "request_step":chat.used, "messages_count":chat.messages.len()
-                }),
-            );
+                });
+            crate::broker::scrub_value(&mut incident, &crate::broker::secret_values(&chat.execution.secret_grants));
+            let _ = crate::recovery::record(root, &chat.id, incident);
         }
         Err(err(failures.join("; recovery: ")))
     }
@@ -989,6 +1183,20 @@ impl Chats {
 
     fn drive_inner(&self, chat: &mut Chat, stop: &AtomicBool) -> io::Result<()> {
         let start = Instant::now();
+        // Only a fresh, self-contained greeting can bypass task execution.
+        // Historical/resumed conversations retain their normal goal handling.
+        if chat.tasks.is_empty() && chat.contract.is_none() && chat.pending.is_none()
+            && chat.execution.approval_queue.is_empty() && chat.execution.failure.is_none()
+            && !chat.prompt_maker && chat.evidence.is_empty()
+            && chat.messages.iter().filter(|message| message.role == "user").count() == 1
+            && crate::performance::greeting(&chat.execution.original_request)
+        {
+            let reply = self.request(chat, stop, start, "conversation", Value::Null)?;
+            guard(chat, stop, start)?;
+            push(chat, "assistant", "Klyne", required(&reply, "summary")?);
+            chat.status = "Completed".into();
+            return Ok(());
+        }
         if chat.tasks.is_empty() {
             let plan=self.request(chat,stop,start,"planner",json!("Plan how to fulfill original_request using the latest clarifications and current access. Choose the smallest useful team and concrete acceptance criteria."))?;
             if let Ok(question) = required(&plan, "question") {
@@ -1124,6 +1332,54 @@ impl Chats {
                 );
                 return Ok(());
             }
+            // Host-contract fast path (performance Stage 2): every task Done
+            // with fresh task-bound evidence, plus a verified acceptance
+            // contract, proves the result without another model round. The
+            // worker's completion summary already stands as the answer; the
+            // host records the verification. Desktop outcomes still require
+            // model review, as do unverified contracts, pending work and
+            // approval queues.
+            if chat.contract.is_some()
+                && chat.pending.is_none()
+                && chat.execution.approval_queue.is_empty()
+                && chat.execution.failure.is_none()
+                && chat.tasks.iter().all(|t| t.status == "Done" && t.evidence_bound)
+                && !crate::completion_guard::requires_desktop_outcome(
+                    chat.evidence.get(chat.execution.evidence_start..).unwrap_or(&[]),
+                )
+            {
+                guard(chat, stop, start)?;
+                let mut read_policy =
+                    PermissionPolicy::milestone_default(&chat.workspace);
+                read_policy.revoke_capability(Capability::FilesystemWrite);
+                let verify_started = Instant::now();
+                let result = chat
+                    .contract
+                    .as_ref()
+                    .map(|contract| contract.verify(&read_policy));
+                chat.execution.trace.stage.verification_ms = chat
+                    .execution
+                    .trace
+                    .stage
+                    .verification_ms
+                    .saturating_add(
+                        verify_started
+                            .elapsed()
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64,
+                    );
+                if let Some(result) = result {
+                    let passed = matches!(result.outcome, TaskOutcome::Verified);
+                    chat.evidence.push(json!({"agent":"Host verifier","action":"acceptance_check","ok":passed,"summary":if passed{"Task acceptance verified"}else{"Task acceptance failed; repair required"},"data":serde_json::to_string(&result).map_err(err)?}));
+                    chat.result = Some(result);
+                    self.save(chat)?;
+                    if passed {
+                        chat.status = "Completed".into();
+                        self.save(chat)?;
+                        return Ok(());
+                    }
+                }
+            }
             chat.status = "Reviewing".into();
             self.save(chat)?;
             let verification_only =
@@ -1146,6 +1402,7 @@ impl Chats {
                             &chat.execution.original_request
                         };
                         required(&review, "summary")?;
+                        let verify_started = Instant::now();
                         let evidence = chat
                             .evidence
                             .get(chat.execution.evidence_start..)
@@ -1165,6 +1422,7 @@ impl Chats {
                                 crate::failure_policy::FailureKind::VerificationNeeded,
                             ));
                             chat.evidence.push(json!({"agent":"Completion review","action":"completion_check","ok":false,"summary":error.to_string(),"data":"Read-only verification is needed. Do not repeat the action."}));
+                            note_verification(chat, verify_started);
                             if verification_failures < 3 {
                                 self.save(chat)?;
                                 continue;
@@ -1192,6 +1450,7 @@ impl Chats {
                             chat.evidence.push(json!({"agent":"Host verifier","action":"acceptance_check","ok":passed,"summary":if passed{"Task acceptance verified"}else{"Task acceptance failed; repair required"},"data":serde_json::to_string(&result).map_err(err)?}));
                             chat.result = Some(result);
                             self.save(chat)?;
+                            note_verification(chat, verify_started);
                             if !passed {
                                 verification_failures += 1;
                                 if verification_failures >= 2 {
@@ -1208,7 +1467,9 @@ impl Chats {
                             });
                         }
                         if chat.contract.is_none()
-                            && chat.access.desktop
+                            && crate::completion_guard::requires_desktop_outcome(
+                                chat.evidence.get(chat.execution.evidence_start..).unwrap_or(&[]),
+                            )
                             && review["outcome"] != "achieved"
                         {
                             return Err(err(
@@ -1287,6 +1548,13 @@ impl Chats {
         guard(chat, stop, start)?;
         refresh_approval_leases(chat);
         chat.execution.policy_snapshot = shared_policy(chat);
+        if decision["action"]["tool"] == "evidence_read" {
+            let page = crate::autonomy::evidence_page(&chat.evidence, &decision["action"]).map_err(err)?;
+            chat.used += 1;
+            chat.evidence.push(json!({"agent":agent,"action":"evidence_read","ok":true,"summary":"Historical evidence retrieved; no external action performed","data":page.to_string()}));
+            self.save(chat)?;
+            return guard(chat, stop, start);
+        }
         if matches!(
             decision["action"]["tool"].as_str(),
             Some("runtime_stage" | "runtime_status" | "runtime_attest")
@@ -1342,6 +1610,7 @@ impl Chats {
                 }
                 chat.pending = Some(decision["action"].clone());
                 self.save(chat)?;
+                let tool_started = Instant::now();
                 let attestation = crate::activation::run_tests(
                     root,
                     Path::new(binary),
@@ -1350,6 +1619,7 @@ impl Chats {
                     &chat.workspace,
                     stop,
                 )?;
+                note_tool(chat, "runtime_attest", tool_started, true);
                 chat.pending = None;
                 chat.evidence.push(json!({"agent":agent,"action":"runtime_attest","ok":true,"summary":"Test attestation recorded for candidate digest","data":serde_json::to_string(&attestation).map_err(err)?}));
                 self.save(chat)?;
@@ -1360,7 +1630,9 @@ impl Chats {
             chat.used += 1;
             chat.pending = Some(decision["action"].clone());
             self.save(chat)?;
+            let tool_started = Instant::now();
             let result = crate::activation::stage(root, Path::new(binary), digest);
+            note_tool(chat, "runtime_stage", tool_started, result.is_ok());
             chat.pending = None;
             match result {
                 Ok(candidate) => {
@@ -1409,6 +1681,7 @@ impl Chats {
             chat.used += 1;
             chat.pending = Some(json!({"agent":agent,"action":decision["action"]}));
             self.save(chat)?;
+            let tool_started = Instant::now();
             let result = self.browsers.execute(crate::browser_tools::BrowserCall {
                 id: &chat.id,
                 action: &decision["action"],
@@ -1425,6 +1698,7 @@ impl Chats {
             // One shared lifecycle: any post-dispatch observation failure
             // preserves uncertainty (EffectState::Unknown keeps pending).
             let tool_name = decision["action"]["tool"].as_str().unwrap_or("");
+            note_tool(chat, tool_name, tool_started, value["ok"] != false);
             let uncertain = harness_core::effect_of_value(
                 &value,
                 !matches!(
@@ -1460,6 +1734,7 @@ impl Chats {
             }
             chat.pending = Some(json!({"agent":agent,"action":decision["action"]}));
             self.save(chat)?;
+            let tool_started = Instant::now();
             let result = crate::mcp::execute(
                 &self.root,
                 &chat.id,
@@ -1469,6 +1744,7 @@ impl Chats {
                 stop,
             );
             let value = result.unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));
+            note_tool(chat, decision["action"]["tool"].as_str().unwrap_or("mcp"), tool_started, value["ok"] != false);
             let mut data = value.to_string();
             if data.len() > 16000 {
                 let mut n = 16000;
@@ -1526,6 +1802,7 @@ impl Chats {
             chat.used += 1;
             chat.pending = Some(json!({"agent":agent,"action":decision["action"]}));
             self.save(chat)?;
+            let tool_started = Instant::now();
             let result = crate::capabilities::execute_with_policy(
                 &self.root,
                 &chat.workspace,
@@ -1542,6 +1819,7 @@ impl Chats {
                 Ok(v) => v,
                 Err(e) => json!({"ok":false,"error":e.to_string()}),
             };
+            note_tool(chat, decision["action"]["tool"].as_str().unwrap_or("capability"), tool_started, value["ok"] != false);
             // Broker approval (audit Phase 2): an unapproved tool proposal
             // pauses for the user instead of executing or failing blindly.
             if let Some(proposal) = value.get("needs_approval") {
@@ -1582,6 +1860,7 @@ impl Chats {
             }
             chat.pending = Some(json!({"agent":agent,"action":decision["action"]}));
             self.save(chat)?;
+            let tool_started = Instant::now();
             let result = if decision["action"]["tool"] == "self_improve" {
                 let acceptance = decision["action"]["repo"]
                     .as_str()
@@ -1635,6 +1914,7 @@ impl Chats {
                 Ok(value) => value.clone(),
                 Err(e) => json!({"ok": false, "error": e.to_string()}),
             };
+            note_tool(chat, decision["action"]["tool"].as_str().unwrap_or("app"), tool_started, result_value["ok"] != false);
             // Broker approval (audit Phase 2): ungranted secrets and
             // destructive calls pause for the user instead of transmitting
             // credentials or mutating remote state.
@@ -1722,20 +2002,7 @@ impl Chats {
             Err(PolicyDenial::Denied(error)) => return Err(error),
         };
         if matches!(action, Action::RunShell { .. }) {
-            for name in [
-                "USERPROFILE",
-                "APPDATA",
-                "LOCALAPPDATA",
-                "HOMEDRIVE",
-                "HOMEPATH",
-                "TEMP",
-                "TMP",
-                "CARGO_HOME",
-                "RUSTUP_HOME",
-                "HOME",
-            ] {
-                policy.allow_env(name);
-            }
+            policy.allow_toolchain_environment();
             if let Some(names) = decision["action"].get("env") {
                 let names: Vec<String> = serde_json::from_value(names.clone()).map_err(err)?;
                 if names.len() > 64
@@ -1771,6 +2038,7 @@ impl Chats {
         chat.used += 1;
         chat.pending = Some(json!({"agent":agent,"action":action}));
         self.save(chat)?;
+        let tool_started = Instant::now();
         let observation = if matches!(action, Action::RunShell { .. }) {
             let seconds = decision["action"]
                 .get("timeout_seconds")
@@ -1799,6 +2067,7 @@ impl Chats {
                 Action::RunShell { .. } | Action::WriteFile { .. } | Action::PatchFile { .. }
             ),
         ) == harness_core::EffectState::Unknown;
+        note_tool(chat, decision["action"]["tool"].as_str().unwrap_or("workspace"), tool_started, observation.ok);
         let patched_digest = if observation.ok && matches!(action, Action::PatchFile { .. }) {
             serde_json::from_str::<Value>(&observation.data)
                 .ok()
@@ -1832,9 +2101,11 @@ impl Chats {
             guard(chat, stop, start)?;
             chat.used += 1;
             self.save(chat)?;
+            let read_started = Instant::now();
             let read = Action::ReadFile { path: path.clone() };
             let observed = tools.execute(&read, &policy);
             let passed = observed.ok && observed.data == *contents;
+            note_tool(chat, "read_file:read-back", read_started, passed);
             use sha2::{Digest, Sha256};
             let sha256 = format!("{:x}", Sha256::digest(contents.as_bytes()));
             chat.evidence.push(json!({"agent":"Runtime check","action":read.to_string(),"ok":passed,"summary":"Independent read-back of written content","data":if passed {"Written content matches the file on disk."} else {"File content did not match the write."},"receipt":{"version":1,"effect":"file_write","target":path,"criterion":{"FileDigest":{"path":path,"sha256":sha256}}}}));
@@ -1853,10 +2124,12 @@ impl Chats {
             self.save(chat)?;
             let digest =
                 patched_digest.ok_or_else(|| err("Patch did not return a destination digest"))?;
+            let hash_started = Instant::now();
             let observed = tools.execute(&Action::HashFile { path: path.clone() }, &policy);
             let passed = observed.ok
                 && serde_json::from_str::<Value>(&observed.data)
                     .is_ok_and(|v| v["sha256"] == digest);
+            note_tool(chat, "hash_file:patch-check", hash_started, passed);
             chat.evidence.push(json!({"agent":"Runtime check","action":format!("hash_file:{path}"),"ok":passed,"summary":"Independent check of patched file","data":observed.data,"receipt":{"version":1,"effect":"file_write","target":path,"criterion":{"FileDigest":{"path":path,"sha256":digest}}}}));
             self.save(chat)?;
             if !passed {
@@ -1886,12 +2159,14 @@ impl Chats {
             Ok(action) => action,
             Err(e) if desktop::recoverable_precondition(&e.to_string()) => {
                 chat.used += 1;
+                let recover_started = Instant::now();
                 let result = desktop::execute(
                     &self.directory(&chat.id)?.join("desktop"),
                     &desktop::DesktopAction::Observe,
                     None,
                     stop,
                 )?;
+                note_tool(chat, "desktop_observe:recover", recover_started, true);
                 chat.desktop_previous = Some(result["observation"].clone());
                 chat.evidence.push(json!({"agent":agent,"action":"desktop_recover","ok":false,"summary":"Desktop recovery: input not applied","data":json!({"error":e.to_string(),"observation":result["observation"]}).to_string()}));
                 self.save(chat)?;
@@ -1934,9 +2209,18 @@ impl Chats {
         self.save(chat)?;
         let directory = self.directory(&chat.id)?.join("desktop");
         let previous = chat.desktop_previous.clone();
+        let tool_started = Instant::now();
         let result = match desktop::execute(&directory, &action, previous.as_ref(), stop) {
             Ok(result) => result,
             Err(error) => {
+                if desktop_emergency_stop(chat, &action, stop, &error.to_string()) {
+                    self.save(chat)?;
+                    return Err(err(if chat.pending.is_none() {
+                        "Desktop emergency stop triggered. Work is paused. Move the pointer away from the top-left corner and release Pause before resuming. No desktop input was applied by the interrupted observation."
+                    } else {
+                        "Desktop emergency stop triggered. Work is paused. Inspect the last desktop action before resolving it; it may have partially applied."
+                    }));
+                }
                 if !stop.load(Ordering::SeqCst)
                     && let Some(result) = chat.pending.as_ref().and_then(|pending| {
                         crate::document_save::verify(
@@ -1986,6 +2270,7 @@ impl Chats {
                 }
             }
         };
+        note_tool(chat, &tool, tool_started, result["ok"] != false);
         if result["observation"].is_object() {
             chat.desktop_previous = Some(result["observation"].clone());
         }
@@ -2041,7 +2326,31 @@ impl Chats {
     }
 }
 // Validate before dispatch, uniformly for browser, desktop, API and local tools.
+fn desktop_emergency_stop(chat: &mut Chat, action: &desktop::DesktopAction, stop: &AtomicBool, error: &str) -> bool {
+    if !error.contains("Emergency stop: Pause key or pointer at the primary screen's top-left corner.") {
+        return false;
+    }
+    stop.store(true, Ordering::SeqCst);
+    // An interrupted read cannot have applied desktop input. Never clear a
+    // potentially partial input action or resume automatically after a stop.
+    if matches!(action, desktop::DesktopAction::Observe | desktop::DesktopAction::Apps | desktop::DesktopAction::ClipboardGet) {
+        chat.pending = None;
+    }
+    chat.execution.failure = Some(crate::failure_policy::terminal(chat.pending.is_some(), true, false));
+    true
+}
+
 fn validate_model_decision(role: &str, value: &Value) -> io::Result<()> {
+    if role == "conversation" {
+        if value["decision"] != "complete"
+            || value.as_object().is_none_or(|object| object.keys().any(|key| key != "decision" && key != "summary"))
+            || crate::completion_guard::delivery_claim(required(value, "summary")?)
+        {
+            return Err(err("Greeting route only accepts a conversational answer; no actions or claims"));
+        }
+        required(value, "summary")?;
+        return Ok(());
+    }
     if role == "planner" {
         if required(value, "question").is_ok() {
             return Ok(());
@@ -2068,6 +2377,16 @@ fn validate_model_decision(role: &str, value: &Value) -> io::Result<()> {
                 return Err(err("Action must be an object"));
             }
             required(&value["action"], "tool")?;
+            // Validate core schemas before dispatch so malformed proposals enter
+            // bounded model correction, with no action journal or side effect.
+            // Other adapters retain their own dispatch validation.
+            let inventory = crate::autonomy::available_tools(false, false, false, false);
+            let tool = &value["action"]["tool"];
+            if inventory["workspace_files"].as_array().is_some_and(|tools| tools.contains(tool))
+                || matches!(tool.as_str(), Some("fetch_url" | "run_shell"))
+            {
+                parse_action(value)?;
+            }
         }
         _ => {
             return Err(err(format!(
@@ -2089,8 +2408,20 @@ fn parse_model_response(output: &str) -> io::Result<Value> {
         .and_then(|s| s.strip_suffix("```"))
         .unwrap_or(clean)
         .trim();
-    let value: Value = serde_json::from_str(clean).map_err(|_| {
-        err("The model returned an invalid decision. You can retry with a follow-up.")
+    let value: Value = serde_json::from_str(clean).or_else(|error| {
+        // Some local models omit just the final object delimiter after a complete
+        // field. Recover that envelope only: never invent values, close strings,
+        // repair nested structures, or strip extra output.
+        if error.is_eof()
+            && clean.starts_with('{')
+            && matches!(clean.chars().last(), Some(']' | '}' | '"'))
+        {
+            serde_json::from_str(&format!("{clean}}}"))
+        } else {
+            Err(error)
+        }
+    }).map_err(|error| {
+        err(format!("The model response was not valid JSON (line {}, column {}). No action was executed from this response.",error.line(),error.column()))
     })?;
     if !value.is_object() {
         return Err(err("The model decision must be a JSON object"));
@@ -2104,6 +2435,45 @@ fn push(chat: &mut Chat, role: &str, agent: &str, text: &str) {
         agent: agent.into(),
         text: text.into(),
     });
+}
+/// Stage-1 verification timing: attribute host-side completion and
+/// acceptance checks to the trace.
+fn note_verification(chat: &mut Chat, started: Instant) {
+    chat.execution.trace.stage.verification_ms = chat
+        .execution
+        .trace
+        .stage
+        .verification_ms
+        .saturating_add(
+            started
+                .elapsed()
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+        );
+}
+fn note_tool(chat: &mut Chat, tool: &str, started: Instant, ok: bool) {
+    // Stage-1 tool timing: attribute one tool execution to the trace with a
+    // stable per-goal ID. Callers pass the tool name and the dispatch result.
+    let elapsed_ms = started
+        .elapsed()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    let id = chat.execution.trace.alloc("tool");
+    chat.execution.trace.stage.tool_execution_ms = chat
+        .execution
+        .trace
+        .stage
+        .tool_execution_ms
+        .saturating_add(elapsed_ms);
+    chat.execution.trace.tool_calls.push(crate::performance::ToolSample {
+        id,
+        tool: tool.to_owned(),
+        elapsed_ms,
+        ok,
+    });
+    if chat.execution.trace.tool_calls.len() > 128 {
+        chat.execution.trace.tool_calls.remove(0);
+    }
 }
 fn required<'a>(value: &'a Value, key: &str) -> io::Result<&'a str> {
     value[key]
@@ -2753,7 +3123,7 @@ mod tests {
         let service = Arc::new(Chats::new(root.path()));
         let directory = root.path().join("conversations/123-0");
         fs::create_dir_all(directory.join("files")).unwrap();
-        let chat = Chat {
+        let mut chat = Chat {
             contract: None,
             result: None,
             prompt_maker: false,
@@ -2777,9 +3147,10 @@ mod tests {
             workspace: directory.join("files"),
             desktop_previous: None,
             activity: None,
+            activity_events: Vec::new(),
             execution: Execution::default(),
         };
-        service.save(&chat).unwrap();
+        service.save(&mut chat).unwrap();
         let mut oversized = chat.clone();
         oversized.messages = (0..140)
             .map(|_| Message {
@@ -2788,13 +3159,13 @@ mod tests {
                 text: "x".repeat(31000),
             })
             .collect();
-        service.save(&oversized).unwrap();
+        service.save(&mut oversized).unwrap();
         assert_eq!(service.get(&chat.id).unwrap().messages.len(), 140);
         assert_eq!(
             service.list().unwrap()["chats"].as_array().unwrap().len(),
             1
         );
-        service.save(&chat).unwrap();
+        service.save(&mut chat).unwrap();
         let restarted = Arc::new(Chats::new(root.path()));
         assert_eq!(restarted.get(&chat.id).unwrap().status, "Interrupted");
         let result = restarted.send(
@@ -2861,6 +3232,7 @@ mod tests {
             workspace,
             desktop_previous: None,
             activity: None,
+            activity_events: Vec::new(),
             execution: Execution::default(),
         };
         assert!(!chat.access.desktop);
@@ -2912,8 +3284,171 @@ mod tests {
             workspace: std::path::PathBuf::from("test-workspace"),
             desktop_previous: None,
             activity: None,
+            activity_events: Vec::new(),
             execution: Execution::default(),
         }
+    }
+    #[test]
+    fn visual_events_survive_short_calls_without_replaying_history() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("chat.sqlite3");
+        let mut chat = budget_chat(0, 0.0);
+        chat.pending = Some(json!({"action":{"tool":"browser_read"}}));
+        crate::chat_store::save(&path, &chat).unwrap();
+        chat.pending = None;
+        chat.evidence
+            .push(json!({"action":"browser_read","ok":true}));
+        crate::chat_store::save(&path, &chat).unwrap();
+        let loaded = crate::chat_store::load(&path).unwrap();
+        let starts: Vec<_> = loaded
+            .activity_events
+            .iter()
+            .filter(|e| e["type"] == "tool:start")
+            .collect();
+        let ends: Vec<_> = loaded
+            .activity_events
+            .iter()
+            .filter(|e| e["type"] == "tool:complete")
+            .collect();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(ends.len(), 1);
+        assert_eq!(starts[0]["data"]["id"], ends[0]["data"]["id"]);
+        crate::chat_store::save(&path, &chat).unwrap();
+        assert_eq!(
+            crate::chat_store::load(&path)
+                .unwrap()
+                .activity_events
+                .len(),
+            loaded.activity_events.len()
+        );
+        chat.pending = Some(json!({"proposal":{"kind":"shell"}}));
+        crate::chat_store::save(&path, &chat).unwrap();
+        assert_eq!(
+            crate::chat_store::load(&path)
+                .unwrap()
+                .activity_events
+                .iter()
+                .filter(|e| e["type"] == "tool:start")
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn emergency_stop_clears_only_read_only_desktop_pending() {
+        let mut chat = budget_chat(0,0.0);
+        let stop = AtomicBool::new(false);
+        let error = "Emergency stop: Pause key or pointer at the primary screen's top-left corner.";
+        chat.pending = Some(json!({"action":{"tool":"desktop_observe"}}));
+        assert!(desktop_emergency_stop(&mut chat,&desktop::DesktopAction::Observe,&stop,error));
+        assert!(stop.load(Ordering::SeqCst));
+        assert!(chat.pending.is_none());
+        assert_eq!(chat.execution.failure.as_ref().unwrap().kind,crate::failure_policy::FailureKind::Stopped);
+        let action = desktop::DesktopAction::Key {window:"1".into(),key:"ENTER".into()};
+        chat.pending = Some(json!({"action":{"tool":"desktop_key"}}));
+        assert!(desktop_emergency_stop(&mut chat,&action,&stop,error));
+        assert!(chat.pending.is_some());
+        assert_eq!(chat.execution.failure.as_ref().unwrap().kind,crate::failure_policy::FailureKind::UncertainEffect);
+    }
+    #[test]
+    fn model_response_recovers_only_missing_outer_delimiter() {
+        let truncated = r#"{"summary":"Reply naturally to hi","tasks":[{"agent":"Assistant","instruction":"Say hello","depends_on":[]}]"#;
+        let recovered = parse_model_response(truncated).unwrap();
+        validate_model_decision("planner", &recovered).unwrap();
+        assert_eq!(recovered["tasks"][0]["instruction"], "Say hello");
+        assert_eq!(recovered, parse_model_response(&format!("{truncated}}}")).unwrap());
+        let incomplete_action = parse_model_response(r#"{"decision":"act","action":{"tool":"write_file"}"#).unwrap();
+        assert!(parse_action(&incomplete_action).is_err());
+        assert!(parse_model_response(r#"{"decision":"complete","summary":"Hi"#).is_err());
+        assert!(parse_model_response(r#"{"decision":"act","action":{"tool":"write_file""#).is_err());
+        assert!(parse_model_response(r#"{"decision":"complete" "summary":"Hi"}"#).is_err());
+        assert!(parse_model_response(r#"{"decision":"complete","summary":"Hi"} extra"#).is_err());
+    }
+    #[test]
+    fn greeting_completes_with_desktop_access_enabled() {
+        greeting_fixture(false);
+    }
+    #[test]
+    fn fresh_greeting_uses_one_short_model_call() {
+        greeting_fixture(true);
+    }
+    #[test]
+    fn conversation_route_rejects_tool_dispatch() {
+        assert!(validate_model_decision("conversation", &json!({"decision":"act","action":{"tool":"list_dir","path":"."}})).is_err());
+        assert!(validate_model_decision("conversation", &json!({"decision":"complete","summary":"Hi!","claims":[]})).is_err());
+    }
+    fn greeting_fixture(fresh: bool) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0u8; 4096];
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                    let length = headers.lines().find_map(|line| line.strip_prefix("content-length:"))
+                        .unwrap().trim().parse::<usize>().unwrap();
+                    if request.len() >= end + 4 + length { break; }
+                }
+            }
+            if fresh {
+                assert!(request.len() < 5000, "Greeting must not carry the full tool prompt");
+            }
+            let body = json!({"load_duration":42,"prompt_eval_count":12,"eval_count":8,"message":{"content":json!({"decision":"complete","summary":"Hi! How can I help?"}).to_string()}}).to_string();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        let service = Chats::new(root.path());
+        let mut chat = budget_chat(0,0.0);
+        chat.id = "123456-0".into();
+        std::fs::create_dir_all(root.path().join("conversations").join(&chat.id)).unwrap();
+        chat.workspace = root.path().join("files");
+        std::fs::create_dir_all(&chat.workspace).unwrap();
+        chat.access.desktop = true;
+        chat.execution.original_request = "hi".into();
+        chat.provider = connections::Connection {kind:"ollama".into(),endpoint,model:"fixture".into()};
+        if fresh {
+            push(&mut chat, "user", "You", "hi");
+        } else {
+            chat.tasks = tasks(&json!({"tasks":[{"agent":"Assistant","instruction":"Reply naturally to hi"}]})).unwrap();
+            chat.tasks[0].status = "Done".into();
+        }
+        service.drive(&mut chat,&AtomicBool::new(false)).unwrap();
+        server.join().unwrap();
+        assert_eq!(chat.status,"Completed");
+        assert_eq!(chat.messages.last().unwrap().text,"Hi! How can I help?");
+        assert!(chat.evidence.is_empty());
+        assert_eq!(chat.execution.model_timings.len(), 1);
+        assert_eq!(chat.execution.model_timings[0].provider.load_duration_ns, Some(42));
+        assert_eq!(chat.prompt_tokens, 12);
+        assert_eq!(chat.completion_tokens, 8);
+    }
+    #[test]
+    fn visual_events_report_explicit_wait_and_terminal_state() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("chat.sqlite3");
+        let mut chat = budget_chat(0, 0.0);
+        chat.pending = Some(json!({"action":{"tool":"run_shell"}}));
+        crate::chat_store::save(&path, &chat).unwrap();
+        chat.activity = Some(json!({"kind":"waiting","role":"command"}));
+        crate::chat_store::save(&path, &chat).unwrap();
+        let loaded = crate::chat_store::load(&path).unwrap();
+        let start = loaded.activity_events.iter().find(|e| e["type"] == "tool:start").unwrap();
+        let wait = loaded.activity_events.iter().find(|e| e["type"] == "tool:waiting").unwrap();
+        assert_eq!(start["data"]["id"], wait["data"]["id"]);
+        chat.pending = None;
+        chat.activity = None;
+        chat.evidence.push(json!({"action":"run_shell","ok":true}));
+        chat.status = "Completed".into();
+        crate::chat_store::save(&path, &chat).unwrap();
+        let loaded = crate::chat_store::load(&path).unwrap();
+        assert!(loaded.activity_events.iter().any(|e| e["type"] == "klyne:complete"));
+        assert_eq!(loaded.activity_events.iter().filter(|e| e["type"] == "tool:waiting").count(), 1);
     }
     #[test]
     fn legacy_completion_warning_migrates_without_replaying_or_claiming_success() {
@@ -2975,6 +3510,7 @@ mod tests {
         let path = root.path().join("chat.sqlite3");
         let secret = "synthetic-secret-987654321".to_owned();
         let mut chat = budget_chat(0, 0.0);
+        chat.execution.diagnostics.record(0, "worker", 0, "decision_schema", Some(&secret));
         chat.pending = Some(json!({"action":{"tool":"run_shell","args":[secret.clone()]}}));
         chat.messages.push(Message {
             role: "user".into(),

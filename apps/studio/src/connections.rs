@@ -40,7 +40,7 @@ impl Connection {
         prompt_maker: bool,
         screenshot: Option<&Path>,
         stop: &AtomicBool,
-    ) -> io::Result<(String, ModelUsage)> {
+    ) -> io::Result<(String, ModelUsage, crate::performance::ProviderTiming)> {
         let prompt = format!("{system}\n{}", context);
         if prompt.len() > 128 * 1024 {
             return Err(error("Conversation context exceeded its limit"));
@@ -68,7 +68,7 @@ impl Connection {
                 completion_tokens: response["eval_count"].as_u64().unwrap_or(0),
                 cost_usd: 0.0,
             };
-            return Ok((text, usage));
+            return Ok((text, usage, crate::performance::ProviderTiming::from_ollama(&response)));
         }
         if self.kind == "demo" {
             return Err(error(
@@ -81,7 +81,7 @@ impl Connection {
             usage: ModelUsage::default(),
         };
         let text = agent.decide_text(&prompt, system, screenshot, stop)?;
-        Ok((text, agent.usage))
+        Ok((text, agent.usage, crate::performance::ProviderTiming::default()))
     }
     pub fn parse(value: &Value) -> io::Result<Self> {
         let mut config: Self = if value.is_null() {

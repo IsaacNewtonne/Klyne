@@ -30,16 +30,16 @@ fn public_demo_runs_without_backend_and_responds_to_controls() {
         assert!(Instant::now() < deadline, "Demo did not complete");
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(browser.eval("document.querySelector('#ambient-embers').width>0 && getComputedStyle(document.querySelector('#ambient-embers')).display!=='none'").unwrap(),true);
+    assert_eq!(browser.eval("document.querySelector('#prod-reactor').width>0 && getComputedStyle(document.querySelector('#prod-reactor')).display!=='none' && document.querySelector('#prod-core-state').textContent==='COMPLETE'").unwrap(),true);
     browser.eval("window.dispatchEvent(new PointerEvent('pointermove',{clientX:200,clientY:200,pointerType:'mouse'}))").unwrap();
-    browser.click("#prod-details").unwrap();
+    browser.click("#prod-open-steps").unwrap();
     assert_eq!(
         browser
-            .eval("document.querySelector('#prod-details').getAttribute('aria-pressed')==='true'")
+            .eval("document.querySelector('#prod-inspector').open && document.querySelector('#prod-inspector-title').textContent==='Steps'")
             .unwrap(),
         true
     );
-    browser.click("#prod-details").unwrap();
+    browser.click("#prod-inspector button").unwrap();
     std::fs::write(root.join("site/preview.png"), browser.screenshot().unwrap()).unwrap();
     browser.click("#demo-run").unwrap();
     browser.click("#demo-stop").unwrap();

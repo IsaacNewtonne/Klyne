@@ -1,5 +1,6 @@
 /* Production motion vocabulary: converge, dock, unfold, connect, settle, hold. */
 #production{max-width:1120px;margin:12px auto 22px;color:#eee7df}
+#ambient-embers{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:-1}
 .prod-heading{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:14px}
 .prod-eyebrow{font:9px/1.5 Consolas,monospace;letter-spacing:1.7px;color:#c89471;margin:0 0 10px}
 .prod-heading h2{font-size:25px;letter-spacing:-.8px;font-weight:650}
@@ -28,6 +29,8 @@
 #prod-model-panel{text-align:center;border-color:#875030;box-shadow:0 0 40px #ff792a08,inset 0 1px #ffb16e16;overflow:hidden}
 #prod-model-panel:before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at 50% 35%,#ff6b2b16,transparent 65%)}
 #prod-core{position:relative;display:grid;place-items:center;width:100px;height:100px;margin:22px auto 20px;isolation:isolate}
+html[data-klyne-mode=working] #prod-core:before{content:"";position:absolute;inset:-2px;border-radius:inherit;padding:2px;background:conic-gradient(from var(--ember-angle),#ff6b2b0d 0deg,#ff6b2b25 65deg,#ff6229 100deg,#ffd2a2 115deg,#ff6b2b20 135deg,#ff6b2b08 210deg,#e34b2033 265deg,#ff9b51 295deg,#ff6b2b0d 325deg);mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);mask-composite:exclude;pointer-events:none;animation:ember-orbit 9s linear infinite;z-index:2;opacity:.45}
+html[data-klyne-mode=working] #prod-core:after{content:"";position:absolute;inset:0;border-radius:inherit;background:radial-gradient(ellipse 260px 140px at var(--pointer-x) var(--pointer-y),#ff6b2b14,transparent 75%);pointer-events:none;z-index:-1}
 .core-glyph{font-size:52px;color:#ffb478;text-shadow:0 0 14px #ff6b2b80;line-height:1;z-index:1}
 .core-orbit{position:absolute;inset:0;border:1px solid #b96730;border-radius:32%;transform:rotate(45deg);box-shadow:0 0 18px #ff6b2b12,inset 0 0 18px #ff6b2b12}
 .core-orbit.orbit-b{inset:10px;border-color:#744123;border-radius:50%;transform:rotate(-25deg)}
@@ -78,7 +81,7 @@
 #production[data-status=Completed] #prod-result{margin-bottom:24px}
 #prod-inspector{background:#161414;border:1px solid #65422c;border-radius:12px;padding:16px;margin-top:16px}#prod-inspector summary{font-size:12px}#prod-inspector pre{margin-bottom:0}
 .production-on #messages{display:none}.production-on #conversation{max-width:1120px}.production-on #work-panel{margin-top:0;background:#141314;border-color:#3c2c22;padding:16px 18px}.production-on #work-panel>.work-heading,.production-on #tasks{display:none}.production-on #activity-details{margin-top:0;padding-top:0;border-top:0}
-.production-busy .composer-wrap{max-width:1000px;padding-top:6px}.production-busy #chat-form{padding:10px 14px}.production-busy textarea#instruction{min-height:38px;height:42px;padding-bottom:3px;font-size:13px}.production-busy .mode-row{margin-bottom:4px}.production-busy .composer-bottom{padding-top:6px}
+.production-on .composer-wrap{max-width:1000px;padding-top:6px}.production-on #chat-form{padding:10px 14px}.production-on textarea#instruction{min-height:38px;height:42px;padding-bottom:3px;font-size:13px}.production-on .mode-row{margin-bottom:4px}.production-on .composer-bottom{padding-top:6px}
 #prod-graph[data-layout=flow] .prod-assignment-panel,#prod-graph[data-layout=flow] .prod-capability-panel{animation:prod-reveal 1.8s ease-out}
 #production[data-status=Completed] #prod-core{width:72px;height:72px;margin-top:12px;margin-bottom:15px}#production[data-status=Completed] .core-glyph{font-size:38px}
 #production[data-status=Completed] #prod-model-panel .prod-explainer{display:none}
@@ -87,6 +90,7 @@
 @keyframes prod-flow{to{stroke-dashoffset:-24}}
 @keyframes prod-orbit{to{transform:rotate(405deg)}}
 @keyframes prod-breathe{50%{transform:scale(.85);opacity:.6}}
+@keyframes ember-orbit{to{--ember-angle:360deg}}
 @keyframes prod-reveal{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @media(max-width:1120px) and (min-width:701px){#prod-graph{grid-template-columns:minmax(155px,.8fr) minmax(180px,1fr);gap:22px}.prod-capability-panel{grid-column:1/-1}#prod-capabilities{grid-template-columns:repeat(4,1fr)}.prod-panel{padding:14px}.prod-heading h2{font-size:22px}}
 @media(max-width:700px){
@@ -99,7 +103,7 @@
  #prod-capabilities{grid-template-columns:repeat(4,1fr);gap:6px}.prod-capability{padding:10px 6px}.prod-capability strong{font-size:9px}.prod-capability small{font-size:8px}
  .prod-legend{gap:10px}.prod-legend>span:last-child{margin-left:0;width:100%}#prod-edges{display:none}.prod-panel:after{content:'↓';position:absolute;bottom:-18px;left:50%;color:#ac6a38;font-size:12px}.prod-capability-panel:after{display:none}
  #prod-result{padding:17px;gap:12px}#prod-result-title{font-size:17px}#prod-result-text{font-size:12px}.prod-stream{padding:15px}
- .production-busy textarea#instruction{font-size:16px;height:58px;min-height:58px}.production-busy .composer-caption{flex-wrap:wrap}
+ .production-on textarea#instruction{font-size:16px;height:58px;min-height:58px}.production-on .composer-caption{flex-wrap:wrap}
  #settings-button{white-space:nowrap}
 }
 @media(prefers-reduced-motion:reduce){#production *,#production *:before,#production *:after{animation:none!important;transition:none!important}}
@@ -446,4 +450,272 @@
 @media(prefers-reduced-motion:reduce){#production .prod-capability:after{animation:none!important}}
 #production.prod-paused .prod-capability:after{animation-play-state:paused}
 @media(max-width:650px){#production #prod-model-panel{overflow:hidden}#production #prod-graph{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}#production .prod-heading button{max-width:100%}#production .prod-event>span{min-width:0;overflow-wrap:anywhere}#production #prod-surface{min-width:0}#production .prod-meta{flex-wrap:wrap}#production #prod-metrics{max-width:100%;overflow-wrap:anywhere}}
-@media(min-width:1051px) and (max-height:1000px){#production #prod-graph{grid-template-rows:repeat(4,minmax(65px,auto));gap:9px}#production #prod-model-panel{min-height:305px}#production #prod-core{height:230px}#production .prod-assignment-panel{max-height:335px}#production .prod-capability{padding:11px 12px}#production .prod-heading{padding-top:14px;padding-bottom:10px}#production .prod-meta{padding-bottom:14px}#production .prod-intent{margin-top:8px;margin-bottom:0}#production .prod-stream{padding-top:10px;padding-bottom:10px}#production #prod-events{max-height:145px}.production-busy .mode-row{display:none}.production-busy #instruction{min-height:38px;height:38px}}
+@media(min-width:1051px) and (max-height:1000px){#production #prod-graph{grid-template-rows:repeat(4,minmax(65px,auto));gap:9px}#production #prod-model-panel{min-height:305px}#production #prod-core{height:230px}#production .prod-assignment-panel{max-height:335px}#production .prod-capability{padding:11px 12px}#production .prod-heading{padding-top:14px;padding-bottom:10px}#production .prod-meta{padding-bottom:14px}#production .prod-intent{margin-top:8px;margin-bottom:0}#production .prod-stream{padding-top:10px;padding-bottom:10px}#production #prod-events{max-height:145px}.production-on #instruction{min-height:38px;height:38px}}
+
+/* Ember console compact: fits on one screen by collapsing vertical space */
+#production[data-theme=ember-console][data-compact=true] #prod-model-panel{min-height:220px}
+#production[data-theme=ember-console][data-compact=true] #prod-core{height:160px}
+#production[data-theme=ember-console][data-compact=true] #prod-reactor{inset:-20px -25px;width:calc(100% + 50px);height:calc(100% + 40px)}
+#production[data-theme=ember-console][data-compact=true] .reactor-wordmark{font-size:22px}
+#production[data-theme=ember-console][data-compact=true] .reactor-wordmark small{font-size:7px;margin-top:4px}
+#production[data-theme=ember-console][data-compact=true] #prod-core-state{font-size:12px;margin:4px 0}
+#production[data-theme=ember-console][data-compact=true] #prod-provider{font-size:11px}
+#production[data-theme=ember-console][data-compact=true] #prod-model{font-size:9px;margin:4px 0}
+#production[data-theme=ember-console][data-compact=true] #prod-request{font-size:9px;margin:4px 0}
+#production[data-theme=ember-console][data-compact=true] .prod-assignment-panel{max-height:280px;padding:12px}
+#production[data-theme=ember-console][data-compact=true] .prod-health{padding-bottom:10px;margin-bottom:10px}
+#production[data-theme=ember-console][data-compact=true] .prod-gauge{width:72px;height:72px;margin:8px auto}
+#production[data-theme=ember-console][data-compact=true] .prod-gauge strong{font-size:17px}
+#production[data-theme=ember-console][data-compact=true] .prod-health dl{gap:8px 5px;font-size:9px}
+#production[data-theme=ember-console][data-compact=true] .prod-health-note{font-size:8px}
+#production[data-theme=ember-console][data-compact=true] .prod-worker{padding:6px 0}
+#production[data-theme=ember-console][data-compact=true] .prod-worker strong{font-size:10px}
+#production[data-theme=ember-console][data-compact=true] .prod-worker em{font-size:8px}
+#production[data-theme=ember-console][data-compact=true] .prod-worker-icon{font-size:10px;width:18px;height:18px}
+#production[data-theme=ember-console][data-compact=true] .prod-assignment-panel .prod-panel-heading .prod-eyebrow{font-size:8px}
+#production[data-theme=ember-console][data-compact=true] .prod-capability{padding:10px 8px}
+#production[data-theme=ember-console][data-compact=true] .prod-capability>span{font-size:20px;width:32px;height:36px}
+#production[data-theme=ember-console][data-compact=true] .prod-capability strong{font-size:11px}
+#production[data-theme=ember-console][data-compact=true] .prod-capability small{font-size:9px}
+#production[data-theme=ember-console][data-compact=true] .prod-stream{padding:10px 14px}
+#production[data-theme=ember-console][data-compact=true] .prod-stream .prod-panel-heading{margin-bottom:4px}
+#production[data-theme=ember-console][data-compact=true] .prod-stream .prod-eyebrow{font-size:9px}
+#production[data-theme=ember-console][data-compact=true] #prod-open-log,#production[data-theme=ember-console][data-compact=true] #prod-open-result{font-size:9px;padding:0 0 4px}
+#production[data-theme=ember-console][data-compact=true] #prod-events{max-height:140px}
+#production[data-theme=ember-console][data-compact=true] .prod-event{padding:6px 0;font-size:9px}
+#production[data-theme=ember-console][data-compact=true] .prod-event strong{font-size:9px}
+#production[data-theme=ember-console][data-compact=true] .prod-event small{font-size:9px}
+#production[data-theme=ember-console][data-compact=true] .prod-event>span:last-child{font-size:8px}
+#production[data-theme=ember-console][data-compact=true] #prod-result{margin:8px 0;padding:14px}
+#production[data-theme=ember-console][data-compact=true] #prod-result-title{font-size:13px;margin-bottom:6px}
+#production[data-theme=ember-console][data-compact=true] #prod-result-text{font-size:13px}
+#production[data-theme=ember-console][data-compact=true] #prod-result-icon{width:24px;height:24px;font-size:14px}
+#production[data-theme=ember-console][data-compact=true] .prod-heading{padding:12px 16px 8px}
+#production[data-theme=ember-console][data-compact=true] .prod-heading h2{font-size:21px}
+#production[data-theme=ember-console][data-compact=true] .prod-meta{padding:0 16px 12px}
+#production[data-theme=ember-console][data-compact=true] .prod-intent{margin:8px 0 2px;padding:4px 12px}
+#production[data-theme=ember-console][data-compact=true] .prod-intent p{font-size:12px}
+#production[data-theme=ember-console][data-compact=true] #prod-graph{gap:8px;padding:8px 0}
+#production[data-theme=ember-console][data-compact=true] .prod-panel{border-radius:10px}
+@media(min-width:1051px){
+  #production[data-theme=ember-console][data-compact=true] #prod-graph{grid-template-rows:repeat(4,minmax(55px,auto))}
+}
+
+/* Activity telemetry: motion belongs to a state, never to decoration. */
+@property --cpu{syntax:'<angle>';initial-value:0deg;inherits:false}
+.prod-gauge{transition:--cpu .45s ease-out}
+#production #prod-edges{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-events:none;opacity:1;z-index:0}
+#production #prod-graph{position:relative}
+#production .prod-capability,#production #prod-model-panel,#production .prod-assignment-panel{z-index:1}
+.telemetry-route{fill:none;stroke:#78431f;stroke-width:1;opacity:.3;transition:opacity .3s}
+.telemetry-route.lit{opacity:.75;stroke:#e4883c}
+.energy-packet{fill:none;stroke:#ffc17c;stroke-width:2;stroke-linecap:round;stroke-dasharray:4 96;filter:drop-shadow(0 0 2px #ff8c35);animation:packet-out .8s linear 1 both}
+.energy-packet.inbound{animation-name:packet-in}
+.energy-packet.waiting{animation-duration:2.2s;opacity:.6}
+.energy-packet.result{animation:packet-in .7s ease-out 1 both}
+@keyframes packet-out{0%{stroke-dashoffset:100;opacity:0}10%{opacity:1}90%{opacity:1}100%{stroke-dashoffset:0;opacity:0}}
+@keyframes packet-in{0%{stroke-dashoffset:0;opacity:0}10%{opacity:1}90%{opacity:1}100%{stroke-dashoffset:100;opacity:0}}
+#production .prod-capability[data-state=waiting]{border-color:#b86f37;animation:tool-wait 2.2s ease-in-out infinite}
+#production .prod-capability[data-state=waiting]>span{animation:icon-wait 2.2s ease-in-out infinite}
+#production .prod-capability[data-state=complete]{animation:tool-complete .6s ease-out both}
+#production .prod-capability[data-state=failed]{border-color:#a6533e;color:#e5987b;animation:tool-failed .3s ease-out 1}
+#production .prod-capability[data-state=active]>span{color:#ffd398;box-shadow:0 0 9px #ff872432}
+#prod-cap-files[data-state=active]>span,#prod-cap-desktop[data-state=active]>span{animation:icon-scan 1.2s ease-in-out infinite}
+#prod-cap-browser[data-state=active]>span,#prod-cap-runtime[data-state=active]>span{animation:icon-rotate 2.4s linear infinite}
+#prod-cap-apps[data-state=active]>span{animation:api-send .8s ease-out infinite}
+#prod-cap-memory[data-state=active]>span{animation:memory-pulse 1.8s ease-in-out infinite}
+#prod-cap-terminal[data-state=active]>span{animation:terminal-cursor 1s steps(2,end) infinite}
+#prod-cap-skills[data-state=active]>span{animation:skill-turn 1.4s ease-in-out infinite}
+@keyframes tool-wait{50%{border-color:#d29157;box-shadow:0 0 10px #ff903014}}
+@keyframes icon-wait{50%{opacity:.5}}
+@keyframes tool-complete{0%{border-color:#ffd18d;box-shadow:inset 0 0 15px #ffad4d30}100%{border-color:#634127;box-shadow:none}}
+@keyframes tool-failed{0%{box-shadow:inset 0 0 18px #df492b50}100%{box-shadow:none}}
+@keyframes icon-scan{50%{background-position:0 42px;box-shadow:inset 0 -12px 8px -10px #ffd18d}}
+@keyframes icon-rotate{to{transform:rotate(360deg)}}
+@keyframes api-send{50%{transform:translate(2px,-2px);opacity:.65}}
+@keyframes memory-pulse{50%{transform:rotate(7deg);opacity:.65}}
+@keyframes terminal-cursor{50%{opacity:.35}}
+@keyframes skill-turn{50%{transform:rotate(20deg)}}
+#production #prod-core{cursor:pointer;outline-offset:3px}
+#production #prod-core:focus-visible{outline:1px solid #ffb25e;border-radius:50%}
+#production[data-mode=error] #prod-core{filter:drop-shadow(0 0 3px #b8412520)}
+#production progress::-webkit-progress-value{transition:width .4s ease-out}
+#production progress:indeterminate{background:linear-gradient(90deg,#272323 20%,#9c542a 50%,#272323 80%);background-size:200% 100%;animation:unknown-progress 1.2s linear infinite}
+#production progress:indeterminate[data-waiting=true]{animation-duration:2.4s}
+@keyframes unknown-progress{to{background-position:-200% 0}}
+#production .prod-pipeline [data-state=done]{color:#c89455}
+#production .prod-pipeline [data-state=done] b:after{content:' ✓';font-size:9px}
+#production .prod-pipeline [data-state=active]{color:#ffd095;text-shadow:0 0 6px #ff872a35}
+#production .prod-pipeline [data-state=active]:after{content:'';display:block;height:1px;background:#d88a44;animation:icon-wait 1.4s ease-in-out infinite}
+#production .prod-pipeline [data-state=done]+i{background:#bf793c;transition:background .4s}
+#production[data-mode=waiting] .prod-pipeline [data-state=active]:after{animation-duration:2.2s}
+#production[data-mode=input] .prod-pipeline [data-state=active]:after,#production[data-mode=error] .prod-pipeline [data-state=active]:after{animation:none}
+html:not([data-klyne-mode=working]) #chat-form:before{animation:none;background:#60432c;padding:1px}
+html[data-klyne-mode=working] #chat-form:before{animation:ember-orbit 9s linear infinite;opacity:.45}
+html[data-klyne-mode=input] #chat-form:before{background:#ffad64;animation:input-needed 2.2s ease-in-out infinite}
+@keyframes input-needed{50%{opacity:.35}}
+.chat-item:not([aria-current=true]) small:before{animation:none!important;box-shadow:none!important}
+.chat-item[aria-current=true][data-activity=waiting] small:before{animation-duration:2.2s}
+#task-indicator[data-state=waiting]:before{background:#ffad64}
+html:not([data-klyne-mode=working]) .reactor-wordmark{text-shadow:none}
+#task-indicator[data-state=waiting]:before{animation:ember-pulse 2.2s ease-in-out infinite}
+#connection:before,#prod-health-connection[data-online=true]{animation:none!important}
+button{transition:background-color .12s,border-color .12s,box-shadow .12s,transform .12s}
+button:active{transform:scale(.985)}
+#production #prod-stop:not([hidden]){box-shadow:0 0 0 1px #cc60351a}
+#production.prod-paused *,#production.prod-paused *:before,#production.prod-paused *:after,#production.prod-offscreen *,#production.prod-offscreen *:after{animation-play-state:paused!important}
+html[data-page-hidden=true] *,html[data-page-hidden=true] *:before,html[data-page-hidden=true] *:after{animation-play-state:paused!important}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}.energy-packet{display:none}}
+
+/* Activity fills the space between the header and composer, around a centered model. */
+.app>header>.prod-health{display:flex;align-items:center;gap:12px;padding:0;margin:0;border:0;background:none;flex-shrink:0}
+.app>header .prod-health>.prod-eyebrow,.app>header .prod-health-note{display:none}
+.app>header .prod-gauge{width:38px;height:38px;margin:0;float:none;flex-shrink:0}
+.app>header .prod-gauge strong{font:10px 'Segoe UI',sans-serif}
+.app>header .prod-gauge span{font-size:7px;margin:0}
+.app>header .prod-health dl{display:grid;grid-template-columns:auto auto;margin:0;gap:2px 6px;font-size:9px}
+.app>header .prod-health dt:first-child,.app>header .prod-health dd:first-of-type{display:none}
+.production-on #main{overflow:hidden!important;padding:12px 26px!important}
+#production[data-theme=ember-console][data-view=production]{max-width:none;margin:0;flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
+#production[data-view=production] .prod-heading{padding:0;min-height:36px;flex-wrap:nowrap;border:0;background:none;border-radius:0;gap:8px}
+#production[data-view=production] .prod-heading .prod-eyebrow{display:none}
+#production[data-view=production] .prod-heading h2{font-size:14px;letter-spacing:0;color:#c5b9ac}
+#production[data-view=production] .prod-heading button{padding:7px 10px;font-size:10px;white-space:nowrap}
+#production #prod-notice{color:#ffc183;background:#49290f55;border-color:#885426;max-width:300px;overflow:hidden;text-overflow:ellipsis}
+#production[data-view=production] .prod-meta{padding:3px 0 6px;border:0;border-radius:0;background:none;gap:6px;margin:0;font-size:10px}
+#production[data-view=production] #prod-metrics{font-size:10px}
+#production[data-view=production] #prod-progress{height:2px}
+#production[data-view=production] #prod-surface{flex:1;min-height:0;display:flex;flex-direction:column;overflow:visible}
+#production[data-view=production] .prod-intent,#production[data-view=production] .prod-pipeline,#production[data-view=production] .prod-assignment-panel{display:none}
+#production[data-view=production] #prod-graph{flex:1;min-height:0;grid-template-columns:minmax(130px,1fr) minmax(240px,1.3fr) minmax(130px,1fr);grid-template-rows:repeat(4,minmax(0,1fr));gap:10px 32px;align-content:center;align-items:center;padding:24px max(0px,calc((100% - 1120px)/2));}
+#production[data-view=production] #prod-model-panel{grid-column:2;grid-row:1/5;min-height:0;align-self:center;position:relative;width:100%;height:300px}
+#production[data-view=production] #prod-core{width:100%;height:100%;margin:0}
+#production[data-view=production] #prod-reactor{inset:0;width:100%;height:100%}
+#production[data-view=production] .reactor-wordmark{padding:0;width:58%;max-width:210px;letter-spacing:0;pointer-events:none}
+#production[data-view=production] #prod-provider{display:block;font:600 18px/1.4 'Segoe UI',sans-serif;color:#ffb676;margin:0 0 8px}
+#production[data-view=production] #prod-model{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden;overflow-wrap:anywhere;white-space:normal;max-width:100%;max-height:none;margin:0;font:11px/1.55 'Segoe UI',sans-serif;color:#d9c8b6}
+#production[data-view=production] #prod-core-state{position:absolute;top:100%;margin:0;font-size:10px;letter-spacing:2px}
+#production[data-view=production] #prod-request{display:none!important}
+#production[data-view=production] .prod-capability{width:100%;min-height:58px;max-height:80px;padding:10px 12px}
+#production[data-view=production] .prod-stream{display:flex;align-items:center;justify-content:flex-end;flex-shrink:0;gap:16px;border:0;background:none;padding:4px 0;margin:0;min-height:26px;box-shadow:none}
+#production[data-view=production] .prod-stream .prod-panel-heading,#production[data-view=production] #prod-events{display:none}
+#production[data-view=production] .prod-stream button{float:none;margin:0;padding:5px 0;font-size:10px;border:0;background:none;color:#b7a99a}
+@media(max-height:760px) and (min-width:701px){
+ #production[data-view=production] #prod-model-panel{height:230px}
+ #production[data-view=production] #prod-graph{padding-top:8px;padding-bottom:14px;gap:6px 20px}
+ #production[data-view=production] .prod-capability{min-height:44px;padding:6px 10px}
+ #production[data-view=production] .prod-capability>span{height:30px;font-size:19px}
+}
+@media(max-width:700px){
+ .app>header>.prod-health{gap:0}
+ .app>header .prod-health dl{display:none}
+ .production-on #main{padding:8px 12px!important}
+ #production[data-view=production] .prod-heading{flex-wrap:wrap;gap:5px}
+ #production[data-view=production] .prod-heading>div{display:none}
+ #production[data-view=production] #prod-notice{max-width:100%;font-size:9px}
+ #production[data-view=production] #prod-graph{grid-template-columns:minmax(62px,1fr) minmax(160px,2fr) minmax(62px,1fr);gap:6px;padding:12px 0}
+ #production[data-view=production] #prod-model-panel{grid-column:2;grid-row:1/5;height:210px}
+ #production[data-view=production] .prod-capability{display:flex!important;flex-direction:column;justify-content:center;gap:3px;min-height:54px;padding:5px 3px}
+ #production[data-view=production] .prod-capability>span{width:22px;height:22px;font-size:16px;border:0}
+ #production[data-view=production] .prod-capability strong{font-size:8px;text-align:center}
+ #production[data-view=production] .prod-capability small{display:none}
+ #production[data-view=production] #prod-provider{font-size:14px}
+ #production[data-view=production] #prod-model{font-size:9px;-webkit-line-clamp:4}
+}
+
+#production[data-view=production] #prod-core:before,#production[data-view=production] #prod-core:after{display:none}
+.production-on #production[data-view=production][data-status] #prod-core{width:100%;height:100%;margin:0}
+
+#production[data-view=production] .reactor-wordmark{width:52%;max-width:160px}
+
+/* Motion follows live state; saved failures and completed conversations stay still. */
+.sidebar:after,.sidebar-bottom:after{animation:none!important}
+.chat-item small:before{animation:none!important}
+.chat-item[aria-current=true][data-activity=working] small:before{animation:ember-pulse 1.2s ease-in-out infinite!important}
+.chat-item[aria-current=true][data-activity=waiting] small:before{animation:ember-pulse 2.2s ease-in-out infinite!important}
+#production .prod-capability[data-state=failed],#production .prod-capability[data-state=complete]{animation:none}
+#prod-cap-apps[data-state=active]>span{animation:api-send .65s ease-out 1}
+#prod-cap-terminal[data-state=active]>span{animation:none;position:relative}
+#prod-cap-terminal[data-state=active]>span:after{content:'';position:absolute;right:5px;bottom:9px;width:7px;height:2px;background:#ffd398;animation:terminal-cursor 1s steps(2,end) infinite}
+#production[data-view=production] .prod-meta .prod-pipeline{display:flex;align-items:center;margin:0 auto;padding:0;gap:6px;font-size:8px;flex:0 1 360px;min-height:0;border:0}
+#production[data-view=production] .prod-meta .prod-pipeline i{flex:1;min-width:8px;height:1px;transition:background-color .35s}
+#production .prod-pipeline b{font-weight:500}
+#production #prod-core-state{max-width:100%;text-align:center;line-height:1.5}
+#production[data-mode=input] .energy-packet,#production[data-mode=disconnected] .energy-packet{display:none}
+#production[data-mode=input] .prod-pipeline [data-state=active]:after,#production[data-mode=error] .prod-pipeline [data-state=active]:after,#production[data-mode=complete] .prod-pipeline [data-state=active]:after{animation:none}
+#production[data-mode=waiting] .prod-capability[data-state=active]:after{animation-duration:2.2s}
+#connection[data-state=offline]:before{background:#af7759}
+@media(max-width:700px){#production[data-view=production] .prod-meta .prod-pipeline{flex-basis:auto;gap:3px;font-size:7px}#production .prod-pipeline i{display:none}}
+@media(prefers-reduced-motion:reduce){
+ .chat-item[aria-current=true] small:before{animation:none!important}
+ #production .energy-packet{display:none!important}
+ #production *,#production *:before,#production *:after,.prod-gauge{animation:none!important;transition:none!important}
+}
+
+@property --cpu-intensity{syntax:'<number>';initial-value:0;inherits:false}
+.app>header .prod-gauge{transition:--cpu .45s ease-out,--cpu-intensity .45s ease-out;box-shadow:0 0 10px rgb(255 145 65 / calc(var(--cpu-intensity)*.18))}
+#production[data-mode=idle] .prod-pipeline [data-state=active]:after{animation:none}
+@media(prefers-reduced-motion:reduce){.app>header .prod-gauge{transition:none}}
+
+/* Existing columns gain connected app cards; reflow is animated by retained nodes. */
+#production[data-view=production] #prod-graph{grid-template-rows:repeat(var(--tool-rows,4),minmax(52px,1fr));overflow:auto;scrollbar-width:thin}
+#production .prod-capability[data-connected-app=true]>span svg{width:26px;height:26px;display:block}
+#production .prod-capability[data-connected-app=true][data-state=active]>span{animation:api-send .65s ease-out 1}
+#production #prod-edges{transition:opacity .18s ease}
+#production.layout-morphing #prod-edges{opacity:0}
+@media(max-width:700px){#production .prod-capability[data-connected-app=true]>span svg{width:21px;height:21px}}
+@media(prefers-reduced-motion:reduce){#production #prod-edges{transition:none}}
+
+#production[data-view=production] #prod-graph[data-overflow=false]{overflow:visible}
+
+/* Preserve workspace geometry when Stop is replaced by Send. */
+.production-on #send,.production-on #stop-chat{height:42px;min-height:42px;box-sizing:border-box}
+
+
+/* Dedicated input and output columns preserve a centered activity canvas. */
+#production .prod-desk{display:grid;grid-template-columns:minmax(210px,1fr) minmax(580px,3fr) minmax(210px,1fr);gap:18px;flex:1;min-height:0;padding-top:16px}
+#production .prod-desk[hidden]{display:none}
+#production .prod-input-panel,#production .prod-output-panel{display:flex;flex-direction:column;min-width:0;min-height:0;border:1px solid #49301e;border-radius:16px;background:#151312b8;padding:14px}
+#production .prod-desk h3{font-size:12px;color:#d6c4b3;margin:0 0 14px;font-weight:600}
+#production #prod-input-history,#production #prod-output-content{min-height:0;overflow:auto;overflow-wrap:anywhere;white-space:pre-wrap;font:13px/1.65 'Segoe UI',sans-serif;scrollbar-width:thin;flex:1}
+#production #prod-input-history p,#production #prod-output-content article{margin:0 0 18px}
+#production .prod-output-empty{color:#9e9186}
+.production-on #production .composer-wrap{width:100%;max-width:none;margin:12px 0 0;padding:0;flex-shrink:0}
+.production-on #production #chat-form{padding:10px;min-width:0}
+.production-on #production textarea#instruction{height:110px;min-height:110px;font-size:13px}
+.production-on #production .composer-bottom{flex-wrap:wrap;gap:8px}
+.production-on #production .access-controls{flex-wrap:wrap}
+.production-on #production #send,.production-on #production #stop-chat{margin-left:auto}
+.production-on #production .composer-caption{flex-wrap:wrap;overflow-wrap:anywhere}
+#production .prod-desk #prod-surface{min-width:0}
+#production[data-view=production] .prod-desk #prod-graph{grid-template-columns:minmax(110px,200px) minmax(230px,1fr) minmax(110px,200px);padding:24px 0;gap:10px 12px}
+#production .prod-desk .prod-capability{padding:9px 10px}
+#production .prod-desk .prod-capability>span{width:32px;min-width:32px}
+@media(max-width:1450px){
+ .production-on #main{overflow:auto!important}
+ #production .prod-desk{grid-template-columns:1fr 1fr;flex:none}
+ #production .prod-desk #prod-surface{grid-column:1/-1;grid-row:1;min-height:510px}
+ #production .prod-input-panel,#production .prod-output-panel{min-height:320px;max-height:500px}
+ .production-on #production{overflow:visible;max-height:none;height:auto;flex:none}
+ #production[data-view=production] .prod-desk #prod-graph{grid-template-columns:minmax(70px,200px) minmax(160px,1fr) minmax(70px,200px)}
+}
+@media(max-width:600px){
+ #production .prod-desk{grid-template-columns:1fr;gap:12px}
+ #production .prod-desk #prod-surface{grid-column:1}
+ #production .prod-desk .prod-capability>span{min-width:22px;width:22px}
+}
+
+/* Workspace details remain accessible through the header and tool cards. */
+#production[data-view=production] .prod-stream{display:none}
+
+
+/* Compact side-panel composer: one control row and a short writing area. */
+.production-on #production textarea#instruction{height:68px;min-height:68px}
+.production-on #production .composer-bottom{flex-wrap:nowrap;gap:6px;align-items:center}
+.production-on #production .access-controls{flex-wrap:nowrap;gap:6px;min-width:0}
+.production-on #production .composer-bottom button{padding:7px 8px;font-size:10px}
+.production-on #production #send,.production-on #production #stop-chat{height:34px;min-height:34px;flex-shrink:0}
+.production-on #production #chat-form{border-radius:16px}
+
+
+.app>header .prod-gauge:has(#prod-cpu){background:radial-gradient(closest-side,#131312 84%,transparent 86%),conic-gradient(#f4d34e var(--cpu),#494023 0);box-shadow:0 0 10px rgb(244 211 78 / calc(var(--cpu-intensity)*.18))}

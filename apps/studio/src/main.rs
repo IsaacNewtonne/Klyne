@@ -1,4 +1,7 @@
 mod activation;
+mod autonomy;
+mod diagnostics;
+mod performance;
 mod app_adapter;
 mod app_schema;
 mod broker;
@@ -302,6 +305,10 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
                 "text/javascript",
                 include_bytes!("../web/production.js").as_slice(),
             )),
+            "/activity.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("../web/activity.js").as_slice(),
+            )),
             "/chat.js" => Some((
                 "text/javascript",
                 include_bytes!("../web/chat.js").as_slice(),
@@ -337,6 +344,29 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         }
         if method == "GET" && path == "/api/chats" {
             return studio.chats.list();
+        }
+        if method == "GET"
+            && let Some(rest) = path.strip_prefix("/api/chats/")
+            && let Some((id, query)) = rest.split_once("/pulse")
+        {
+            // Sequenced activity pulse (performance Stage 5): the UI polls
+            // this cheap endpoint and fetches the full snapshot only when
+            // the sequence or status advanced. `serve_ms` is the server-side
+            // cost of this response, not UI render time.
+            let started = std::time::Instant::now();
+            let since = query
+                .strip_prefix('?')
+                .unwrap_or(query)
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("since="))
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0);
+            let mut value = studio.chats.pulse(id, since)?;
+            value["serve_ms"] = serde_json::json!(started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64);
+            return Ok(value);
         }
         if method == "GET"
             && let Some(id) = path.strip_prefix("/api/chats/")
@@ -553,6 +583,21 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
     )
 }
 fn main() -> io::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--stage-runtime") {
+        let arguments: Vec<String> = std::env::args().skip(2).collect();
+        if arguments.len() < 5 || arguments[3] != "--" {
+            return Err(err("usage: klyne-studio --stage-runtime ROOT BINARY TEST_WORKSPACE -- TEST_PROGRAM [ARGS...]"));
+        }
+        let root = fs::canonicalize(&arguments[0])?;
+        safe_dir(&root)?;
+        let binary = fs::canonicalize(&arguments[1])?;
+        let workspace = fs::canonicalize(&arguments[2])?;
+        let digest = activation::digest(&binary)?;
+        activation::run_tests(&root, &binary, &digest, &arguments[4..], &workspace, &AtomicBool::new(false))?;
+        let candidate = activation::stage_from_operator(&root, &binary, &digest)?;
+        println!("{}", json!({"staged":candidate,"note":"The supervisor activates when idle. Check runtime/last-result.json; staging alone is not activation."}));
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--runtime-check") {
         println!("{{\"klyne_runtime_protocol\":1}}");
         return Ok(());

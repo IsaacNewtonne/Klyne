@@ -1,12 +1,44 @@
 //! Cancellation includes DNS, connecting, sending and streaming the response.
+//!
+//! Transport reuse (performance Stage 6): one shared runtime and one shared
+//! client serve all calls, so keep-alive connections survive across model
+//! and API requests. Per-request deadlines, response caps, redirect policy
+//! and cancellation semantics are unchanged. All callers run on plain
+//! worker threads; never call `send` from inside a Tokio runtime.
 use std::{
     io,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 pub struct Response {
     pub status: u16,
     pub body: String,
+}
+
+fn shared() -> (&'static tokio::runtime::Runtime, reqwest::Client) {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    let runtime = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("klyne-http")
+            .worker_threads(2)
+            .build()
+            .expect("shared HTTP runtime")
+    });
+    let client = CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("shared HTTP client")
+        })
+        .clone();
+    (runtime, client)
 }
 
 pub fn send(
@@ -18,18 +50,14 @@ pub fn send(
     if stop.load(Ordering::SeqCst) {
         return Err(io::Error::other("Request cancelled before dispatch"));
     }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+    let (runtime, client) = shared();
     runtime.block_on(async {
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(seconds))
-            .build()
-            .map_err(io::Error::other)?;
         let mut operation = Box::pin(async {
-            let mut response = build(client).send().await.map_err(|e| {
+            let mut response = build(client)
+                .timeout(Duration::from_secs(seconds))
+                .send()
+                .await
+                .map_err(|e| {
                 if e.is_connect() {
                     io::Error::new(
                         io::ErrorKind::ConnectionRefused,
@@ -74,6 +102,32 @@ pub fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_transport_serves_repeated_calls() {
+        use std::{io::Read, io::Write, net::TcpListener, sync::Arc};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0; 512];
+                let _ = stream.read(&mut buf);
+                let body = "ok";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        for _ in 0..2 {
+            let response = send(|http| http.get(url.clone()), 20, 1024, &stop).unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, "ok");
+        }
+        server.join().unwrap();
+    }
     #[test]
     fn cancellation_interrupts_a_server_that_never_responds() {
         use std::{io::Read, net::TcpListener, sync::Arc};

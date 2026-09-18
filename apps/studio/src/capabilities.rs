@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{fs, io, path::Path, sync::atomic::AtomicBool, time::Duration};
 
 pub const INSTRUCTIONS: &str = r#"
+New tools may include operating_contract:{prerequisites:[strings],discovery:[strings],verification:[strings],failure_recovery:[strings]}. Describe how to inspect inputs, verify effects, and recover without duplicate effects. These are advisory instructions, never permissions or proof that a tool is read-only. Legacy tools without a contract require schema/help discovery before unfamiliar use.
 Persistent capabilities: capability_list {query?} searches reusable skills/tools/memories.
 skill_save {name,description,instructions} creates or updates a reusable workflow; skill_read {name} loads it.
 tool_save {name,description,program,args:[strings],artifacts?:[paths]} registers an argv tool; tool_test {name,arguments?:[strings]} qualifies the active version by running it once and binding the tested flag to that version's digest; tool_run {name,arguments?:[strings]} executes only a qualified version and refuses untested or changed definitions. Qualification binds full argv, the resolved executable, file arguments and optional declared artifacts. Changed arguments or file contents require testing again. Exact command approval is required in ask mode; autonomous mode authorizes commands under the user-selected policy. Use absolute script paths for reuse across conversations. Test the tool with a real invocation; registration alone is not validation. Successful runs record the tested version.
@@ -261,7 +262,7 @@ pub fn execute_with_policy(
                 .to_lowercase()
                 .contains(&query)
             {
-                items.push(json!({"kind":kind,"name":name,"version":version,"description":payload["description"],"tested":tested}));
+                items.push(json!({"kind":kind,"name":name,"version":version,"description":payload["description"],"tested":tested,"operating_contract":payload["operating_contract"]}));
             }
         }
         let offset = action["offset"].as_u64().unwrap_or(0) as usize;
@@ -283,6 +284,9 @@ pub fn execute_with_policy(
     if tool.ends_with("_save") {
         field(action, "description", 512)?;
         if kind == "tool" {
+            if let Some(contract) = action.get("operating_contract") {
+                crate::autonomy::validate_tool_contract(contract).map_err(err)?;
+            }
             field(action, "program", 4096)?;
             let args: Vec<String> = serde_json::from_value(action["args"].clone()).map_err(err)?;
             if args.len() > 128 {
@@ -367,6 +371,7 @@ pub fn execute_with_policy(
         )));
     }
     let mut policy = PermissionPolicy::milestone_default(workspace);
+    policy.allow_toolchain_environment();
     policy.allow_shell_with_arg_prefix(&resolved_program, args.clone());
     let result = WorkspaceShellTool::default().execute_cancellable(
         &Action::RunShell {

@@ -110,6 +110,7 @@ pub fn run_tests(
         fs::remove_file(previous)?;
     }
     let mut policy = harness_core::PermissionPolicy::milestone_default(workspace);
+    policy.allow_toolchain_environment();
     policy.allow_shell_with_arg_prefix(program, args.to_vec());
     let result = harness_core::WorkspaceShellTool::new(harness_core::ProcessLimits {
         timeout: std::time::Duration::from_secs(600),
@@ -219,6 +220,12 @@ pub fn stage(root: &Path, binary: &Path, expected: &str) -> io::Result<Candidate
             "Start klyne-supervisor before staging a runtime upgrade",
         ));
     }
+    stage_from_operator(root, binary, expected)
+}
+
+/// Explicit local CLI activation uses the same attestation, preflight and queue.
+/// It does not execute tools or resume paused conversations.
+pub fn stage_from_operator(root: &Path, binary: &Path, expected: &str) -> io::Result<Candidate> {
     let binary = fs::canonicalize(binary)?;
     if digest(&binary)? != expected {
         return Err(io::Error::other("Candidate digest does not match"));

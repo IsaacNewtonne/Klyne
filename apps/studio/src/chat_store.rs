@@ -107,6 +107,89 @@ pub(crate) fn save_with_secrets(path: &Path, chat: &Chat, secrets: &[String]) ->
     // the user bound, so only live secrets scrub — and only values long
     // enough to be unambiguous.
     crate::broker::scrub_value(&mut metadata, secrets);
+    // Append in the same transaction as the snapshot. Short calls remain visible
+    // between polls; IDs correlate dispatch and return without timing guesses.
+    let old_count = tx
+        .query_row(
+            "SELECT count(*) FROM history WHERE kind='evidence'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(err)? as usize;
+    let mut events = prior["activity_events"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut seq = events.last().and_then(|e| e["seq"].as_u64()).unwrap_or(0);
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let mut emit = |kind: &str, data: Value| {
+        seq += 1;
+        events.push(serde_json::json!({"seq":seq,"at":at,"type":kind,"data":data}));
+    };
+    let mut operation = prior["visual_operation"].clone();
+    if before != after {
+        if !after.is_null() && after.get("proposal").is_none() {
+            operation = serde_json::json!({"id":format!("{}:{}",chat.id,tx.last_insert_rowid()),"action":after.get("action").cloned().unwrap_or_else(||after.clone()),"agent":after["agent"],"direction":"outbound"});
+            emit("tool:start", operation.clone());
+        } else if !before.is_null() && before.get("proposal").is_none() && !operation.is_null() {
+            let ok = chat.evidence.len() > old_count && chat.evidence.last().is_some_and(|e| e["ok"] == true);
+            operation["direction"] = Value::String("inbound".into());
+            emit("tool:result", operation.clone());
+            emit(
+                if ok { "tool:complete" } else { "tool:error" },
+                operation.clone(),
+            );
+            operation = Value::Null;
+        }
+    }
+    // Waiting is reported only from an explicit runtime wait, never a timer.
+    if !operation.is_null() && prior["activity"] != metadata["activity"]
+        && chat.activity.as_ref().is_some_and(|a| a["kind"] == "waiting")
+    {
+        let mut waiting = operation.clone();
+        waiting["status"] = Value::String("waiting".into());
+        waiting["operation"] = Value::String("Awaiting response".into());
+        emit("tool:waiting", waiting);
+    }
+    if prior["status"] != metadata["status"] {
+        emit(
+            "workflow:stage_changed",
+            serde_json::json!({"status":chat.status}),
+        );
+        let mode = match chat.status.as_str() {
+            "Completed" => Some("klyne:complete"),
+            "Blocked" | "Interrupted" => Some("klyne:error"),
+            "Needs input" => Some("klyne:input"),
+            "Stopped" => Some("klyne:idle"),
+            _ => None,
+        };
+        if let Some(mode) = mode { emit(mode, serde_json::json!({})); }
+    }
+    if prior["activity"] != metadata["activity"] && matches!(chat.status.as_str(), "Working" | "Planning" | "Reviewing" | "Upgrading" | "Stopping") {
+        emit(
+            if chat.activity.is_some() {
+                "klyne:waiting"
+            } else {
+                "klyne:thinking"
+            },
+            serde_json::json!({"activity":chat.activity}),
+        );
+    }
+    if chat.evidence.len() > old_count {
+        emit(
+            "observation:new",
+            serde_json::json!({"count":chat.evidence.len(),"added":chat.evidence.len()-old_count}),
+        );
+    }
+    if events.len() > 256 {
+        events.drain(..events.len() - 256);
+    }
+    metadata["activity_events"] = Value::Array(events);
+    metadata["visual_operation"] = operation;
+    crate::broker::scrub_value(&mut metadata, secrets);
     for kind in ["messages", "evidence"] {
         let entries = metadata.as_object_mut().unwrap().remove(kind).unwrap();
         let entries = entries.as_array().unwrap();
@@ -159,4 +242,41 @@ pub fn summary(path: &Path) -> io::Result<Value> {
         .map_err(err)?;
     let data: Value = serde_json::from_str(&payload).map_err(err)?;
     Ok(serde_json::json!({"id":data["id"],"title":data["title"],"status":data["status"]}))
+}
+/// Sequenced activity pulse: status, last event sequence, events after
+/// `since`, and the content-free latency breakdown. Lets the UI skip full
+/// snapshot fetches when nothing changed; the full snapshot remains the
+/// fallback for rendering. Reads one row, never the history tables.
+pub fn pulse(path: &Path, since: u64) -> io::Result<Value> {
+    let db = connection(path, false)?;
+    let payload: String = db
+        .query_row("SELECT payload FROM chat WHERE id=1", [], |r| r.get(0))
+        .map_err(err)?;
+    let data: Value = serde_json::from_str(&payload).map_err(err)?;
+    let events = data["activity_events"].as_array().cloned().unwrap_or_default();
+    let seq = events
+        .last()
+        .and_then(|e| e["seq"].as_u64())
+        .unwrap_or(0);
+    let fresh: Vec<Value> = events
+        .into_iter()
+        .filter(|e| e["seq"].as_u64().is_some_and(|s| s > since))
+        .collect();
+    let trace: crate::performance::Trace =
+        serde_json::from_value(data["execution"]["trace"].clone()).unwrap_or_default();
+    let model_calls = data["execution"]["model_timings"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    Ok(serde_json::json!({
+        "id": data["id"],
+        "status": data["status"],
+        "seq": seq,
+        "events": fresh,
+        "trace": trace.report(
+            model_calls,
+            data["prompt_tokens"].as_u64().unwrap_or(0),
+            data["completion_tokens"].as_u64().unwrap_or(0),
+        ),
+    }))
 }
