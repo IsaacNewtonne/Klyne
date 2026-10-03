@@ -1,5 +1,55 @@
 # Test tiers — Phase 0 baseline (2026-09-13 audit)
 
+## Current regression gates (2026-09-28)
+
+### Opt-in live instruction audit (2026-10-01)
+
+After building Studio on Windows, run
+`python scripts/audit-live.py --model <installed-ollama-model>` to exercise
+exact-content file creation, a short text revision, and multiple outputs
+against the actual local provider. Use `--case file`, `--case revision`, or
+`--case multiple` for a targeted repeat. Projects and reports are retained
+under `workspace/live-audit-*`; saved user conversations are untouched.
+Terminal commands require approval and are not approved by the script.
+
+These artifact checks do not grade creative quality. A changed file can pass
+delivery checks while failing the requested improvement. Read the generated
+output and report qualitative failures separately. See the
+[October 1 instruction reliability audit](audit-2026-10-01.md) for measured
+failures and the distinction between fixture success and live task success.
+
+### Automated gates
+
+`.github/workflows/checks.yml` runs for pull requests and manual requests, and is
+called by Pages before deployment. The Linux job checks formatting, strict
+Clippy, non-Studio/non-browser Rust fixtures, Python recovery, JavaScript UI,
+and generated-site parity. The Windows job checks strict Clippy, the complete
+Rust workspace (serial, no fail-fast), JavaScript UI, and Python recovery.
+Browser fixtures use a pinned Playwright Chromium installation in CI.
+
+Run `npm ci --ignore-scripts`, `npx playwright install chromium`, then `npm test`
+for the four UI suites. Linux machines may need
+`npx playwright install --with-deps chromium`. `CHROME_BINARY` overrides the
+browser for both native Rust and JavaScript browser tests. The default local
+JavaScript launcher also recognizes the usual Windows Chrome installation.
+No MCP package directory is needed. The pinned package preserves the exact
+Playwright version used for the local baseline; browser upgrades should update
+the lockfile and rerun the UI corpus.
+
+The settings suite covers New Chat isolation, actual submitted workspace/access,
+trusted defaults, and existing conversation overrides. The Rust settings test
+covers legacy storage migration, per-provider endpoints/models, toggling, and
+reload in both Studio views. Mobile integration failures retain a screenshot
+and element geometry in `workspace/studio-qa/`. Tests write demo previews there
+instead of changing the tracked `site/preview.png`.
+Standalone Studio fixtures own their Windows process trees with a Job Object,
+so stopping or dropping a fixture also closes browsers launched by its tools.
+
+Interactive Windows desktop recovery, app-close, live MCP, and live provider
+evaluation remain separate from CI; a green CI run does not imply those live
+tiers passed. Historical test counts and exclusions below describe their dated
+baselines rather than the current gate.
+
 `cargo test --workspace` is **not** one suite. Tiers separate deterministic
 fixture tests from environment-gated suites so a red run means a real
 regression, not a missing browser or GUI session.

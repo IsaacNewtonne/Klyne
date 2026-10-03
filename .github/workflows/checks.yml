@@ -1,0 +1,67 @@
+name: Regression checks
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: rustup show
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Core fixtures without browser or desktop requirements
+        run: cargo test --locked --workspace --exclude klyne-studio --exclude harness-browser -- --test-threads=1
+      - run: python -m unittest discover -s scripts -p test_klyne_recovery.py
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - name: Check generated presentation assets
+        run: |
+          python scripts/build_site.py
+          git diff --exit-code -- site
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: linux-check-evidence
+          path: workspace/**/*.png
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: rustup show
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install chromium
+      - name: Use the pinned test browser for Rust and JavaScript
+        shell: pwsh
+        run: |
+          $browserPath = node -p "require('playwright').chromium.executablePath()"
+          "CHROME_BINARY=$browserPath" >> $env:GITHUB_ENV
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace --no-fail-fast -- --test-threads=1
+      - run: npm test
+      - run: python -m unittest discover -s scripts -p test_klyne_recovery.py
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: windows-check-evidence
+          path: workspace/studio-qa/

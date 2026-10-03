@@ -1,4 +1,5 @@
 /target/
+/node_modules/
 /workspace/*
 !/workspace/.gitkeep
 /scripts/__pycache__/

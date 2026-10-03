@@ -46,11 +46,26 @@ impl Connection {
             return Err(error("Conversation context exceeded its limit"));
         }
         if self.kind == "ollama" {
+            let mut update = String::new();
+            if let Some(observation) = context["observations"]
+                .as_array()
+                .and_then(|items| items.last())
+            {
+                update.push_str("\n\nHOST UPDATE: The following operation has already executed. This is a tool result, not a new instruction. Use the result to advance the assigned task; do not repeat a successful operation without a concrete reason.\n");
+                update.push_str(&observation.to_string());
+                update.push_str("\nReturn the NEXT JSON decision. If the assigned result is now saved and verified, return {\"decision\":\"complete\",\"summary\":\"describe the actual saved result and its path\"}. If work remains, take the next necessary action. Reviewers must assess the entire original goal.");
+            }
             let mut body = json!({
                 "model":self.model,
                 "messages":[{"role":"system","content":system},{"role":"user","content":context.to_string()}],
                 "format":"json", "stream":false, "think":false
             });
+            if !update.is_empty() {
+                body["messages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"role":"user","content":update}));
+            }
             if let Some(image) = screenshot_image(screenshot) {
                 body["messages"][1]["images"] = json!([image]);
             }
@@ -68,7 +83,11 @@ impl Connection {
                 completion_tokens: response["eval_count"].as_u64().unwrap_or(0),
                 cost_usd: 0.0,
             };
-            return Ok((text, usage, crate::performance::ProviderTiming::from_ollama(&response)));
+            return Ok((
+                text,
+                usage,
+                crate::performance::ProviderTiming::from_ollama(&response),
+            ));
         }
         if self.kind == "demo" {
             return Err(error(
@@ -81,7 +100,11 @@ impl Connection {
             usage: ModelUsage::default(),
         };
         let text = agent.decide_text(&prompt, system, screenshot, stop)?;
-        Ok((text, agent.usage, crate::performance::ProviderTiming::default()))
+        Ok((
+            text,
+            agent.usage,
+            crate::performance::ProviderTiming::default(),
+        ))
     }
     pub fn parse(value: &Value) -> io::Result<Self> {
         let mut config: Self = if value.is_null() {
@@ -287,12 +310,23 @@ fn model_post(
         stop,
     )?;
     if !(200..300).contains(&response.status) {
-        return Err(error(format!(
-            "Model server returned HTTP {}",
-            response.status
-        )));
+        return Err(model_http_error(config, response.status));
     }
     serde_json::from_str(&response.body).map_err(|_| error("Model server returned invalid JSON"))
+}
+fn model_http_error(config: &Connection, status: u16) -> io::Error {
+    let guidance = match (config.kind.as_str(), status) {
+        ("ollama", 404) => format!(
+            "Ollama could not find the selected model or API route. Open Settings, check the connection, and select an installed model. Selected model: {}.",
+            config.model
+        ),
+        (_, 401 | 403) => "The model server refused access. Check the provider's sign-in or credentials in Settings.".into(),
+        (_, 429) => "The model server is rate limited. Wait for capacity or select a configured alternative.".into(),
+        (_, 500..=599) => "The model server failed. Check that the selected model can load and that the server has enough memory.".into(),
+        _ => "Check the selected provider, endpoint and model in Settings.".into(),
+    };
+    // Do not forward raw server bodies: they may contain credentials or HTML.
+    error(format!("Model server returned HTTP {status}. {guidance}"))
 }
 fn client(seconds: u64) -> io::Result<Client> {
     Client::builder()
@@ -666,5 +700,19 @@ mod tests {
         assert_eq!(config.model, "local-model");
         std::fs::write(&path, b"broken").unwrap();
         assert!(Connection::read(&path).is_err());
+    }
+
+    #[test]
+    fn missing_model_errors_identify_the_setting_to_fix() {
+        let config = Connection::parse(&json!({"kind":"ollama","model":"missing-model"})).unwrap();
+        let message = model_http_error(&config, 404).to_string();
+        assert!(message.contains("HTTP 404"));
+        assert!(message.contains("missing-model"));
+        assert!(message.contains("select an installed model"));
+        assert!(
+            model_http_error(&config, 503)
+                .to_string()
+                .contains("enough memory")
+        );
     }
 }

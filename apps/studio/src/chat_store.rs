@@ -135,7 +135,8 @@ pub(crate) fn save_with_secrets(path: &Path, chat: &Chat, secrets: &[String]) ->
             operation = serde_json::json!({"id":format!("{}:{}",chat.id,tx.last_insert_rowid()),"action":after.get("action").cloned().unwrap_or_else(||after.clone()),"agent":after["agent"],"direction":"outbound"});
             emit("tool:start", operation.clone());
         } else if !before.is_null() && before.get("proposal").is_none() && !operation.is_null() {
-            let ok = chat.evidence.len() > old_count && chat.evidence.last().is_some_and(|e| e["ok"] == true);
+            let ok = chat.evidence.len() > old_count
+                && chat.evidence.last().is_some_and(|e| e["ok"] == true);
             operation["direction"] = Value::String("inbound".into());
             emit("tool:result", operation.clone());
             emit(
@@ -146,8 +147,12 @@ pub(crate) fn save_with_secrets(path: &Path, chat: &Chat, secrets: &[String]) ->
         }
     }
     // Waiting is reported only from an explicit runtime wait, never a timer.
-    if !operation.is_null() && prior["activity"] != metadata["activity"]
-        && chat.activity.as_ref().is_some_and(|a| a["kind"] == "waiting")
+    if !operation.is_null()
+        && prior["activity"] != metadata["activity"]
+        && chat
+            .activity
+            .as_ref()
+            .is_some_and(|a| a["kind"] == "waiting")
     {
         let mut waiting = operation.clone();
         waiting["status"] = Value::String("waiting".into());
@@ -166,9 +171,16 @@ pub(crate) fn save_with_secrets(path: &Path, chat: &Chat, secrets: &[String]) ->
             "Stopped" => Some("klyne:idle"),
             _ => None,
         };
-        if let Some(mode) = mode { emit(mode, serde_json::json!({})); }
+        if let Some(mode) = mode {
+            emit(mode, serde_json::json!({}));
+        }
     }
-    if prior["activity"] != metadata["activity"] && matches!(chat.status.as_str(), "Working" | "Planning" | "Reviewing" | "Upgrading" | "Stopping") {
+    if prior["activity"] != metadata["activity"]
+        && matches!(
+            chat.status.as_str(),
+            "Working" | "Planning" | "Reviewing" | "Upgrading" | "Stopping"
+        )
+    {
         emit(
             if chat.activity.is_some() {
                 "klyne:waiting"
@@ -253,11 +265,11 @@ pub fn pulse(path: &Path, since: u64) -> io::Result<Value> {
         .query_row("SELECT payload FROM chat WHERE id=1", [], |r| r.get(0))
         .map_err(err)?;
     let data: Value = serde_json::from_str(&payload).map_err(err)?;
-    let events = data["activity_events"].as_array().cloned().unwrap_or_default();
-    let seq = events
-        .last()
-        .and_then(|e| e["seq"].as_u64())
-        .unwrap_or(0);
+    let events = data["activity_events"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let seq = events.last().and_then(|e| e["seq"].as_u64()).unwrap_or(0);
     let fresh: Vec<Value> = events
         .into_iter()
         .filter(|e| e["seq"].as_u64().is_some_and(|s| s > since))

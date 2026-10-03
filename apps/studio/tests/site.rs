@@ -40,7 +40,13 @@ fn public_demo_runs_without_backend_and_responds_to_controls() {
         true
     );
     browser.click("#prod-inspector button").unwrap();
-    std::fs::write(root.join("site/preview.png"), browser.screenshot().unwrap()).unwrap();
+    let artifacts = root.join("workspace/studio-qa");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    std::fs::write(
+        artifacts.join("site-preview.png"),
+        browser.screenshot().unwrap(),
+    )
+    .unwrap();
     browser.click("#demo-run").unwrap();
     browser.click("#demo-stop").unwrap();
     assert_eq!(browser.eval("snapshot.status==='Stopped'").unwrap(), true);

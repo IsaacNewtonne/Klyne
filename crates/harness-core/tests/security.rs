@@ -14,7 +14,13 @@ fn toolchain_environment_is_explicit_and_does_not_include_credentials() {
     let mut child = PermissionPolicy::milestone_default(&workspace.0);
     assert!(child.grant_env_from(&parent, "RUSTUP_HOME").is_err());
     parent.allow_toolchain_environment();
-    for name in ["RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN", "INCLUDE", "LIB"] {
+    for name in [
+        "RUSTUP_HOME",
+        "CARGO_HOME",
+        "RUSTUP_TOOLCHAIN",
+        "INCLUDE",
+        "LIB",
+    ] {
         assert!(child.grant_env_from(&parent, name).is_ok());
     }
     for name in ["OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN"] {

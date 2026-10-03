@@ -2,13 +2,15 @@
 //! timing attribution (request/model/tool/observation IDs, stage timers,
 //! milestones) without a real model. Wall-clock durations are
 //! environment-specific; model-call counts and trace structure are exact.
+mod support;
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
+use support::FixtureProcess;
 
 fn plan() -> Value {
     json!({"summary":"Make the file.","tasks":[{"agent":"Writer","instruction":"Write proof.txt with the requested contents"}]})
@@ -42,19 +44,21 @@ fn read_body(stream: &mut TcpStream) -> String {
     String::from_utf8(body).unwrap()
 }
 struct Server {
-    child: Child,
+    child: FixtureProcess,
     // Keeps the server root alive for the test lifetime; never read directly.
     #[allow(dead_code)]
     root: tempfile::TempDir,
     host: String,
 }
-fn spawn_verified(root: &std::path::Path, port: u16) -> Option<Child> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
-        .args(["--port", &port.to_string(), "--root"])
-        .arg(root)
-        .stdout(Stdio::null())
-        .spawn()
-        .ok()?;
+fn spawn_verified(root: &std::path::Path, port: u16) -> Option<FixtureProcess> {
+    let mut child = FixtureProcess::new(
+        Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
+            .args(["--port", &port.to_string(), "--root"])
+            .arg(root)
+            .stdout(Stdio::null())
+            .spawn()
+            .ok()?,
+    );
     let host = format!("127.0.0.1:{port}");
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
@@ -175,7 +179,12 @@ fn greeting_reports_single_call_trace() {
     assert_eq!(timings[0]["attempt"], 1);
     assert!(timings[0]["prompt_bytes"].as_u64().unwrap() > 0);
     assert_eq!(timings[0]["transport_ok"], true);
-    assert!(timings[0]["call_id"].as_str().unwrap().starts_with("model-"));
+    assert!(
+        timings[0]["call_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("model-")
+    );
     let trace = &chat["execution"]["trace"];
     assert!(trace["request_id"].as_str().unwrap().starts_with("req-"));
     assert_eq!(trace["tool_calls"].as_array().unwrap().len(), 0);
@@ -212,21 +221,35 @@ fn verified_file_task_reports_tool_and_verification_stages() {
         .map(|t| t["call_id"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(
-        call_ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        call_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
         3,
         "model call IDs are unique"
     );
-    assert!(timings.iter().all(|t| t["preparation_ms"].as_u64().is_some()));
+    assert!(
+        timings
+            .iter()
+            .all(|t| t["preparation_ms"].as_u64().is_some())
+    );
     let trace = &chat["execution"]["trace"];
     let tools = trace["tool_calls"].as_array().unwrap();
-    assert!(tools.iter().any(|t| t["tool"] == "write_file" && t["ok"] == true));
+    assert!(
+        tools
+            .iter()
+            .any(|t| t["tool"] == "write_file" && t["ok"] == true)
+    );
     assert!(tools.iter().any(|t| t["tool"] == "read_file:read-back"));
     let tool_ids: Vec<_> = tools
         .iter()
         .map(|t| t["id"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(
-        tool_ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        tool_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
         tool_ids.len(),
         "tool call IDs are unique"
     );
@@ -237,12 +260,21 @@ fn verified_file_task_reports_tool_and_verification_stages() {
         .map(|o| o["id"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(
-        obs_ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        obs_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
         obs_ids.len(),
         "observation IDs are unique"
     );
     // Every persisted evidence entry carries its observation ID.
-    assert!(chat["evidence"].as_array().unwrap().iter().all(|e| e["observation_id"].is_string()));
+    assert!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["observation_id"].is_string())
+    );
     assert!(trace["milestones"]["first_feedback_ms"].is_number());
     assert!(trace["milestones"]["first_action_ms"].is_number());
     assert!(trace["milestones"]["verified_completion_ms"].is_number());
@@ -273,7 +305,10 @@ fn resume_continues_the_same_goal_trace() {
     let done = s.wait(id);
     assert_eq!(done["status"], "Completed", "{done}");
     assert_eq!(done["execution"]["trace"]["request_id"], request_id);
-    assert_eq!(done["execution"]["model_timings"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        done["execution"]["model_timings"].as_array().unwrap().len(),
+        4
+    );
     assert_eq!(fixture.join().unwrap().len(), 4);
 }
 
@@ -294,7 +329,12 @@ fn pulse_endpoint_serves_sequenced_events_with_trace() {
     assert!(seq > 0, "completed work emits sequenced events");
     assert!(!pulse["events"].as_array().unwrap().is_empty());
     assert!(pulse["serve_ms"].as_u64().is_some());
-    assert!(pulse["trace"]["request_id"].as_str().unwrap().starts_with("req-"));
+    assert!(
+        pulse["trace"]["request_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("req-")
+    );
     assert_eq!(pulse["trace"]["model_calls"], 1);
     // Nothing new since the latest sequence: empty events, same sequence.
     let quiet: Value = s.api(&format!("/api/chats/{id}/pulse?since={seq}"), None);

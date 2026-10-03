@@ -59,7 +59,9 @@ fn percentage(cpu_delta: f64, elapsed: f64, cores: usize) -> f64 {
 }
 
 fn parse_gpu(output: &str) -> Option<f64> {
-    output.lines().filter_map(|line| line.trim().parse::<f64>().ok())
+    output
+        .lines()
+        .filter_map(|line| line.trim().parse::<f64>().ok())
         .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
         .reduce(f64::max)
 }
@@ -67,38 +69,60 @@ fn parse_gpu(output: &str) -> Option<f64> {
 fn gpu_percent() -> Option<f64> {
     static GPU: OnceLock<Mutex<Option<(Instant, f64)>>> = OnceLock::new();
     let cache = GPU.get_or_init(|| {
-        std::thread::spawn(|| loop {
-            use std::process::{Command, Stdio};
-            let mut command = Command::new("nvidia-smi");
-            command.args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
-                .stdout(Stdio::piped()).stderr(Stdio::null());
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                command.creation_flags(0x08000000);
-            }
-            let value = command.spawn().ok().and_then(|mut child| {
-                let started = Instant::now();
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => return if status.success() {
-                            child.wait_with_output().ok().and_then(|o| parse_gpu(&String::from_utf8_lossy(&o.stdout)))
-                        } else { None },
-                        Ok(None) if started.elapsed().as_secs_f64() < 1.5 =>
-                            std::thread::sleep(std::time::Duration::from_millis(50)),
-                        _ => { let _ = child.kill(); let _ = child.wait(); return None; }
-                    }
+        std::thread::spawn(|| {
+            loop {
+                use std::process::{Command, Stdio};
+                let mut command = Command::new("nvidia-smi");
+                command
+                    .args([
+                        "--query-gpu=utilization.gpu",
+                        "--format=csv,noheader,nounits",
+                    ])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    command.creation_flags(0x08000000);
                 }
-            });
-            if let Some(cache) = GPU.get() {
-                *cache.lock().unwrap() = value.map(|v| (Instant::now(), v));
+                let value = command.spawn().ok().and_then(|mut child| {
+                    let started = Instant::now();
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                return if status.success() {
+                                    child.wait_with_output().ok().and_then(|o| {
+                                        parse_gpu(&String::from_utf8_lossy(&o.stdout))
+                                    })
+                                } else {
+                                    None
+                                };
+                            }
+                            Ok(None) if started.elapsed().as_secs_f64() < 1.5 => {
+                                std::thread::sleep(std::time::Duration::from_millis(50))
+                            }
+                            _ => {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                return None;
+                            }
+                        }
+                    }
+                });
+                if let Some(cache) = GPU.get() {
+                    *cache.lock().unwrap() = value.map(|v| (Instant::now(), v));
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
         });
         Mutex::new(None)
     });
-    cache.lock().unwrap().as_ref()
-        .filter(|(at, _)| at.elapsed().as_secs() < 6).map(|(_, v)| *v)
+    cache
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(at, _)| at.elapsed().as_secs() < 6)
+        .map(|(_, v)| *v)
 }
 
 pub fn read() -> Value {

@@ -28,6 +28,8 @@ Klyne is under active development. Desktop automation currently targets Windows.
 
 ## Execution guarantees
 
+The [October 1 instruction reliability audit](docs/audit-2026-10-01.md) records current fixes and live-model failures. The local regression suite passes, but repeated-action loops and weak creative review remain measured limits on general task reliability.
+
 A September 2026 technical audit ([AUDIT-2026-09-13.md](AUDIT-2026-09-13.md)) drove nine upgrade phases. The [UX and autonomy re-audit](docs/audit-2026-09-13-ux-autonomy.md) identifies remaining release blockers; passing fixtures does not establish unattended general-purpose reliability.
 
 - **Choose command autonomy once.** Settings offers exact-command approval or autonomous Terminal commands for the conversation. Terminal off and read-only review still deny execution. Credentials remain origin-bound; DELETE approvals bind the resolved origin, path/query and body.
@@ -57,6 +59,8 @@ The Windows installer adds `klyne.cmd` beside Cargo in its existing PATH directo
 
 Select your provider in Settings and check the connection. Enable only the tools needed for your task. Terminal and desktop access can act on your real computer; the public demo has neither capability.
 
+With Terminal access enabled, you can include an existing project folder directly in your chat request. If the conversation still uses its default workspace and the request identifies one folder, Klyne selects it automatically. Absolute file paths inside that project are accepted, and reading a folder lists its contents. An explicitly selected project is preserved; ambiguous folder references are not automatically selected.
+
 The runtime stores local conversations and generated artifacts under `workspace/`, which is excluded from Git. No model weights are bundled. Chrome or Edge is needed for browser workflows; Node/npm is needed for the curated browser MCP adapter. See [provider setup](docs/studio-providers.md) and [app connections](docs/app-connections.md).
 
 ## Development
@@ -64,7 +68,17 @@ The runtime stores local conversations and generated artifacts under `workspace/
 ```powershell
 cargo test --locked -p harness-core
 cargo test --locked -p klyne-studio --bin klyne-studio --test chat --test runtime -- --test-threads=1
+npm ci --ignore-scripts
+npx playwright install chromium
+npm test
 ```
+
+UI tests use the pinned Playwright dependency in `package-lock.json`; they do not
+depend on an MCP installation. Set `CHROME_BINARY` to test against a specific
+installed browser. Linux CI runs the core fixtures and UI checks; Windows CI
+runs the full Rust workspace and UI checks. Both gates must pass before the
+Pages workflow deploys. Dedicated interactive desktop and live integration
+checks remain separate tiers.
 
 Studio browser tests require an installed browser. The optional live MCP test is ignored by default. Windows desktop fixture checks can be run with `powershell -MTA -NoProfile -File scripts/test_desktop_recovery.ps1`; they operate a disposable test window. With Edge installed, `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-app-close.ps1` opens and closes a disposable app window and verifies its observed process tree exits.
 

@@ -66,34 +66,67 @@ pub fn requests_tool_evidence(question: &str) -> bool {
             .any(|s| q.contains(s))
 }
 
-
 pub fn browser_route_question(question: &str) -> bool {
     let q = question.to_lowercase();
     (q.contains("cdp") || q.contains("browser_open") || q.contains("isolated chrome"))
-        && (q.contains("which session") || q.contains("attach or open") || q.contains("which tab") || q.contains("should i use"))
+        && (q.contains("which session")
+            || q.contains("attach or open")
+            || q.contains("which tab")
+            || q.contains("should i use"))
 }
 
 pub fn browser_state_question(question: &str) -> bool {
     let q = question.to_lowercase();
-    let state = ["current url", "address bar", "address-bar", "current page title"]
-        .iter()
-        .any(|s| q.contains(s));
+    let state = [
+        "current url",
+        "address bar",
+        "address-bar",
+        "current page title",
+    ]
+    .iter()
+    .any(|s| q.contains(s));
     let request = ["what", "tell me", "provide", "confirm", "which url"]
         .iter()
         .any(|s| q.contains(s));
-    let blocker = ["sign in", "log in", "password", "permission", "access disabled", "cannot inspect", "can't inspect", "multiple profiles", "which profile"]
-        .iter()
-        .any(|s| q.contains(s));
+    let blocker = [
+        "sign in",
+        "log in",
+        "password",
+        "permission",
+        "access disabled",
+        "cannot inspect",
+        "can't inspect",
+        "multiple profiles",
+        "which profile",
+    ]
+    .iter()
+    .any(|s| q.contains(s));
     state && request && !blocker
 }
 
 pub fn profile_inspection_question(question: &str) -> bool {
     let q = question.to_lowercase();
     q.contains("profile")
-        && ["which", "exact profile", "confirm", "list", "case-sensitive"]
-            .iter().any(|s| q.contains(s))
-        && !["password", "sign in", "log in", "access disabled", "cannot inspect", "can't inspect", "emergency stop"]
-            .iter().any(|s| q.contains(s))
+        && [
+            "which",
+            "exact profile",
+            "confirm",
+            "list",
+            "case-sensitive",
+        ]
+        .iter()
+        .any(|s| q.contains(s))
+        && ![
+            "password",
+            "sign in",
+            "log in",
+            "access disabled",
+            "cannot inspect",
+            "can't inspect",
+            "emergency stop",
+        ]
+        .iter()
+        .any(|s| q.contains(s))
 }
 
 pub fn existing_browser_profile(goal: &str) -> bool {
@@ -112,18 +145,32 @@ mod tests {
     use super::*;
     #[test]
     fn profile_selection_requires_inspection_first() {
-        assert!(profile_inspection_question("Which specific profile(s) should I open? Please provide the exact profile name(s) to open (case-sensitive, e.g., 'mrmuller'). I can list the visible profiles; please confirm."));
+        assert!(profile_inspection_question(
+            "Which specific profile(s) should I open? Please provide the exact profile name(s) to open (case-sensitive, e.g., 'mrmuller'). I can list the visible profiles; please confirm."
+        ));
         assert!(profile_inspection_question("Which profile should I use?"));
-        assert!(!profile_inspection_question("Please enter the profile password."));
-        assert!(!profile_inspection_question("I cannot inspect profiles. Which one should I use?"));
+        assert!(!profile_inspection_question(
+            "Please enter the profile password."
+        ));
+        assert!(!profile_inspection_question(
+            "I cannot inspect profiles. Which one should I use?"
+        ));
     }
     #[test]
     fn observable_browser_state_is_not_user_input() {
-        assert!(browser_state_question("What is the current URL showing in the address bar? I need to verify we're on the right page before navigating to whatsapp.com."));
-        assert!(browser_state_question("Please tell me the current page title."));
+        assert!(browser_state_question(
+            "What is the current URL showing in the address bar? I need to verify we're on the right page before navigating to whatsapp.com."
+        ));
+        assert!(browser_state_question(
+            "Please tell me the current page title."
+        ));
         assert!(!browser_state_question("Which URL should I open?"));
-        assert!(!browser_state_question("I cannot inspect the browser. Please provide the current URL."));
-        assert!(!browser_state_question("Which profile should I use? Please confirm the address bar."));
+        assert!(!browser_state_question(
+            "I cannot inspect the browser. Please provide the current URL."
+        ));
+        assert!(!browser_state_question(
+            "Which profile should I use? Please confirm the address bar."
+        ));
         assert!(!browser_state_question("Please sign in to continue."));
     }
     #[test]
@@ -145,7 +192,9 @@ mod tests {
     }
     #[test]
     fn existing_profiles_and_tool_requests_are_explicit() {
-        assert!(browser_route_question("Which session should I use: CDP or browser_open?"));
+        assert!(browser_route_question(
+            "Which session should I use: CDP or browser_open?"
+        ));
         assert!(!browser_route_question("Which profile: Personal or Work?"));
         assert!(existing_browser_profile(
             "Open Chrome, my work profile, then the website"

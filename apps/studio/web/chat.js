@@ -40,12 +40,28 @@ function renderStatus(){
 }
 const drafts = new Map();
 let configuredChat=null;
+function trustedLaptopDefault(){try{return localStorage.getItem('klyne-trusted-laptop')==='true';}catch(_){return false;}}
+function resetNewChatSettings(){
+  configuredChat=null;
+  const trusted=trustedLaptopDefault();
+  for(const id of ['access-web','access-terminal','access-desktop','access-apps'])$(id).checked=trusted;
+  $('command-policy').value=trusted?'autonomous':'ask';
+  for(const id of ['max-tokens','max-cost','max-steps','max-seconds','max-reviews'])$(id).value=0;
+  $('host-workspace').value='';$('writing-mode').value='general';
+  accessChanged();modeChanged();
+}
 function hydrateExecution(chat){
   if(!chat||configuredChat===chat.id)return;
   configuredChat=chat.id;
+  if(chat.provider && Object.hasOwn(names,chat.provider.kind)){
+    $('provider-kind').value=chat.provider.kind;configureProvider(chat.provider);
+  }
   $('command-policy').value=chat.execution?.command_policy||'ask';
   $('max-tokens').value=chat.execution?.max_tokens||0;$('max-cost').value=chat.execution?.max_cost_usd||0;
   $('max-steps').value=chat.limit||0;$('max-seconds').value=chat.execution?.timeout_seconds||0;$('max-reviews').value=chat.execution?.max_review_rounds||0;
+  $('host-workspace').value=chat.access?.terminal?chat.workspace||'':'';
+  for(const kind of ['web','terminal','desktop','apps'])$('access-'+kind).checked=!!chat.access?.[kind];
+  $('writing-mode').value=chat.prompt_maker?'prompt_maker':'general';accessChanged();modeChanged();
 }
 
 function toast(message) { $('toast').textContent=message; $('toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').hidden=true,4000); }
@@ -154,13 +170,12 @@ async function refresh() {
 }
 function closeSidebar() {$('sidebar').classList.remove('open');$('menu').setAttribute('aria-expanded','false');}
 async function select(id) {
-  drafts.set(selected,$('instruction').value);selected=id;snapshot=null;pulseSeq=0;
+  drafts.set(selected,$('instruction').value);selected=id;snapshot=null;pulseSeq=0;configuredChat=null;
+  if(!id)resetNewChatSettings();
   $('instruction').value=drafts.get(id)||'';$('form-error').textContent='';closeSidebar();render();renderList();
-  if(!id) { $('command-policy').value='ask';$('max-tokens').value=0;$('max-cost').value=0;$('instruction').focus();return; }
+  if(!id) { $('instruction').focus();return; }
   try { const fresh=await api(`/api/chats/${id}`);if(id!==selected)return;snapshot=fresh;
-    $('command-policy').value=fresh.execution?.command_policy||'ask';$('max-tokens').value=fresh.execution?.max_tokens||0;$('max-cost').value=fresh.execution?.max_cost_usd||0;$('max-steps').value=fresh.limit||0; $('max-seconds').value=fresh.execution?.timeout_seconds||0; $('max-reviews').value=fresh.execution?.max_review_rounds||0; $('host-workspace').value=fresh.access.terminal?fresh.workspace:'';
-    $('writing-mode').value=fresh.prompt_maker?'prompt_maker':'general';modeChanged();
-    $('access-apps').checked=!!fresh.access.apps;$('access-web').checked=fresh.access.web;$('access-terminal').checked=fresh.access.terminal;$('access-desktop').checked=!!fresh.access.desktop;accessChanged();render();$('main').scrollTop=0;
+    render();$('main').scrollTop=0;
   }catch(e){if(id===selected)$('form-error').textContent=e.message;}
 }
 $('chat-list').onclick=e=>{const options=e.target.closest('[data-options]');if(options){openChatOptions(options.dataset.options);return;}const button=e.target.closest('[data-chat]');if(button)select(button.dataset.chat);};
@@ -186,7 +201,7 @@ $('chat-form').onsubmit=async e=>{
   submitting=true;$('send').textContent='…';$('form-error').textContent='';render();
   const source=selected;
   try {
-    const data=await api('/api/chats',{id:source,message,execution:executionConfig(),workspace:$('host-workspace').value.trim(),prompt_maker:$('writing-mode').value==='prompt_maker',provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,apps:$('access-apps').checked,desktop:$('access-desktop').checked}});
+    const data=await api('/api/chats',{id:source,message,execution:executionConfig(),workspace:$('access-terminal').checked?$('host-workspace').value.trim():'',prompt_maker:$('writing-mode').value==='prompt_maker',provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,apps:$('access-apps').checked,desktop:$('access-desktop').checked}});
     drafts.delete(source);$('instruction').value='';selected=data.id;snapshot=null;render();await refresh();
   }catch(error){$('form-error').textContent=error.message;}
   finally{submitting=false;$('send').textContent='↑';render();}
@@ -201,17 +216,37 @@ $('export').onclick=()=>{
   const a=document.createElement('a');a.href=url;a.download=`klyne-chat-${snapshot.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 };
 function providerConfig(){return {kind:$('provider-kind').value,endpoint:$('provider-endpoint').value.trim(),model:$('provider-model').value.trim()};}
-function saveProvider(){try{localStorage.setItem('klyne-provider',JSON.stringify(providerConfig()));}catch(_){}$('model-shortcut').textContent=`${names[$('provider-kind').value]}${$('provider-model').value?' · '+$('provider-model').value:''} ▾`;}
+function savedProviderFor(kind){
+  try{const value=JSON.parse(localStorage.getItem('klyne-provider-'+kind)||'null')||JSON.parse(localStorage.getItem('klyne-provider')||'null');
+    if(value?.kind===kind)return {endpoint:typeof value.endpoint==='string'?value.endpoint:'',model:typeof value.model==='string'?value.model:''};
+  }catch(_){}return {};
+}
+function saveProvider(){try{const config=providerConfig(),value=JSON.stringify(config);localStorage.setItem('klyne-provider-'+config.kind,value);localStorage.setItem('klyne-provider',value);}catch(_){}$('model-shortcut').textContent=`${names[$('provider-kind').value]}${$('provider-model').value?' · '+$('provider-model').value:''} ▾`;}
 function configureProvider(config={}){
   ++revision;const kind=$('provider-kind').value;
   $('endpoint-field').hidden=kind==='codex';$('provider-endpoint').value=config.endpoint||({ollama:'http://127.0.0.1:11434',opencode:'http://127.0.0.1:4096'}[kind]||'');
   $('provider-model').value=config.model||'';$('model-optional').textContent=kind==='codex'?'(optional)':'';
   $('provider-model').placeholder=kind==='codex'?'Use the Codex default':'Check connection to find models';
   $('provider-help').textContent=({codex:'Uses your existing Codex CLI login. Model inference may use the cloud.',ollama:'Uses models installed on this computer. Start Ollama, then check the connection.',opencode:'Start your local OpenCode server, then check the connection. Model hosting depends on its provider.'})[kind];
-  $('provider-status').textContent='Not checked';$('provider-models').replaceChildren();saveProvider();modeChanged();
+  $('provider-status').textContent='Not checked';$('provider-models').replaceChildren();clearAvailableModels();saveProvider();modeChanged();
 }
-$('provider-kind').onchange=()=>configureProvider();
-for(const id of ['provider-endpoint','provider-model'])$(id).oninput=()=>{++revision;$('provider-status').textContent='Settings changed. Check again.';saveProvider();};
+function clearAvailableModels(){
+  $('available-models-field').hidden=true;$('available-models').replaceChildren();
+}
+function showAvailableModels(models){
+  const picker=$('available-models'),current=$('provider-model').value.trim();
+  const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Choose a model';placeholder.disabled=true;
+  picker.replaceChildren(placeholder,...models.map(model=>{const option=document.createElement('option');option.value=model;option.textContent=model;return option;}));
+  picker.value=models.includes(current)?current:'';
+  $('available-models-field').hidden=!models.length;
+  if(current&&models.length&&!models.includes(current))$('provider-status').textContent+=' The current model was not found. Choose an available model below.';
+}
+$('available-models').onchange=()=>{
+  $('provider-model').value=$('available-models').value;
+  ++revision;saveProvider();$('provider-status').textContent='Model selected.';
+};
+$('provider-kind').onchange=()=>configureProvider(savedProviderFor($('provider-kind').value));
+for(const id of ['provider-endpoint','provider-model'])$(id).oninput=()=>{++revision;$('provider-status').textContent='Settings changed. Check again.';clearAvailableModels();saveProvider();};
 $('settings-button').onclick=$('model-shortcut').onclick=()=>{$('settings').showModal();loadApiConnections();};
 let installedApps=[];
 function renderApps() {
@@ -288,24 +323,24 @@ $('check-provider').onclick=async()=>{
   const current=revision;$('check-provider').disabled=true;$('provider-status').textContent='Checking…';
   try{const result=await api('/api/connections/check',providerConfig());if(current!==revision)return;
     $('provider-status').textContent=result.message;$('provider-models').replaceChildren(...result.models.map(model=>{const option=document.createElement('option');option.value=model;return option;}));
-    if(!$('provider-model').value&&result.models.length)$('provider-model').value=result.models[0];saveProvider();
+    if(!$('provider-model').value&&result.models.length)$('provider-model').value=result.models[0];showAvailableModels(result.models);saveProvider();
   }catch(e){if(current===revision)$('provider-status').textContent=e.message;}finally{$('check-provider').disabled=false;}
 };
 let saved={};try{saved=JSON.parse(localStorage.getItem('klyne-provider')||'{}')||{};}catch(_){}
 if(Object.hasOwn(names,saved.kind))$('provider-kind').value=saved.kind;else saved={};
-configureProvider(saved);render();refresh();setInterval(()=>{if(!document.hidden)refresh();},1500);
+configureProvider(savedProviderFor($('provider-kind').value));resetNewChatSettings();render();refresh();setInterval(()=>{if(!document.hidden)refresh();},1500);
 
 function executionConfig(){return {max_steps:Number($('max-steps').value)||0,timeout_seconds:Number($('max-seconds').value)||0,max_review_rounds:Number($('max-reviews').value)||0,command_policy:$('command-policy').value,max_tokens:Number($('max-tokens').value)||0,max_cost_usd:Number($('max-cost').value)||0};}
 $('resume-chat').onclick=async()=>{
   if(!snapshot||submitting)return; submitting=true;
-  try {await api('/api/chats',{id:selected,message:'Continue the saved goal from its current task state.',resume:true,execution:executionConfig(),provider:snapshot.provider,access:snapshot.access});await refresh();}
+  try {await api('/api/chats',{id:selected,message:'Continue the saved goal from its current task state.',resume:true,execution:executionConfig(),provider:providerConfig(),access:snapshot.access});await refresh();}
   catch(e){toast(e.message);}finally{submitting=false;render();}
 };
 $('pending-disposition').onchange=()=>{$('resolve-action').textContent=snapshot?.pending?.proposal && $('pending-disposition').value==='approved'?'Approve and continue':'Record decision';};
 $('resolve-action').onclick=async()=>{
   if(submitting || !snapshot?.pending)return;
   const id=selected,approval=!!snapshot.pending.proposal,disposition=$('pending-disposition').value;
-  const continuation={id,message:'Continue the saved goal after approval.',resume:true,execution:executionConfig(),provider:snapshot.provider,access:snapshot.access};
+  const continuation={id,message:'Continue the saved goal after approval.',resume:true,execution:executionConfig(),provider:providerConfig(),access:snapshot.access};
   submitting=true;$('resolve-action').disabled=true;
   try {const resolution=await api(`/api/chats/${id}/resolve`,{request_id:snapshot.pending.request_id,disposition,note:$('pending-note').value.trim() || (approval?`User selected ${disposition} for the displayed proposal.`:'')});if(selected===id)$('pending-note').value='';if(approval && disposition==='approved') {if(resolution.renewal_required)toast('This request expired or changed. Klyne will prepare a fresh proposal.');await api('/api/chats',continuation);}await refresh();}
   catch(e){toast(e.message);}finally{submitting=false;$('resolve-action').disabled=false;render();}
@@ -318,7 +353,6 @@ $('trusted-laptop').onclick=()=>{
   try{localStorage.setItem('klyne-trusted-laptop','true');}catch(_){}
   accessChanged();toast('Trusted laptop access enabled for new work.');
 };
-try{if(localStorage.getItem('klyne-trusted-laptop')==='true'){for(const id of ['access-web','access-terminal','access-desktop','access-apps'])$(id).checked=true;accessChanged();}}catch(_){}
 
 // A small heat field rendered as text: no video, external assets or GPU context.
 (() => {

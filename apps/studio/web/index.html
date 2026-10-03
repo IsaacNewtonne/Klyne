@@ -25,7 +25,7 @@
 <select id="provider-kind"><option value="demo">Built-in file agent</option><option value="ollama">Ollama · local</option><option value="opencode">OpenCode · local server</option><option value="codex">Codex · CLI account</option></select>
 <details id="provider-settings" hidden><summary>Connection <span id="provider-summary">Configure</span></summary>
 <div id="endpoint-field"><label for="provider-endpoint">Local server address</label><input id="provider-endpoint" type="url" placeholder="http://127.0.0.1:11434" autocomplete="off"></div>
-<label for="provider-model">Model <span id="model-optional"></span></label><input id="provider-model" list="provider-models" placeholder="Check connection to find models" maxlength="240" autocomplete="off"><datalist id="provider-models"></datalist>
+<label for="provider-model">Model <span id="model-optional"></span></label><input id="provider-model" list="provider-models" placeholder="Check connection to find models" maxlength="240" autocomplete="off"><datalist id="provider-models"></datalist><div id="available-models-field" hidden><label for="available-models">Available models</label><select id="available-models"></select></div>
 <div class="provider-check-row"><button id="check-provider" type="button">Check connection</button><span id="provider-status" role="status">Not checked</span></div>
 <p id="provider-help"></p>
 </details>

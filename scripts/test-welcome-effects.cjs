@@ -1,9 +1,7 @@
 const fs=require('fs'),assert=require('assert');
-process.env.TEMP=process.env.TMP=require('path').resolve('workspace/activity-test-temp');
-fs.mkdirSync(process.env.TEMP,{recursive:true});
-const {chromium}=require('../workspace/studio/conversations/mcp-packages/node_modules/playwright');
+const {launch}=require('./test-browser.cjs');
 (async()=>{
-const b=await chromium.launch({executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true});
+const b=await launch();
 const p=await b.newPage({viewport:{width:1920,height:1080}}),errors=[];
 p.on('pageerror',e=>errors.push(e.message));
 await p.route('http://127.0.0.1:4317/**',r=>{

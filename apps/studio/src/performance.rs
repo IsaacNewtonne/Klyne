@@ -134,12 +134,7 @@ impl Trace {
     /// totals come from the caller; durations and counts come from the trace.
     /// Retries, failures and tool calls are included; failures are reported,
     /// never excluded from the record.
-    pub fn report(
-        &self,
-        model_calls: usize,
-        prompt_tokens: u64,
-        completion_tokens: u64,
-    ) -> Value {
+    pub fn report(&self, model_calls: usize, prompt_tokens: u64, completion_tokens: u64) -> Value {
         serde_json::json!({
             "request_id": self.request_id,
             "model_calls": model_calls,
@@ -176,6 +171,8 @@ pub fn is_action_evidence(action: &str) -> bool {
             | "completion_check"
             | "acceptance_check"
             | "operation_check"
+            | "progress_check"
+            | "progress_repair"
             | "desktop_recover"
             | "desktop_reconcile"
             | "document_save_reconcile"
@@ -190,21 +187,39 @@ pub fn is_action_evidence(action: &str) -> bool {
 /// This is a byte guard, not a provider token counter.
 pub fn fit_context(system: &str, context: &mut Value) -> io::Result<usize> {
     loop {
-        let size = system.len().saturating_add(1).saturating_add(context.to_string().len());
-        if size <= PROMPT_BYTES { return Ok(size); }
+        let size = system
+            .len()
+            .saturating_add(1)
+            .saturating_add(context.to_string().len());
+        if size <= PROMPT_BYTES {
+            return Ok(size);
+        }
         let removable = ["observations", "messages"].into_iter().find(|key| {
-            context[*key].as_array().is_some_and(|items| items.len() > if *key == "messages" { 2 } else { 1 })
+            context[*key]
+                .as_array()
+                .is_some_and(|items| items.len() > if *key == "messages" { 2 } else { 1 })
         });
         match removable {
-            Some(key) => { context[key].as_array_mut().unwrap().remove(0); }
-            None => return Err(io::Error::other("Protected model context exceeds the request budget; no instructions or current evidence were truncated")),
+            Some(key) => {
+                context[key].as_array_mut().unwrap().remove(0);
+            }
+            None => {
+                return Err(io::Error::other(
+                    "Protected model context exceeds the request budget; no instructions or current evidence were truncated",
+                ));
+            }
         }
     }
 }
 
 pub fn greeting(text: &str) -> bool {
-    matches!(text.trim().trim_end_matches(['!', '.', '?']).to_ascii_lowercase().as_str(),
-        "hi" | "hello" | "hey" | "good morning" | "good afternoon" | "good evening")
+    matches!(
+        text.trim()
+            .trim_end_matches(['!', '.', '?'])
+            .to_ascii_lowercase()
+            .as_str(),
+        "hi" | "hello" | "hey" | "good morning" | "good afternoon" | "good evening"
+    )
 }
 
 #[cfg(test)]
@@ -225,19 +240,33 @@ mod tests {
     #[test]
     fn greetings_do_not_match_action_requests() {
         assert!(greeting("Hello!"));
-        for text in ["hello, send a message", "go on", "hi\nopen Chrome", "say hi to Bob"] {
+        for text in [
+            "hello, send a message",
+            "go on",
+            "hi\nopen Chrome",
+            "say hi to Bob",
+        ] {
             assert!(!greeting(text));
         }
     }
     #[test]
     fn missing_provider_metrics_remain_unknown() {
-        assert!(ProviderTiming::from_ollama(&json!({})).load_duration_ns.is_none());
-        assert_eq!(ProviderTiming::from_ollama(&json!({"load_duration":42})).load_duration_ns, Some(42));
+        assert!(
+            ProviderTiming::from_ollama(&json!({}))
+                .load_duration_ns
+                .is_none()
+        );
+        assert_eq!(
+            ProviderTiming::from_ollama(&json!({"load_duration":42})).load_duration_ns,
+            Some(42)
+        );
     }
     #[test]
     fn trace_ids_are_stable_and_monotonic() {
-        let mut trace = Trace::default();
-        trace.goal_started_wall_ms = 1000;
+        let mut trace = Trace {
+            goal_started_wall_ms: 1000,
+            ..Default::default()
+        };
         assert_eq!(trace.alloc("model"), "model-1");
         assert_eq!(trace.alloc("tool"), "tool-2");
         assert_eq!(trace.at_ms(1500), 500);
@@ -250,10 +279,25 @@ mod tests {
     }
     #[test]
     fn host_checks_are_not_action_evidence() {
-        for meta in ["completion_check", "acceptance_check", "route_switch", "evidence_read", "document_save_reconcile"] {
+        for meta in [
+            "completion_check",
+            "acceptance_check",
+            "progress_check",
+            "progress_repair",
+            "route_switch",
+            "evidence_read",
+            "document_save_reconcile",
+        ] {
             assert!(!is_action_evidence(meta), "{meta}");
         }
-        for tool in ["browser_read", "desktop_observe", "read_file:.", "write_file:greeting.txt", "mcp_call", "runtime_attest"] {
+        for tool in [
+            "browser_read",
+            "desktop_observe",
+            "read_file:.",
+            "write_file:greeting.txt",
+            "mcp_call",
+            "runtime_attest",
+        ] {
             assert!(is_action_evidence(tool), "{tool}");
         }
     }

@@ -1,12 +1,14 @@
+mod support;
 use harness_browser::{BrowserLimits, ControlledBrowser};
 use serde_json::{Value, json};
 use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
+use support::FixtureProcess;
 
 fn preference_question(question: &str) -> Value {
     json!({"decision":"needs_input","question":question,"blocker":{"kind":"user_preference","missing":"user choice for this fixture","why_user":"The fixture requires a choice not supplied in the original request"}})
@@ -31,14 +33,26 @@ fn unfamiliar_tool_questions_recover_into_discovery_without_user_input() {
     assert_eq!(chat["status"], "Completed", "{chat}");
     let calls = fixture.join().unwrap();
     for index in [1, 3] {
-        let context: Value = serde_json::from_str(calls[index]["messages"][1]["content"].as_str().unwrap()).unwrap();
+        let context: Value =
+            serde_json::from_str(calls[index]["messages"][1]["content"].as_str().unwrap()).unwrap();
         assert!(context["blocker_check"].is_object());
         assert_eq!(context["available_tools"]["workspace_root"], ".");
-        assert!(context["available_tools"]["workspace_files"].as_array().unwrap().contains(&json!("list_dir")));
+        assert!(
+            context["available_tools"]["workspace_files"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("list_dir"))
+        );
         assert!(context["available_tools"].get("terminal").is_none());
     }
     assert!(!chat["evidence"].as_array().unwrap().is_empty());
-    assert!(!chat["messages"].as_array().unwrap().iter().any(|m| m["text"].as_str().unwrap_or("").contains("Please provide")));
+    assert!(
+        !chat["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["text"].as_str().unwrap_or("").contains("Please provide"))
+    );
 }
 
 #[test]
@@ -56,23 +70,42 @@ fn invalid_invocation_is_corrected_before_dispatch_and_diagnosis_is_saved() {
     let chat = s.wait(id);
     assert_eq!(chat["status"], "Completed", "{chat}");
     let calls = fixture.join().unwrap();
-    let corrected: Value = serde_json::from_str(calls[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let corrected: Value =
+        serde_json::from_str(calls[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
     assert!(corrected["response_correction"].is_object());
-    let events = chat["execution"]["diagnostics"]["events"].as_array().unwrap();
-    let failure = events.iter().find(|e| e["check"] == "decision_schema").unwrap();
+    let events = chat["execution"]["diagnostics"]["events"]
+        .as_array()
+        .unwrap();
+    let failure = events
+        .iter()
+        .find(|e| e["check"] == "decision_schema")
+        .unwrap();
     assert_eq!(failure["state"], "decision_corrected");
     assert!(failure["resolved_by"].is_number());
-    assert!(chat["evidence"].as_array().unwrap().iter().all(|e| !e["action"].as_str().unwrap_or("").starts_with("read_file")));
+    assert!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| !e["action"].as_str().unwrap_or("").starts_with("read_file"))
+    );
     let reloaded = s.api(&format!("/api/chats/{id}"), None);
-    assert_eq!(reloaded["execution"]["diagnostics"], chat["execution"]["diagnostics"]);
+    assert_eq!(
+        reloaded["execution"]["diagnostics"],
+        chat["execution"]["diagnostics"]
+    );
 }
 
 #[test]
 fn retry_feedback_redacts_granted_secrets_before_model_dispatch() {
     let secret = "synthetic-retry-secret-123456789";
-    unsafe { std::env::set_var("KLYNE_RETRY_TEST_SECRET", secret); }
+    unsafe {
+        std::env::set_var("KLYNE_RETRY_TEST_SECRET", secret);
+    }
     let s = Server::new();
-    unsafe { std::env::remove_var("KLYNE_RETRY_TEST_SECRET"); }
+    unsafe {
+        std::env::remove_var("KLYNE_RETRY_TEST_SECRET");
+    }
     let (endpoint, fixture) = model(vec![
         json!({"decision":"complete","summary":secret}), // Invalid planner response.
         plan(),
@@ -80,7 +113,8 @@ fn retry_feedback_redacts_granted_secrets_before_model_dispatch() {
         complete("Hello."),
     ]);
     let mut body = request(&endpoint);
-    body["grants"] = json!({"secrets":[{"name":"KLYNE_RETRY_TEST_SECRET","origins":["http://127.0.0.1/"]}]});
+    body["grants"] =
+        json!({"secrets":[{"name":"KLYNE_RETRY_TEST_SECRET","origins":["http://127.0.0.1/"]}]});
     let created = s.api("/api/chats", Some(body));
     let chat = s.wait(created["id"].as_str().unwrap());
     assert_eq!(chat["status"], "Completed", "{chat}");
@@ -88,8 +122,12 @@ fn retry_feedback_redacts_granted_secrets_before_model_dispatch() {
     assert_eq!(requests.len(), 4);
     assert!(requests.iter().all(|r| !r.to_string().contains(secret)));
     assert!(requests[1].to_string().contains("[redacted]"));
-    let retry: Value = serde_json::from_str(requests[1]["messages"][1]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(retry["failure_diagnostics"]["recent_checks"][0]["state"], "open");
+    let retry: Value =
+        serde_json::from_str(requests[1]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        retry["failure_diagnostics"]["recent_checks"][0]["state"],
+        "open"
+    );
     assert!(!chat.to_string().contains(secret));
 }
 
@@ -102,7 +140,15 @@ fn repeated_unsupported_questions_stop_without_dispatch_or_false_success() {
     let chat = s.wait(created["id"].as_str().unwrap());
     assert_ne!(chat["status"], "Completed");
     assert!(chat["evidence"].as_array().unwrap().is_empty());
-    assert_eq!(chat["execution"]["diagnostics"]["events"].as_array().unwrap().iter().filter(|e| e["state"] == "open").count(), 3);
+    assert_eq!(
+        chat["execution"]["diagnostics"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["state"] == "open")
+            .count(),
+        3
+    );
     assert_eq!(fixture.join().unwrap().len(), 3);
 }
 
@@ -131,7 +177,7 @@ fn read_body(stream: &mut TcpStream) -> String {
     String::from_utf8(body).unwrap()
 }
 struct Server {
-    child: Child,
+    child: FixtureProcess,
     root: tempfile::TempDir,
     host: String,
 }
@@ -141,13 +187,15 @@ struct Server {
 /// loser would otherwise talk to a stranger (wrong models, empty tasks).
 /// A lost bind race exits the child within milliseconds, so a short settle
 /// wait before trusting the connection closes the race.
-fn spawn_verified(root: &std::path::Path, port: u16) -> Option<Child> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
-        .args(["--port", &port.to_string(), "--root"])
-        .arg(root)
-        .stdout(Stdio::null())
-        .spawn()
-        .ok()?;
+fn spawn_verified(root: &std::path::Path, port: u16) -> Option<FixtureProcess> {
+    let mut child = FixtureProcess::new(
+        Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
+            .args(["--port", &port.to_string(), "--root"])
+            .arg(root)
+            .stdout(Stdio::null())
+            .spawn()
+            .ok()?,
+    );
     let host = format!("127.0.0.1:{port}");
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
@@ -259,6 +307,90 @@ fn request(endpoint: &str) -> Value {
 }
 
 #[test]
+fn chat_supplied_project_supports_absolute_folder_and_file_tools() {
+    let s = Server::new();
+    let project = s.root.path().join("Album with spaces");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("original.txt"), "Original lyrics").unwrap();
+    let (endpoint, fixture) = model(vec![
+        json!({"tasks":[{"agent":"Writer","instruction":"Inspect the album and write a separate revised.txt"}]}),
+        json!({"decision":"act","action":{"tool":"read_file","path":project}}),
+        json!({"decision":"act","action":{"tool":"read_file","path":project.join("original.txt")}}),
+        json!({"decision":"act","action":{"tool":"write_file","path":project.join("revised.txt"),"contents":"Revised lyrics"}}),
+        complete("Created revised.txt and preserved original.txt."),
+        complete("Created revised.txt and preserved original.txt."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!(format!(
+        "Improve this album {}, save a separate revised.txt",
+        project.display()
+    ));
+    body["access"]["terminal"] = json!(true);
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(
+        fs::read_to_string(project.join("original.txt")).unwrap(),
+        "Original lyrics"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("revised.txt")).unwrap(),
+        "Revised lyrics"
+    );
+    assert_eq!(chat["evidence"][0]["action"], "list_dir:.");
+    assert_eq!(chat["evidence"][0]["ok"], true);
+    fixture.join().unwrap();
+}
+
+#[test]
+fn chat_supplied_project_does_not_enable_disabled_host_access() {
+    let s = Server::new();
+    let project = s.root.path().join("Private album");
+    fs::create_dir(&project).unwrap();
+    let (endpoint, fixture) = model(vec![plan(), complete("Hello!"), complete("Hello!")]);
+    let mut body = request(&endpoint);
+    body["message"] = json!(format!("Inspect {}", project.display()));
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_ne!(chat["workspace"], json!(fs::canonicalize(project).unwrap()));
+    fixture.join().unwrap();
+}
+
+#[test]
+fn chat_supplied_project_is_resolved_when_resuming_a_failed_inspection() {
+    let s = Server::new();
+    let project = s.root.path().join("Album to resume");
+    fs::create_dir(&project).unwrap();
+    let (endpoint, fixture) = model(vec![
+        json!({"tasks":[{"agent":"Inspector","instruction":"Inspect the supplied album directory"}]}),
+        json!({"decision":"act","action":{"tool":"read_file","path":project}}),
+        json!({"decision":"fail","reason":"Could not inspect the project"}),
+        json!({"tasks":[{"agent":"Inspector","instruction":"Inspect the supplied album directory"}]}),
+        json!({"decision":"act","action":{"tool":"read_file","path":project}}),
+        complete("Inspected the album directory."),
+        complete("Inspected the album directory."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!(format!("Inspect the album {}", project.display()));
+    let created = s.api("/api/chats", Some(body.clone()));
+    let id = created["id"].as_str().unwrap();
+    let blocked = s.wait(id);
+    assert_eq!(blocked["status"], "Blocked", "{blocked}");
+    body["id"] = json!(id);
+    body["resume"] = json!(true);
+    body["message"] = json!("Continue the saved goal");
+    body["access"]["terminal"] = json!(true);
+    s.api("/api/chats", Some(body));
+    let resumed = s.wait(id);
+    assert_eq!(resumed["status"], "Completed", "{resumed}");
+    assert_eq!(
+        resumed["workspace"],
+        json!(fs::canonicalize(project).unwrap())
+    );
+    fixture.join().unwrap();
+}
+
+#[test]
 fn chat_repairs_invalid_ollama_plan() {
     for invalid in [complete("Hi!"), json!({"tasks":[]}), json!({"question":""})] {
         let s = Server::new();
@@ -367,10 +499,19 @@ fn contract_verifies_actual_file_and_survives_loading() {
     // model review round once fresh evidence verifies the contract.
     let calls = fixture.join().unwrap();
     assert_eq!(calls.len(), 3);
-    assert_eq!(chat["execution"]["model_timings"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        chat["execution"]["model_timings"].as_array().unwrap().len(),
+        3
+    );
     let trace = &chat["execution"]["trace"];
     assert!(!trace["request_id"].as_str().unwrap_or("").is_empty());
-    assert!(trace["tool_calls"].as_array().unwrap().iter().any(|t| t["tool"] == "write_file"));
+    assert!(
+        trace["tool_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["tool"] == "write_file")
+    );
     assert!(!trace["observations"].as_array().unwrap().is_empty());
     assert!(trace["milestones"]["verified_completion_ms"].is_number());
 }
@@ -420,7 +561,10 @@ fn profile_question_before_inspection_uses_the_available_recovery_path() {
     for desktop in [true, false] {
         let s = Server::new();
         let question = "I need to locate the Chrome profile named 'mrmuller'. Which specific profile(s) should I open? Please provide the exact profile name(s) (case-sensitive). Please confirm whether you want me to list them.";
-        let mut replies = vec![plan(), json!({"decision":"needs_input","question":question})];
+        let mut replies = vec![
+            plan(),
+            json!({"decision":"needs_input","question":question}),
+        ];
         replies.push(preference_question("Which account should I use?"));
         let (endpoint, fixture) = model(replies);
         let mut body = request(&endpoint);
@@ -432,9 +576,20 @@ fn profile_question_before_inspection_uses_the_available_recovery_path() {
         let calls = fixture.join().unwrap();
         assert_eq!(calls.len(), 3);
         if desktop {
-            let context: Value = serde_json::from_str(calls[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
-            assert!(context["profile_inspection_check"]["instruction"].as_str().unwrap().contains("Use the profile name already supplied"));
-            assert!(chat["messages"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().contains("Which account"));
+            let context: Value =
+                serde_json::from_str(calls[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
+            assert!(
+                context["profile_inspection_check"]["instruction"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Use the profile name already supplied")
+            );
+            assert!(
+                chat["messages"].as_array().unwrap().last().unwrap()["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Which account")
+            );
         }
     }
 }
@@ -454,11 +609,27 @@ fn current_browser_url_question_is_reconsidered_before_pausing() {
     let chat = s.wait(created["id"].as_str().unwrap());
     assert_eq!(chat["status"], "Needs input", "{chat}");
     let messages = chat["messages"].as_array().unwrap();
-    assert!(messages.last().unwrap()["text"].as_str().unwrap().contains("Which account"));
-    assert!(!messages.iter().any(|m| m["text"].as_str().unwrap_or("").contains("What is the current URL")));
+    assert!(
+        messages.last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("Which account")
+    );
+    assert!(!messages.iter().any(|m| {
+        m["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("What is the current URL")
+    }));
     let calls = fixture.join().unwrap();
-    let context: Value = serde_json::from_str(calls[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
-    assert!(context["clarification_check"]["instruction"].as_str().unwrap().contains("Obtain observable browser state yourself"));
+    let context: Value =
+        serde_json::from_str(calls[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert!(
+        context["clarification_check"]["instruction"]
+            .as_str()
+            .unwrap()
+            .contains("Obtain observable browser state yourself")
+    );
 }
 
 #[test]
@@ -752,6 +923,138 @@ fn missing_input_resumes_the_same_step_without_replanning() {
 }
 
 #[test]
+fn planner_clarification_preserves_goal_contract_and_budget() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        preference_question("Which title should I use?"),
+        plan(),
+        json!({"decision":"act","action":{"tool":"write_file","path":"proof.txt","contents":"checked"}}),
+        complete("Written"),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Create the requested artifact");
+    body["contract"] = json!({"goal":"Create the requested artifact","criteria":[{"FileContents":{"path":"proof.txt","expected":"checked"}}]});
+    let created = s.api("/api/chats", Some(body));
+    let id = created["id"].as_str().unwrap();
+    let paused = s.wait(id);
+    assert_eq!(paused["status"], "Needs input", "{paused}");
+    assert!(paused["tasks"].as_array().unwrap().is_empty());
+    let mut answer = request(&endpoint);
+    answer["id"] = json!(id);
+    answer["message"] = json!("Use Project notes");
+    s.api("/api/chats", Some(answer));
+    let done = s.wait(id);
+    assert_eq!(
+        done["execution"]["original_request"],
+        paused["execution"]["original_request"]
+    );
+    assert_eq!(done["contract"], paused["contract"]);
+    assert_eq!(done["status"], "Completed", "{done}");
+    assert_eq!(done["result"]["outcome"], "verified");
+    assert_eq!(done["used"], 6); // Four model calls, one write and its read-back.
+    assert_eq!(fixture.join().unwrap().len(), 4);
+}
+
+#[test]
+fn failed_file_acceptance_allows_reviewer_to_request_repair() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"write_file","path":"proof.txt","contents":"wrong"}}),
+        complete("Written"),
+        complete("Everything passed"),
+        json!({"decision":"repair","summary":"Correct the file contents","tasks":[{"agent":"Editor","instruction":"Write checked to proof.txt"}]}),
+        json!({"decision":"act","action":{"tool":"write_file","path":"proof.txt","contents":"checked"}}),
+        complete("Corrected"),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Create the requested artifact");
+    body["contract"] = json!({"goal":"Create the requested artifact","criteria":[{"FileContents":{"path":"proof.txt","expected":"checked"}}]});
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(chat["result"]["outcome"], "verified");
+    assert_eq!(
+        fs::read_to_string(
+            std::path::Path::new(chat["workspace"].as_str().unwrap()).join("proof.txt")
+        )
+        .unwrap(),
+        "checked"
+    );
+    assert_eq!(
+        chat["execution"]["previous_plans"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(fixture.join().unwrap().len(), 7);
+}
+
+#[test]
+fn long_file_reads_tell_the_worker_to_continue_before_rewriting() {
+    let s = Server::new();
+    let project = s.root.path().join("long-source");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("source.txt"), "verse\n".repeat(2500)).unwrap();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"read_file","path":"source.txt"}}),
+        json!({"decision":"act","action":{"tool":"read_range","path":"source.txt","offset":12000,"length":3000}}),
+        complete("The source has been inspected."),
+        complete("The source has been inspected."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Inspect the complete source.txt");
+    body["workspace"] = json!(project);
+    body["access"]["terminal"] = json!(true);
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let calls = fixture.join().unwrap();
+    let context: Value =
+        serde_json::from_str(calls[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(context["last_file_read"]["data_truncated"], true);
+    assert_eq!(context["last_file_read"]["next_offset"], 12000);
+    assert!(
+        calls[2]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("last file read is PARTIAL")
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("source.txt")).unwrap(),
+        "verse\n".repeat(2500)
+    );
+}
+
+#[test]
+fn verified_outputs_remain_visible_after_other_file_reads() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"write_file","path":"alpha.txt","contents":"alpha"}}),
+        json!({"decision":"act","action":{"tool":"write_file","path":"beta.txt","contents":"beta"}}),
+        json!({"decision":"act","action":{"tool":"read_file","path":"alpha.txt"}}),
+        complete("Both outputs are ready."),
+        complete("Both outputs are ready."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Create alpha.txt and beta.txt");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let calls = fixture.join().unwrap();
+    let context: Value =
+        serde_json::from_str(calls[4]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let receipts = context["file_change_receipts"].as_array().unwrap();
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(receipts[0]["receipt"]["target"], "beta.txt");
+    assert_eq!(receipts[1]["receipt"]["target"], "alpha.txt");
+    assert_eq!(context["last_file_read"]["data"], "alpha");
+}
+
+#[test]
 fn blocked_graph_step_does_not_run_dependents() {
     let s = Server::new();
     let (endpoint, fixture) = model(vec![
@@ -837,10 +1140,16 @@ fn recovery_uses_an_independent_provider_and_preserves_the_primary_choice() {
 #[test]
 fn recovery_records_an_exhausted_model_failure_without_replaying_tools() {
     let secret = format!("incident-secret-{}", "sensitive-fragment-".repeat(40));
-    unsafe { std::env::set_var("KLYNE_INCIDENT_TEST_SECRET", &secret); }
+    unsafe {
+        std::env::set_var("KLYNE_INCIDENT_TEST_SECRET", &secret);
+    }
     let s = Server::new();
-    unsafe { std::env::remove_var("KLYNE_INCIDENT_TEST_SECRET"); }
-    let (primary, primary_calls) = model(vec![json!({"tasks":[], "summary":format!("{}{}", "x".repeat(8000), secret)})]);
+    unsafe {
+        std::env::remove_var("KLYNE_INCIDENT_TEST_SECRET");
+    }
+    let (primary, primary_calls) = model(vec![
+        json!({"tasks":[], "summary":format!("{}{}", "x".repeat(8000), secret)}),
+    ]);
     let (fallback, fallback_calls) = model(vec![json!({"tasks":[]})]);
     fs::create_dir_all(s.root.path().join("recovery")).unwrap();
     fs::write(
@@ -850,7 +1159,8 @@ fn recovery_records_an_exhausted_model_failure_without_replaying_tools() {
     )
     .unwrap();
     let mut body = request(&primary);
-    body["grants"] = json!({"secrets":[{"name":"KLYNE_INCIDENT_TEST_SECRET","origins":["http://127.0.0.1/"]}]});
+    body["grants"] =
+        json!({"secrets":[{"name":"KLYNE_INCIDENT_TEST_SECRET","origins":["http://127.0.0.1/"]}]});
     let chat = s.api("/api/chats", Some(body));
     let chat = s.wait(chat["id"].as_str().unwrap());
     assert_eq!(chat["status"], "Blocked", "{chat}");
@@ -997,12 +1307,14 @@ fn restart_resumes_remaining_tasks_without_replanning_completed_work() {
     }
     s.child.kill().unwrap();
     s.child.wait().unwrap();
-    s.child = Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
-        .args(["--port", s.host.split(':').nth(1).unwrap(), "--root"])
-        .arg(s.root.path())
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
+    s.child = FixtureProcess::new(
+        Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
+            .args(["--port", s.host.split(':').nth(1).unwrap(), "--root"])
+            .arg(s.root.path())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     while TcpStream::connect(&s.host).is_err() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(20));
@@ -1081,6 +1393,312 @@ fn write_file(text: &str) -> Value {
 }
 fn complete(text: &str) -> Value {
     json!({"decision":"complete","summary":text})
+}
+
+#[test]
+fn progress_review_finishes_two_outputs_without_repeating_writes() {
+    let s = Server::new();
+    let write = |path: &str, contents: &str| json!({"decision":"act","action":{"tool":"write_file","path":path,"contents":contents}});
+    let (endpoint, fixture) = model(vec![
+        json!({"tasks":[{"agent":"Writer","instruction":"Create alpha.txt containing alpha and beta.txt containing beta; check both."}]}),
+        write("alpha.txt", "alpha"),
+        write("beta.txt", "beta"),
+        json!({"decision":"act","action":{"tool":"read_file","path":"alpha.txt"}}),
+        write("./beta.txt", "beta"),
+        json!({"decision":"act","action":{"tool":"read_file","path":"beta.txt"}}),
+        complete("Both requested files contain the correct text."),
+        complete("Created alpha.txt and beta.txt and checked both contents."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] =
+        json!("Create alpha.txt containing alpha and beta.txt containing beta; check both.");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(chat["result"]["outcome"], "reviewed");
+    let evidence = chat["evidence"].as_array().unwrap();
+    assert_eq!(
+        evidence
+            .iter()
+            .filter(|e| e["action"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("write_file:"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        evidence
+            .iter()
+            .filter(|e| e["action"] == "progress_check" && e["ok"] == true)
+            .count(),
+        1
+    );
+    for name in ["alpha", "beta"] {
+        assert_eq!(
+            fs::read_to_string(
+                std::path::Path::new(chat["workspace"].as_str().unwrap())
+                    .join(format!("{name}.txt"))
+            )
+            .unwrap(),
+            name
+        );
+    }
+    let calls = fixture.join().unwrap();
+    let context: Value =
+        serde_json::from_str(calls[5]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(context["role"], "independent reviewer");
+    assert_eq!(context["assignment"]["scope"], "stalled_task");
+    assert!(
+        context["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "progress_check"
+                && e["criterion"]["FileDigest"]["path"] == "./beta.txt")
+    );
+    assert_eq!(chat["tasks"][0]["status"], "Done");
+}
+
+#[test]
+fn progress_repair_preserves_missing_outputs_and_dependent_tasks() {
+    let s = Server::new();
+    let write = |path: &str| json!({"decision":"act","action":{"tool":"write_file","path":path,"contents":"checked"}});
+    let (endpoint, fixture) = model(vec![
+        json!({"tasks":[{"agent":"Writer","instruction":"Write a.txt and b.txt"},{"agent":"Writer","instruction":"Then write c.txt","depends_on":[1]}]}),
+        write("a.txt"),
+        write("./a.txt"),
+        json!({"decision":"repair","summary":"b.txt is still missing. Write only b.txt.","tasks":[{"agent":"Writer","instruction":"Write b.txt containing checked"}]}),
+        write("b.txt"),
+        complete("a.txt and b.txt are ready."),
+        write("c.txt"),
+        complete("c.txt is ready."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Create three checked files");
+    body["contract"] = json!({"goal":"Create three checked files","criteria":[
+        {"FileContents":{"path":"a.txt","expected":"checked"}},
+        {"FileContents":{"path":"b.txt","expected":"checked"}},
+        {"FileContents":{"path":"c.txt","expected":"checked"}}
+    ]});
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(chat["result"]["outcome"], "verified");
+    assert_eq!(chat["tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(chat["tasks"][1]["depends_on"], json!([1]));
+    assert!(
+        chat["execution"]["previous_plans"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let calls = fixture.join().unwrap();
+    assert!(calls[4].to_string().contains("b.txt is still missing"));
+}
+
+#[test]
+fn progress_review_cannot_bypass_acceptance_or_execute_writes() {
+    for mutate in [false, true] {
+        let s = Server::new();
+        let mut replies = vec![plan(), write_file("hello"), write_file("hello")];
+        if mutate {
+            replies.push(write_file("reviewer overwrite"));
+        } else {
+            replies.extend([
+                complete("All done."),
+                complete("All done."),
+                complete("All done."),
+            ]);
+        }
+        let (endpoint, fixture) = model(replies);
+        let mut body = request(&endpoint);
+        body["message"] = json!("Create greeting.txt and missing.txt");
+        body["contract"] = json!({"goal":"Create greeting.txt and missing.txt","criteria":[{"FileContents":{"path":"missing.txt","expected":"required"}}]});
+        let created = s.api("/api/chats", Some(body));
+        let chat = s.wait(created["id"].as_str().unwrap());
+        assert_ne!(chat["status"], "Completed", "{chat}");
+        assert_ne!(chat["result"]["outcome"], "verified");
+        assert_eq!(
+            fs::read_to_string(
+                std::path::Path::new(chat["workspace"].as_str().unwrap()).join("greeting.txt")
+            )
+            .unwrap(),
+            "hello"
+        );
+        fixture.join().unwrap();
+    }
+}
+
+#[test]
+fn progress_recovery_is_bounded_when_worker_ignores_remaining_work() {
+    let s = Server::new();
+    let repair = json!({"decision":"repair","summary":"Write missing.txt next.","tasks":[{"agent":"Writer","instruction":"Write missing.txt"}]});
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        write_file("hello"),
+        write_file("hello"),
+        repair.clone(),
+        write_file("hello"),
+        repair,
+        write_file("hello"),
+    ]);
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Blocked", "{chat}");
+    assert_ne!(chat["tasks"][0]["status"], "Done");
+    assert_eq!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["action"] == "write_file:greeting.txt")
+            .count(),
+        1
+    );
+    assert!(
+        chat["messages"].as_array().unwrap().last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("still repeats")
+    );
+    fixture.join().unwrap();
+    let (endpoint, fixture) = model(vec![write_file("hello")]);
+    resume(&s, &endpoint, created["id"].as_str().unwrap(), false, false);
+    let resumed = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(resumed["status"], "Blocked", "{resumed}");
+    assert_eq!(
+        resumed["used"].as_u64().unwrap(),
+        chat["used"].as_u64().unwrap() + 2
+    );
+    assert_eq!(
+        resumed["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["action"] == "write_file:greeting.txt")
+            .count(),
+        1
+    );
+    assert_eq!(
+        fixture.join().unwrap().len(),
+        1,
+        "resume must not restart the exhausted progress-review allowance"
+    );
+}
+
+#[test]
+fn progress_controller_rechecks_disk_before_suppressing_a_repair() {
+    let s = Server::new();
+    let project = s.root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let marker = s.root.path().join("before-repeat");
+    let mut repeat = write_file("expected");
+    repeat["_marker"] = json!(marker);
+    repeat["_delay_ms"] = json!(400);
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        write_file("expected"),
+        repeat,
+        complete("Restored greeting.txt"),
+        complete("Restored greeting.txt"),
+    ]);
+    let mut body = request(&endpoint);
+    body["access"]["terminal"] = json!(true);
+    body["workspace"] = json!(project);
+    let created = s.api("/api/chats", Some(body));
+    let deadline = Instant::now();
+    while !marker.exists() {
+        assert!(deadline.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(project.join("greeting.txt"), "external edit").unwrap();
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(
+        fs::read_to_string(project.join("greeting.txt")).unwrap(),
+        "expected"
+    );
+    assert!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "progress_check" && e["ok"] == false)
+    );
+    assert_eq!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["action"] == "write_file:greeting.txt")
+            .count(),
+        2
+    );
+    fixture.join().unwrap();
+}
+
+#[test]
+fn progress_controller_allows_real_content_revisions() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        write_file("draft"),
+        write_file("revised"),
+        complete("Revised greeting.txt"),
+        complete("Revised greeting.txt"),
+    ]);
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["action"] != "progress_check")
+    );
+    fixture.join().unwrap();
+}
+
+#[test]
+fn progress_recovery_allowance_resets_after_actual_file_progress() {
+    let s = Server::new();
+    let write = |path: &str| json!({"decision":"act","action":{"tool":"write_file","path":path,"contents":"checked"}});
+    let repair = |path: &str| json!({"decision":"repair","summary":format!("Write {path} next"),"tasks":[{"agent":"Writer","instruction":format!("Write {path} containing checked")} ]});
+    let (endpoint, fixture) = model(vec![
+        json!({"tasks":[{"agent":"Writer","instruction":"Write a.txt, b.txt and c.txt containing checked"}]}),
+        write("a.txt"),
+        write("a.txt"),
+        repair("b.txt"),
+        write("b.txt"),
+        write("a.txt"),
+        repair("c.txt"),
+        write("c.txt"),
+        write("a.txt"),
+        complete("All three files contain checked"),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Create three checked files");
+    body["contract"] = json!({"goal":"Create three checked files","criteria":[
+        {"FileContents":{"path":"a.txt","expected":"checked"}},
+        {"FileContents":{"path":"b.txt","expected":"checked"}},
+        {"FileContents":{"path":"c.txt","expected":"checked"}}
+    ]});
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(chat["result"]["outcome"], "verified");
+    assert_eq!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["action"] == "progress_check" && e["ok"] == true)
+            .count(),
+        3
+    );
+    fixture.join().unwrap();
 }
 
 fn approve(s: &Server, id: &str) {
@@ -1889,7 +2507,11 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     );
     b.set_reduced_motion(true).unwrap();
     b.click("#prod-view-toggle").unwrap();
-    assert_eq!(b.eval("document.querySelector('#production').dataset.view==='conversation'").unwrap(),true);
+    assert_eq!(
+        b.eval("document.querySelector('#production').dataset.view==='conversation'")
+            .unwrap(),
+        true
+    );
     b.click("#prod-view-toggle").unwrap();
     b.set_reduced_motion(false).unwrap();
     b.click("#prod-cap-files").unwrap();
@@ -1933,14 +2555,31 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     );
     b.eval("document.querySelector('#prod-view-toggle').click();document.startViewTransition=__nativeMorph;document.querySelector('#instruction').value=''").unwrap();
     b.set_viewport(390, 844).unwrap();
-    b.eval("document.querySelector('#main').scrollTop=0")
-        .unwrap();
-    assert_eq!(b.eval("document.documentElement.scrollWidth<=innerWidth && document.querySelector('#production').scrollWidth<=document.querySelector('#production').clientWidth").unwrap(),true);
+    // DeviceMetricsOverride acknowledges before resize observers and layout
+    // animations have settled. Wait for that state, not for a passing width.
+    b.eval("document.querySelector('#main').scrollTop=0;window.__resizeFramesDone=false;requestAnimationFrame(()=>requestAnimationFrame(()=>window.__resizeFramesDone=true))").unwrap();
+    browser_wait(
+        &mut b,
+        "__resizeFramesDone && __morphPending===0 && !document.querySelector('#production').classList.contains('layout-morphing')",
+    );
+    let layout = b.eval("(()=>{const root=document.querySelector('#production');return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,productionWidth:root.scrollWidth,productionClient:root.clientWidth,view:root.dataset.view,errors:window.__errors,overflow:[...root.querySelectorAll('*')].map(e=>({id:e.id,tag:e.tagName,rect:e.getBoundingClientRect().toJSON()})).filter(e=>e.rect.right>innerWidth)}})()").unwrap();
+    fs::write(
+        artifacts.join("production-mobile-layout.json"),
+        serde_json::to_vec_pretty(&layout).unwrap(),
+    )
+    .unwrap();
     fs::write(
         artifacts.join("production-mobile.png"),
         b.screenshot().unwrap(),
     )
     .unwrap();
+    assert!(
+        layout["documentWidth"].as_u64().unwrap() <= layout["viewport"].as_u64().unwrap()
+            && layout["productionWidth"].as_u64().unwrap()
+                <= layout["productionClient"].as_u64().unwrap(),
+        "Mobile overflow: {layout}; screenshot: {}",
+        artifacts.join("production-mobile.png").display()
+    );
     b.set_viewport(1536, 960).unwrap();
     browser_wait(
         &mut b,

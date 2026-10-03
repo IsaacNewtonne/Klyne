@@ -4,7 +4,10 @@ pub fn requires_desktop_outcome(evidence: &[serde_json::Value]) -> bool {
         e["agent"] != "Reviewer"
             && e["action"].as_str().is_some_and(|action| {
                 action.starts_with("desktop_")
-                    && !matches!(action, "desktop_observe" | "desktop_apps" | "desktop_clipboard_get")
+                    && !matches!(
+                        action,
+                        "desktop_observe" | "desktop_apps" | "desktop_clipboard_get"
+                    )
             })
     })
 }
@@ -69,7 +72,8 @@ pub fn observation_candidates(evidence: &[serde_json::Value]) -> Vec<usize> {
                     | "Runtime check"
                     | "Completion review"
             )
-        ) && e["action"].is_string() && e["action"] != "evidence_read"
+        ) && e["action"].is_string()
+            && e["action"] != "evidence_read"
     });
     evidence
         .iter()
@@ -362,10 +366,23 @@ mod tests {
     #[test]
     fn conversational_replies_do_not_require_desktop_outcomes() {
         assert!(!requires_desktop_outcome(&[]));
-        assert!(!requires_desktop_outcome(&[json!({"action":"desktop_observe","agent":"Reviewer"})]));
-        assert!(!requires_desktop_outcome(&[json!({"action":"desktop_apps","agent":"Assistant"})]));
-        assert!(requires_desktop_outcome(&[json!({"action":"desktop_type","agent":"Assistant"})]));
-        assert!(check_review("hi", &json!({"decision":"complete","summary":"Hi! How can I help?"}), &[]).is_ok());
+        assert!(!requires_desktop_outcome(&[
+            json!({"action":"desktop_observe","agent":"Reviewer"})
+        ]));
+        assert!(!requires_desktop_outcome(&[
+            json!({"action":"desktop_apps","agent":"Assistant"})
+        ]));
+        assert!(requires_desktop_outcome(&[
+            json!({"action":"desktop_type","agent":"Assistant"})
+        ]));
+        assert!(
+            check_review(
+                "hi",
+                &json!({"decision":"complete","summary":"Hi! How can I help?"}),
+                &[]
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn unrelated_actions_and_targets_never_confirm_saves() {

@@ -1,0 +1,10 @@
+{
+  "name": "klyne-ui-checks",
+  "private": true,
+  "scripts": {
+    "test": "node scripts/test-activity-all.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0-alpha-2026-08-31"
+  }
+}

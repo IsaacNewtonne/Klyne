@@ -134,7 +134,13 @@ $('export').onclick = () => {
 const providerNames = {demo:'Built-in file agent',ollama:'Ollama',opencode:'OpenCode',codex:'Codex'};
 let providerRevision = 0;
 const providerConfig = () => ({kind:$('provider-kind').value,endpoint:$('provider-endpoint').value.trim(),model:$('provider-model').value.trim()});
-function saveProvider() { try { localStorage.setItem('klyne-provider', JSON.stringify(providerConfig())); } catch (_) {} }
+function savedProviderFor(kind) {
+  try {
+    const value = JSON.parse(localStorage.getItem('klyne-provider-'+kind) || 'null') || JSON.parse(localStorage.getItem('klyne-provider') || 'null');
+    if (value?.kind === kind) return {endpoint:typeof value.endpoint === 'string' ? value.endpoint : '',model:typeof value.model === 'string' ? value.model : ''};
+  } catch (_) {} return {};
+}
+function saveProvider() { try { const config=providerConfig(),value=JSON.stringify(config);localStorage.setItem('klyne-provider-'+config.kind,value);localStorage.setItem('klyne-provider',value); } catch (_) {} }
 function configureProvider(config = {}) {
   const kind = $('provider-kind').value;
   ++providerRevision;
@@ -151,10 +157,25 @@ function configureProvider(config = {}) {
   $('provider-help').textContent = ({ollama:'Uses models installed on this computer. Start Ollama, then check the connection.',opencode:'Start opencode serve --hostname 127.0.0.1 --port 4096. Model hosting depends on your OpenCode provider.',codex:'Uses your existing Codex CLI login. Sign in with codex login if needed. Model inference may use the cloud.'})[kind] || '';
   $('provider-status').textContent = 'Not checked';
   $('provider-summary').textContent = 'Configure';
-  $('provider-models').replaceChildren();
+  $('provider-models').replaceChildren();clearAvailableModels();
   saveProvider();
 }
-$('provider-kind').onchange = () => configureProvider();
+function clearAvailableModels(){
+  $('available-models-field').hidden=true;$('available-models').replaceChildren();
+}
+function showAvailableModels(models){
+  const picker=$('available-models'),current=$('provider-model').value.trim();
+  const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Choose a model';placeholder.disabled=true;
+  picker.replaceChildren(placeholder,...models.map(model=>{const option=document.createElement('option');option.value=model;option.textContent=model;return option;}));
+  picker.value=models.includes(current)?current:'';
+  $('available-models-field').hidden=!models.length;
+  if(current&&models.length&&!models.includes(current))$('provider-status').textContent+=' The current model was not found. Choose an available model below.';
+}
+$('available-models').onchange=()=>{
+  $('provider-model').value=$('available-models').value;
+  ++providerRevision;saveProvider();$('provider-status').textContent='Model selected.';
+};
+$('provider-kind').onchange = () => configureProvider(savedProviderFor($('provider-kind').value));
 for (const id of ['provider-endpoint','provider-model']) $(id).oninput = () => { ++providerRevision; $('provider-status').textContent = 'Settings changed; check again.'; $('provider-summary').textContent = 'Configure'; saveProvider(); };
 $('provider-model').addEventListener('invalid', () => { $('provider-settings').open = true; });
 $('check-provider').onclick = async () => {
@@ -166,6 +187,7 @@ $('check-provider').onclick = async () => {
     $('provider-status').textContent = result.message; $('provider-summary').textContent = 'Connected';
     $('provider-models').replaceChildren(...result.models.map(model => { const option = document.createElement('option'); option.value = model; return option; }));
     if (!$('provider-model').value && result.models.length) $('provider-model').value = result.models[0];
+    showAvailableModels(result.models);
     saveProvider();
   } catch (error) { if (revision === providerRevision) { $('provider-status').textContent = error.message; $('provider-summary').textContent = 'Needs attention'; } }
   finally { $('check-provider').disabled = false; }
@@ -173,5 +195,5 @@ $('check-provider').onclick = async () => {
 let savedProvider = {};
 try { savedProvider = JSON.parse(localStorage.getItem('klyne-provider') || '{}') || {}; } catch (_) {}
 if (Object.hasOwn(providerNames, savedProvider.kind)) $('provider-kind').value = savedProvider.kind;
-configureProvider(savedProvider);
+configureProvider(savedProviderFor($('provider-kind').value));
 refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 1500);

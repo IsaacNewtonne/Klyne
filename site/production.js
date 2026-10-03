@@ -533,7 +533,14 @@
   $('prod-view-toggle').onclick=()=>{$('prod-inspector').close();inspect=null;conversation=!conversation;morphView();};
   new ResizeObserver(()=>{graphDirty=true;scheduleMorph();requestAnimationFrame(fit);}).observe($('prod-graph'));
   new ResizeObserver(()=>{scheduleMorph();requestAnimationFrame(fit);}).observe($('main'));
-  window.addEventListener('resize',()=>{graphDirty=true;cancelMotion();render();});
+  window.addEventListener('resize',()=>{
+    // Desktop rectangles must not become animation origins in a mobile layout.
+    // Their translated/scaled cards can otherwise extend beyond the viewport.
+    ++layoutGeneration;cancelAnimationFrame(morphFrame);
+    for(const animation of layoutAnimations.values())animation.cancel();
+    layoutAnimations.clear();layoutRects.clear();root.classList.remove('layout-morphing');
+    graphDirty=true;cancelMotion();render();
+  });
   motion.addEventListener('change',()=>{for(const a of layoutAnimations.values())a.cancel();layoutAnimations.clear();cancelMotion();render();});
   document.documentElement.dataset.pageHidden=String(document.hidden);
   document.addEventListener('visibilitychange',()=>{document.documentElement.dataset.pageHidden=String(document.hidden);root.classList.toggle('prod-paused',document.hidden);if(document.hidden){for(const a of layoutAnimations.values())a.cancel();layoutAnimations.clear();layoutRects.clear();cancelMotion();clearTimeout(appTimer);}else {refreshApps();render();}});

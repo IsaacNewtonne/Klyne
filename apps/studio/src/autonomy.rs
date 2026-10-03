@@ -39,9 +39,11 @@ pub fn blocker_problem(value: &Value, evidence: &[Value], goal: &str) -> Option<
                         id.as_u64()
                             .and_then(|i| usize::try_from(i).ok())
                             .and_then(|i| evidence.get(i))
-                            .is_some_and(|e| e["action"].is_string()
-                                && e["action"] != "evidence_read"
-                                && e.get("data").is_some_and(|data| !data.is_null()))
+                            .is_some_and(|e| {
+                                e["action"].is_string()
+                                    && e["action"] != "evidence_read"
+                                    && e.get("data").is_some_and(|data| !data.is_null())
+                            })
                     })
             });
             if supported {
@@ -82,11 +84,67 @@ pub fn available_tools(web: bool, terminal: bool, apps: bool, desktop: bool) -> 
         "workspace_root": ".",
         "note": "Built-in inventory, independent of saved extensions. Host policy, review restrictions and path checks apply at dispatch."
     });
-    if web { groups["web"] = json!(["fetch_url", "browser_open", "browser_read", "browser_click", "browser_fill", "browser_screenshot", "browser_close"]); }
-    if terminal { groups["terminal"] = json!(["run_shell", "tool_save", "tool_test", "tool_run", "skill_save", "memory_save", "capability_restore", "runtime_status", "runtime_attest", "runtime_stage", "self_improve"]); }
-    if desktop { groups["desktop"] = json!(["desktop_observe", "desktop_apps", "desktop_launch", "desktop_focus", "desktop_click", "desktop_type", "desktop_key", "desktop_scroll", "desktop_invoke", "desktop_fill", "desktop_drag", "desktop_clipboard_get", "desktop_clipboard_set"]); }
-    if web && terminal { groups["browser_developer"] = json!(["browser_attach", "browser_eval"]); }
-    if apps { groups["apps"] = json!(["app_list", "app_connect", "app_inspect", "app_operations", "app_invoke", "app_call", "app_forget", "mcp_discover", "mcp_setup", "mcp_tools", "mcp_call"]); }
+    if web {
+        groups["web"] = json!([
+            "fetch_url",
+            "browser_open",
+            "browser_read",
+            "browser_click",
+            "browser_fill",
+            "browser_screenshot",
+            "browser_close"
+        ]);
+    }
+    if terminal {
+        groups["terminal"] = json!([
+            "run_shell",
+            "tool_save",
+            "tool_test",
+            "tool_run",
+            "skill_save",
+            "memory_save",
+            "capability_restore",
+            "runtime_status",
+            "runtime_attest",
+            "runtime_stage",
+            "self_improve"
+        ]);
+    }
+    if desktop {
+        groups["desktop"] = json!([
+            "desktop_observe",
+            "desktop_apps",
+            "desktop_launch",
+            "desktop_focus",
+            "desktop_click",
+            "desktop_type",
+            "desktop_key",
+            "desktop_scroll",
+            "desktop_invoke",
+            "desktop_fill",
+            "desktop_drag",
+            "desktop_clipboard_get",
+            "desktop_clipboard_set"
+        ]);
+    }
+    if web && terminal {
+        groups["browser_developer"] = json!(["browser_attach", "browser_eval"]);
+    }
+    if apps {
+        groups["apps"] = json!([
+            "app_list",
+            "app_connect",
+            "app_inspect",
+            "app_operations",
+            "app_invoke",
+            "app_call",
+            "app_forget",
+            "mcp_discover",
+            "mcp_setup",
+            "mcp_tools",
+            "mcp_call"
+        ]);
+    }
     groups
 }
 
@@ -158,11 +216,21 @@ mod tests {
     #[test]
     fn built_in_files_do_not_depend_on_external_access_or_saved_extensions() {
         let inventory = available_tools(false, false, false, false);
-        assert!(inventory["workspace_files"].as_array().unwrap().contains(&json!("list_dir")));
+        assert!(
+            inventory["workspace_files"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("list_dir"))
+        );
         assert_eq!(inventory["workspace_root"], ".");
         assert!(inventory.get("terminal").is_none());
         assert!(inventory.get("desktop").is_none());
-        assert!(available_tools(false, false, false, true)["desktop"].as_array().unwrap().contains(&json!("desktop_focus")));
+        assert!(
+            available_tools(false, false, false, true)["desktop"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("desktop_focus"))
+        );
     }
     #[test]
     fn historical_evidence_is_paginated_without_reexecuting_tools() {
@@ -201,9 +269,30 @@ mod tests {
     #[test]
     fn historical_read_and_empty_data_do_not_establish_current_blockers() {
         let q = json!({"question":"Please sign in","blocker":{"kind":"authentication","missing":"session","why_user":"Sign-in requires the user","evidence_indices":[0]}});
-        assert!(blocker_problem(&q, &[json!({"action":"evidence_read","data":"old sign-in page"})], "Open app").is_some());
-        assert!(blocker_problem(&q, &[json!({"action":"browser_read","data":null})], "Open app").is_some());
-        assert!(blocker_problem(&q, &[json!({"action":"browser_read","data":"current sign-in page"})], "Open app").is_none());
+        assert!(
+            blocker_problem(
+                &q,
+                &[json!({"action":"evidence_read","data":"old sign-in page"})],
+                "Open app"
+            )
+            .is_some()
+        );
+        assert!(
+            blocker_problem(
+                &q,
+                &[json!({"action":"browser_read","data":null})],
+                "Open app"
+            )
+            .is_some()
+        );
+        assert!(
+            blocker_problem(
+                &q,
+                &[json!({"action":"browser_read","data":"current sign-in page"})],
+                "Open app"
+            )
+            .is_none()
+        );
     }
     #[test]
     fn supplied_information_is_reused_and_real_preferences_remain_questions() {

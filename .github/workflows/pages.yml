@@ -11,7 +11,12 @@ concurrency:
   group: pages
   cancel-in-progress: true
 jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    permissions:
+      contents: read
   deploy:
+    needs: checks
     runs-on: ubuntu-latest
     environment:
       name: github-pages

@@ -1,18 +1,18 @@
 mod activation;
-mod autonomy;
-mod diagnostics;
-mod performance;
 mod app_adapter;
 mod app_schema;
+mod autonomy;
 mod broker;
 mod browser_tools;
 mod capabilities;
 mod chat;
+mod chat_paths;
 mod chat_store;
 mod clarification;
 mod completion_guard;
 mod connections;
 mod desktop;
+mod diagnostics;
 mod document_save;
 mod execution_graph;
 mod failure_policy;
@@ -20,6 +20,8 @@ mod improvement;
 mod local_apps;
 mod mcp;
 mod network;
+mod performance;
+mod progress;
 mod recovery;
 mod restart_reconciliation;
 mod route_recovery;
@@ -362,10 +364,8 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
                 .and_then(|n| n.parse::<u64>().ok())
                 .unwrap_or(0);
             let mut value = studio.chats.pulse(id, since)?;
-            value["serve_ms"] = serde_json::json!(started
-                .elapsed()
-                .as_millis()
-                .min(u128::from(u64::MAX)) as u64);
+            value["serve_ms"] =
+                serde_json::json!(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
             return Ok(value);
         }
         if method == "GET"
@@ -586,16 +586,28 @@ fn main() -> io::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--stage-runtime") {
         let arguments: Vec<String> = std::env::args().skip(2).collect();
         if arguments.len() < 5 || arguments[3] != "--" {
-            return Err(err("usage: klyne-studio --stage-runtime ROOT BINARY TEST_WORKSPACE -- TEST_PROGRAM [ARGS...]"));
+            return Err(err(
+                "usage: klyne-studio --stage-runtime ROOT BINARY TEST_WORKSPACE -- TEST_PROGRAM [ARGS...]",
+            ));
         }
         let root = fs::canonicalize(&arguments[0])?;
         safe_dir(&root)?;
         let binary = fs::canonicalize(&arguments[1])?;
         let workspace = fs::canonicalize(&arguments[2])?;
         let digest = activation::digest(&binary)?;
-        activation::run_tests(&root, &binary, &digest, &arguments[4..], &workspace, &AtomicBool::new(false))?;
+        activation::run_tests(
+            &root,
+            &binary,
+            &digest,
+            &arguments[4..],
+            &workspace,
+            &AtomicBool::new(false),
+        )?;
         let candidate = activation::stage_from_operator(&root, &binary, &digest)?;
-        println!("{}", json!({"staged":candidate,"note":"The supervisor activates when idle. Check runtime/last-result.json; staging alone is not activation."}));
+        println!(
+            "{}",
+            json!({"staged":candidate,"note":"The supervisor activates when idle. Check runtime/last-result.json; staging alone is not activation."})
+        );
         return Ok(());
     }
     if std::env::args().any(|a| a == "--runtime-check") {

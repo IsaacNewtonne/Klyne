@@ -14,6 +14,16 @@ if (-not $NoBrowser) {
     if (-not $browser) { throw 'Install Microsoft Edge or Chrome to open the Klyne app window.' }
 }
 
+function ConvertTo-KlyneComparablePath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if ($Path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+        $Path = '\\' + $Path.Substring(8)
+    } elseif ($Path.StartsWith('\\?\')) {
+        $Path = $Path.Substring(4)
+    }
+    return [System.IO.Path]::GetFullPath($Path)
+}
+
 function Get-KlyneProcess {
     try {
         $health = Invoke-RestMethod "$url/api/runtime/ready" -TimeoutSec 2
@@ -24,7 +34,9 @@ function Get-KlyneProcess {
             $active = Get-Content -Raw -LiteralPath $current | ConvertFrom-Json
             if ($active.binary) { $expected = $active.binary }
         }
-        if ($process.Path -ne $expected) { throw 'Unexpected server' }
+        $actualPath = ConvertTo-KlyneComparablePath $process.Path
+        $expectedPath = ConvertTo-KlyneComparablePath $expected
+        if (-not $actualPath -or $actualPath -ne $expectedPath) { throw 'Unexpected server' }
         return $process
     } catch { return $null }
 }
@@ -39,14 +51,14 @@ if (-not $running) {
 
     $supervisor = Join-Path $repo 'target\debug\klyne-supervisor.exe'
     $studio = Join-Path $repo 'target\debug\klyne-studio.exe'
-    if (-not (Test-Path $supervisor) -or -not (Test-Path $studio)) {
-        Write-Host 'Building Klyne for the first launch...'
-        Push-Location $repo
-        try {
-            & cargo build --locked -p klyne-studio --bins
-            if ($LASTEXITCODE -ne 0) { throw 'Klyne build failed.' }
-        } finally { Pop-Location }
-    }
+    # Cargo's incremental check is cheap when unchanged. Existence alone can
+    # keep launching an old binary after source fixes or embedded UI updates.
+    Write-Host 'Checking the Klyne build...'
+    Push-Location $repo
+    try {
+        & cargo build --locked -p klyne-studio --bins
+        if ($LASTEXITCODE -ne 0) { throw 'Klyne build failed.' }
+    } finally { Pop-Location }
     New-Item -ItemType Directory -Force -Path $root | Out-Null
     $log = Join-Path $root ('launcher-' + [guid]::NewGuid().ToString('N'))
     $launchArgs = @('--root', ('"' + $root + '"'), '--port', '4317')
@@ -61,7 +73,32 @@ if (-not $running) {
     } while ([DateTime]::UtcNow -lt $deadline)
     if (-not $running) { throw "Klyne is still starting. See $log.err.log and try klyne again." }
 }
-Write-Host "Klyne is running at $url"
 if ($browser -and $alreadyRunning) {
-    Start-Process -FilePath $browser -ArgumentList @("--app=$url", ('--user-data-dir="' + (Join-Path $root 'app-browser') + '"'), '--no-first-run', '--no-default-browser-check', '--disable-background-mode')
+    Start-Process -FilePath $browser -ArgumentList @("--app=$url", ('--user-data-dir="' + (Join-Path $root 'app-browser') + '"'), '--no-first-run', '--no-default-browser-check', '--disable-background-mode') -WindowStyle Normal
+}
+if ($browser) {
+    $browserName = [System.IO.Path]::GetFileName($browser)
+    $profile = Join-Path $root 'app-browser'
+    $windowDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    $appWindow = $null
+    do {
+        $browserProcesses = Get-CimInstance Win32_Process -Filter "Name = '$browserName'"
+        foreach ($candidate in $browserProcesses) {
+            if ($candidate.CommandLine -and $candidate.CommandLine.Contains($profile) -and $candidate.CommandLine.Contains("--app=$url")) {
+                $windowProcess = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
+                if ($windowProcess -and $windowProcess.MainWindowHandle -ne 0) {
+                    $appWindow = $windowProcess
+                    break
+                }
+            }
+        }
+        if ($appWindow) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $windowDeadline)
+    if (-not $appWindow) {
+        throw "Klyne's server started, but its app window did not appear. You can open $url in your browser."
+    }
+    Write-Host "Klyne window is open at $url"
+} else {
+    Write-Host "Klyne is running at $url"
 }

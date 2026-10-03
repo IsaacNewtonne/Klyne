@@ -1,17 +1,19 @@
+mod support;
 use harness_browser::{BrowserLimits, ControlledBrowser};
 use serde_json::Value;
 use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
+use support::FixtureProcess;
 // Chrome startup is resource intensive; avoid competing isolated launches.
 static BROWSER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct Server {
-    child: Child,
+    child: FixtureProcess,
     root: tempfile::TempDir,
     addr: String,
 }
@@ -21,12 +23,14 @@ impl Server {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let root = tempfile::tempdir().unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
-            .args(["--port", &port.to_string(), "--root"])
-            .arg(root.path())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
+        let child = FixtureProcess::new(
+            Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
+                .args(["--port", &port.to_string(), "--root"])
+                .arg(root.path())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
         let server = Self {
             child,
             root,
@@ -358,12 +362,14 @@ fn run_survives_server_restart_and_terminal_resume_is_refused() {
     s.child.kill().unwrap();
     s.child.wait().unwrap();
     let port = s.addr.split(':').next_back().unwrap();
-    s.child = Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
-        .args(["--port", port, "--root"])
-        .arg(s.root.path())
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
+    s.child = FixtureProcess::new(
+        Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
+            .args(["--port", port, "--root"])
+            .arg(s.root.path())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     while TcpStream::connect(&s.addr).is_err() {
         assert!(Instant::now() < deadline);
