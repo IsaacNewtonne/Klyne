@@ -6,7 +6,7 @@ const {launch} = require('./test-browser.cjs');
 (async () => {
   const browser = await launch();
   try {
-    const page = await browser.newPage(), errors = [], submissions = [];
+    const page = await browser.newPage(), errors = [], submissions = [], scheduleRequests = [];
     page.on('pageerror', error => errors.push(error.message));
     const fixture = {
       id:'123',title:'Previous project',status:'Stopped',messages:[],tasks:[],evidence:[],pending:null,
@@ -23,6 +23,10 @@ const {launch} = require('./test-browser.cjs');
         return route.fulfill({path:local,contentType:file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'});
       }
       if (url.pathname==='/api/connections/check') return route.fulfill({json:{message:'Ollama is online.',models:['tiger-gemma-12b-v3:IQ4_XS','another-model:latest']}});
+      if (url.pathname==='/api/schedules') {
+        if(route.request().method()==='POST') scheduleRequests.push(route.request().postDataJSON());
+        return route.fulfill({json:{jobs:[],id:'scheduled-fixture'}});
+      }
       if (url.pathname==='/api/chats' && route.request().method()==='POST') {
         submissions.push(route.request().postDataJSON());
         // Record the actual user-form payload; never call a model or change a project.
@@ -102,6 +106,52 @@ const {launch} = require('./test-browser.cjs');
     await page.waitForFunction(() => !submitting);
     assert.equal(submissions.at(-1).resume,true);
     assert.equal(submissions.at(-1).provider.model,'tiger-gemma-12b-v3:IQ4_XS');
+    // Reviewer settings are sent independently and restored for new chats.
+    await page.locator('#new-chat').click();
+    await page.locator('#settings-button').click();
+    await page.locator('#review-settings > summary').click();
+    await page.locator('#reviewer-kind').selectOption('ollama');
+    await page.locator('#reviewer-model').fill('review-model');
+    await page.locator('#check-reviewer').click();
+    await page.waitForFunction(() => document.querySelector('#reviewer-status').textContent==='Ollama is online.');
+    await page.locator('#settings .dialog-heading button').click();
+    await page.reload();await ready();
+    assert.equal(await page.locator('#reviewer-model').inputValue(),'review-model');
+    await page.locator('#instruction').fill('Inspect my files');
+    await page.locator('#send').click();
+    await page.waitForFunction(() => document.querySelector('#form-error').textContent==='Captured test submission');
+    assert.equal(submissions.at(-1).reviewer.model,'review-model');
+    await page.locator('#settings-button').click();
+    await page.locator('#intelligence-settings > summary').click();
+    await page.locator('#decisions-enabled').check();
+    await page.locator('#learn-procedures').check();
+    await page.locator('#decision-specialist').check();
+    await page.locator('#decision-price').fill('0.25');
+    await page.locator('#decision-price').press('Tab');
+    await page.locator('#settings .dialog-heading button').click();
+    await page.reload();await ready();
+    assert.equal(await page.locator('#decisions-enabled').isChecked(),true);
+    await page.locator('#instruction').fill('Route this task');
+    await page.locator('#send').click();
+    await page.waitForFunction(() => document.querySelector('#form-error').textContent==='Captured test submission');
+    assert.equal(submissions.at(-1).decisions.specialist.model,'review-model');
+    assert.equal(submissions.at(-1).decisions.input_usd_per_million,0.25);
+    assert.equal(submissions.at(-1).learn_procedures,true);
+    // Existing conversations use their saved reviewer, not the new-chat default.
+    fixture.execution.reviewer={kind:'ollama',endpoint:'http://127.0.0.1:11434',model:'saved-reviewer'};
+    fixture.status='Completed';fixture.prompt_maker=false;
+    await page.locator('.chat-item[data-chat="123"]').click();
+    await page.waitForFunction(() => snapshot?.id==='123');
+    assert.equal(await page.locator('#reviewer-model').inputValue(),'saved-reviewer');
+    assert.equal(await page.locator('#decisions-enabled').isChecked(),false);
+    assert.equal(await page.locator('#learn-procedures').isChecked(),false);
+    await page.locator('#settings-button').click();
+    await page.locator('#schedule-settings > summary').click();
+    await page.locator('#schedule-minutes').fill('60');
+    await page.locator('#schedule-create').click();
+    await page.waitForFunction(() => document.querySelector('#schedule-status').textContent.startsWith('Scheduled with'));
+    assert.equal(scheduleRequests.at(-1).chat_id,'123');
+    assert.equal(scheduleRequests.at(-1).interval_seconds,3600);
     assert.deepEqual(errors,[]);
     console.log('Settings: new-chat isolation, submitted workspace, trusted defaults and saved conversation overrides passed.');
   } finally { await browser.close(); }

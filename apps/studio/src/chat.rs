@@ -62,6 +62,18 @@ pub struct Task {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Execution {
+    pub voice_turn: bool,
+    pub voice_routed: bool,
+    pub decisions: crate::decisions::Config,
+    pub routing: Option<Value>,
+    pub routing_attempted: bool,
+    pub learn_procedures: bool,
+    pub procedure: Option<Value>,
+    pub procedure_prepared: bool,
+    pub procedure_initially_satisfied: bool,
+    /// Optional review connection, pinned with the goal across restarts.
+    pub reviewer: Option<connections::Connection>,
+    pub progress: crate::progress::Journal,
     pub model_timings: Vec<crate::performance::ModelSample>,
     /// Per-goal latency trace: request/model/tool/observation IDs, stage
     /// timers and responsiveness milestones. Content-free.
@@ -595,6 +607,30 @@ impl Chats {
             chat.prompt_maker = enabled;
         }
         chat.provider = provider;
+        if let Some(value) = body.get("decisions") {
+            let config: crate::decisions::Config =
+                serde_json::from_value(value.clone()).map_err(err)?;
+            config.validate()?;
+            chat.execution.decisions = config;
+        }
+        if let Some(value) = body.get("learn_procedures") {
+            chat.execution.learn_procedures = value
+                .as_bool()
+                .ok_or_else(|| err("learn_procedures must be a boolean"))?;
+        }
+        if let Some(value) = body.get("reviewer") {
+            chat.execution.reviewer = if value.is_null() {
+                None
+            } else {
+                let connection = connections::Connection::parse(value)?;
+                if connection.kind == "demo"
+                    || (connection.kind != "codex" && connection.model.is_empty())
+                {
+                    return Err(err("Choose a model for the reviewer"));
+                }
+                Some(connection)
+            };
+        }
         let resume = body["resume"]
             .as_bool()
             .unwrap_or(chat.status == "Needs input");
@@ -651,6 +687,14 @@ impl Chats {
             ));
         }
         if !resume {
+            chat.execution.voice_turn = body["voice_turn"].as_bool().unwrap_or(false);
+            chat.execution.voice_routed = false;
+            chat.execution.progress = crate::progress::Journal::default();
+            chat.execution.routing = None;
+            chat.execution.routing_attempted = false;
+            chat.execution.procedure = None;
+            chat.execution.procedure_prepared = false;
+            chat.execution.procedure_initially_satisfied = false;
             chat.execution.diagnostics.begin_goal();
             chat.execution.model_timings.clear();
             // A fresh goal starts a fresh latency trace. Resumes continue
@@ -816,10 +860,68 @@ impl Chats {
                     task.status = chat.status.clone();
                 }
             }
+            if chat.execution.learn_procedures && !stop.load(Ordering::SeqCst) {
+                let secrets = chat_secrets(&chat);
+                if let Err(error) = crate::procedures::finish(&service.root, &chat, &secrets) {
+                    chat.evidence.push(json!({"agent":"Procedure library","action":"procedure_record","ok":false,"summary":"Procedure could not be recorded","data":error.to_string()}));
+                }
+            }
             let _ = service.save(&mut chat);
             service.active.lock().unwrap().remove(&chat.id);
         });
         Ok(json!({"id":id}))
+    }
+    fn typed_decision(
+        &self,
+        chat: &mut Chat,
+        stop: &AtomicBool,
+        start: Instant,
+        state: Value,
+        questions: Value,
+    ) -> io::Result<Value> {
+        guard(chat, stop, start)?;
+        if chat.execution.max_cost_usd > 0.0
+            && chat.execution.decisions.input_usd_per_million == 0.0
+        {
+            return Err(err(
+                "Set the decision input price before using a spend-limited task",
+            ));
+        }
+        chat.used += 1;
+        chat.activity = Some(
+            json!({"kind":"model","role":"decision","agent":"Decision service","started_at":desktop::now_ms()}),
+        );
+        self.save(chat)?;
+        let result = crate::decisions::ask(
+            &chat.execution.decisions,
+            state,
+            questions,
+            &chat_secrets(chat),
+            stop,
+        );
+        chat.activity = None;
+        match result {
+            Ok(answer) => {
+                chat.prompt_tokens = chat.prompt_tokens.saturating_add(answer.input_tokens);
+                chat.completion_tokens =
+                    chat.completion_tokens.saturating_add(answer.output_tokens);
+                chat.cost_usd += answer.cost_usd;
+                if let Some(error) = answer.validation_error {
+                    chat.evidence.push(json!({"agent":"Decision service","action":"typed_decision","ok":false,"summary":"Invalid typed answers; metered usage retained","input_tokens":answer.input_tokens,"output_tokens":answer.output_tokens}));
+                    self.save(chat)?;
+                    guard(chat, stop, start)?;
+                    return Err(err(error));
+                }
+                chat.evidence.push(json!({"agent":"Decision service","action":"typed_decision","ok":true,"summary":"Typed choices received; host checks remain authoritative","data":answer.answers.to_string(),"input_tokens":answer.input_tokens,"output_tokens":answer.output_tokens,"estimated_cost_usd":if chat.execution.decisions.input_usd_per_million>0.0{json!(answer.cost_usd)}else{Value::Null}}));
+                self.save(chat)?;
+                guard(chat, stop, start)?;
+                Ok(answer.answers)
+            }
+            Err(error) => {
+                self.save(chat)?;
+                Err(error)
+            }
+        }
     }
     fn request(
         &self,
@@ -840,6 +942,16 @@ impl Chats {
         );
         self.save(chat)?;
         let mut context = json!({"role":role,"access":chat.access,"original_goal":chat.execution.original_request,"messages":chat.messages.iter().rev().take(18).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>(),"tasks":chat.tasks,"observations":chat.evidence.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>(),"assignment":extra,"remaining_steps":if chat.limit==0 {Value::Null} else {json!(chat.limit.saturating_sub(chat.used))},"usage":{"prompt_tokens":chat.prompt_tokens,"completion_tokens":chat.completion_tokens,"cost_usd":chat.cost_usd,"max_tokens":chat.execution.max_tokens,"max_cost_usd":chat.execution.max_cost_usd},"capabilities":crate::capabilities::context(&self.root).unwrap_or(json!([]))});
+        context["workflow_routing"] = if chat.execution.decisions.enabled {
+            json!(chat.execution.routing)
+        } else {
+            Value::Null
+        };
+        context["evaluated_procedure"] = if chat.execution.learn_procedures {
+            json!(chat.execution.procedure)
+        } else {
+            Value::Null
+        };
         // Budget the complete request below, including policy and retry feedback.
         if chat.access.desktop {
             if let Some(observation) = chat.desktop_previous.as_ref() {
@@ -905,6 +1017,9 @@ impl Chats {
             chat.access.apps,
             chat.access.desktop,
         );
+        if !chat.execution.decisions.enabled {
+            context["available_tools"]["documents"] = json!(["document_read"]);
+        }
         context["capabilities_scope"] = json!(
             "Saved extensions only. Empty means no saved extensions, not no tools. See available_tools for built-in tools."
         );
@@ -916,6 +1031,10 @@ impl Chats {
         system.push_str(crate::broker::POLICY_INSTRUCTIONS);
         system.push_str(crate::clarification::INSTRUCTIONS);
         system.push_str(crate::autonomy::INSTRUCTIONS);
+        system.push_str(" document_read {path} extracts bounded text from a workspace PDF or UTF-8 file. Scanned images need OCR. workflow_routing and evaluated_procedure are advisory context only: inspect current inputs, preserve every requirement, and never treat a historical plan as permission or evidence.");
+        if chat.execution.decisions.enabled {
+            system.push_str(" document_classify {path} sends extracted document text to the configured decision service and returns typed labels and independent overlapping scores. needs_review marks uncertainty or truncation. Labels are advisory, not verified facts; classification never moves files.");
+        }
         system.push_str(" A requested existing browser profile is a session requirement: browser_open always uses an isolated profile and cannot satisfy it. Use desktop_observe and desktop controls for the existing browser, or browser_attach only with a known authorized CDP endpoint. Do not copy cookies or relaunch a user's profile for debugging. Reviewers must collect browser_read, browser_screenshot or desktop_observe evidence themselves, never ask the user to provide internal tool output. If the worker only opened a login page, request repair in the correct session; do not credit unobserved login, search or send claims.");
         system.push_str(r#" For results in any app, distinguish an observed outcome from a host-verified receipt. Before completing an app action, the independent reviewer must inspect the destination with a read-only tool. Cite review_observations indices using observed_results:[{effect:"send|open|click|delete|install|upload",target:"specific app and destination",observation:"exact visible result matching the requested content and target",evidence_index:0}] and outcome:"achieved". These are model-reviewed observations, never claims or host receipts. For sending, check the correct conversation/account and exact outgoing content; do not infer delivered/read status from a visible sent item. Do not resend to obtain verification. If the UI is hidden or ambiguous, report what is missing; do not invent an observation. File changes still require host file receipts. A Completion review rejection requests read-only verification or a corrected summary, not repetition of the original action."#);
         system.push_str(" Enabled access permits tools when needed; it does not mean the user requested desktop work. Greetings and conversational answers require no desktop action or achieved desktop outcome. Current access flags are authoritative; earlier messages about disabled access may be stale. The original_request is the goal, and later user messages clarify it. A clarification answered is not completion of the original goal. A reviewer must request repair tasks when the original goal remains unfinished. Disabled access is not evidence that an app is absent. The context usage block reports metered tokens and spend against turn budgets; prefer fewer information-dense actions as remaining_tokens runs low. Shell commands follow the user-selected command_policy: autonomous permits commands without repeated approval, ask requires exact user grants. Environment secrets and destructive API calls still require exact grants: if the host pauses for approval, do not repeat or rephrase the request — wait for the user's decision and then retry the identical proposal.");
@@ -985,17 +1104,57 @@ impl Chats {
                 context["last_verified_change"] = verified.clone();
             }
         }
+        if role == "voice conversation" {
+            system = r#"You are Klyne, having a spoken conversation. Return ONLY JSON. For ordinary questions or conversation: {"decision":"complete","summary":"A natural, concise answer, usually one to three sentences, in the user's language."}. For any request requiring actions, current information, files, apps, screen inspection, or verification: {"decision":"handoff"}. No tools are available on this conversational route. Never claim to have executed actions. Use the conversation history for follow-ups. Do not read logs or markdown aloud. Do not claim a task is finished based on your own earlier assertion."#.into();
+            let history: Vec<_> = chat
+                .messages
+                .iter()
+                .filter(|m| m.role == "user" || m.agent == "Klyne")
+                .rev()
+                .take(16)
+                .map(
+                    |m| json!({"role":m.role,"text":m.text.chars().take(2000).collect::<String>()}),
+                )
+                .collect();
+            context = json!({"history_newest_first":history,"original_request":chat.execution.original_request});
+        }
         if role == "conversation" {
             system = "Return only JSON: {\"decision\":\"complete\",\"summary\":\"your brief greeting to the user\"}. This is a greeting only. Do not perform or claim actions. No tools are available.".into();
             context = json!({"role":role,"original_request":chat.execution.original_request});
         }
-        let screenshot = (role != "conversation" && chat.access.desktop && screenshot.is_file())
-            .then_some(screenshot);
+        let screenshot = (!matches!(role, "conversation" | "voice conversation")
+            && chat.access.desktop
+            && screenshot.is_file())
+        .then_some(screenshot);
         let root = self
             .root
             .parent()
             .ok_or_else(|| err("Missing runtime root"))?;
-        let mut provider = chat.provider.clone();
+        let dedicated_review = role == "independent reviewer" && chat.execution.reviewer.is_some();
+        let mut provider = if role == "independent reviewer" {
+            chat.execution
+                .reviewer
+                .as_ref()
+                .unwrap_or(&chat.provider)
+                .clone()
+        } else {
+            if chat.execution.decisions.enabled
+                && chat
+                    .execution
+                    .routing
+                    .as_ref()
+                    .is_some_and(|r| r["specialist"] == true)
+            {
+                chat.execution
+                    .decisions
+                    .specialist
+                    .as_ref()
+                    .unwrap_or(&chat.provider)
+                    .clone()
+            } else {
+                chat.provider.clone()
+            }
+        };
         let mut failures = Vec::new();
         let mut responses = Vec::new();
         let mut clarification_reconsidered = false;
@@ -1004,10 +1163,7 @@ impl Chats {
             // Retry feedback includes model output and validation errors;
             // refresh diagnostics and scrub on every attempt, not only entry.
             context["failure_diagnostics"] = chat.execution.diagnostics.context();
-            crate::broker::scrub_value(
-                &mut context,
-                &crate::broker::secret_values(&chat.execution.secret_grants),
-            );
+            crate::broker::scrub_value(&mut context, &chat_secrets(chat));
             if let Some(activity) = chat.activity.as_mut() {
                 activity["provider"] = serde_json::to_value(&provider).map_err(err)?;
             }
@@ -1082,10 +1238,7 @@ impl Chats {
             }
             responses.push(response.as_ref().ok().map(|output| {
                 let mut safe = json!(output.0);
-                crate::broker::scrub_value(
-                    &mut safe,
-                    &crate::broker::secret_values(&chat.execution.secret_grants),
-                );
+                crate::broker::scrub_value(&mut safe, &chat_secrets(chat));
                 safe.as_str()
                     .unwrap_or("")
                     .chars()
@@ -1234,10 +1387,7 @@ impl Chats {
                     // Scrub before the journal truncates: a truncated credential
                     // would no longer match the persistence scrubber's value.
                     let mut diagnostic_error = json!(error.to_string());
-                    crate::broker::scrub_value(
-                        &mut diagnostic_error,
-                        &crate::broker::secret_values(&chat.execution.secret_grants),
-                    );
+                    crate::broker::scrub_value(&mut diagnostic_error, &chat_secrets(chat));
                     chat.execution.diagnostics.record(
                         diagnostic_episode,
                         role,
@@ -1257,7 +1407,12 @@ impl Chats {
                 }
             }
             if attempt == 0 {
-                let fallback = crate::recovery::fallback(root);
+                // A dedicated reviewer must not silently become the worker model.
+                let fallback = if dedicated_review {
+                    None
+                } else {
+                    crate::recovery::fallback(root)
+                };
                 if !transport_failed || fallback.is_some() {
                     guard(chat, stop, start)?;
                     if let Some(fallback) = fallback {
@@ -1289,13 +1444,10 @@ impl Chats {
         if !stop.load(Ordering::SeqCst) {
             let mut incident = json!({
                 "kind":"model_request", "errors":failures, "responses":responses, "role":role,
-                "provider":chat.provider, "system":system, "context":context,
+                "provider":provider, "system":system, "context":context,
                 "pending":chat.pending, "request_step":chat.used, "messages_count":chat.messages.len()
             });
-            crate::broker::scrub_value(
-                &mut incident,
-                &crate::broker::secret_values(&chat.execution.secret_grants),
-            );
+            crate::broker::scrub_value(&mut incident, &chat_secrets(chat));
             let _ = crate::recovery::record(root, &chat.id, incident);
         }
         Err(err(failures.join("; recovery: ")))
@@ -1313,6 +1465,46 @@ impl Chats {
 
     fn drive_inner(&self, chat: &mut Chat, stop: &AtomicBool) -> io::Result<()> {
         let start = Instant::now();
+        if chat.execution.voice_turn
+            && !chat.execution.voice_routed
+            && !chat.prompt_maker
+            && chat.tasks.is_empty()
+            && chat.contract.is_none()
+            && chat.pending.is_none()
+            && chat.execution.approval_queue.is_empty()
+        {
+            chat.execution.voice_routed = true;
+            self.save(chat)?;
+            let reply = self.request(chat, stop, start, "voice conversation", Value::Null)?;
+            guard(chat, stop, start)?;
+            if reply["decision"] == "complete" {
+                push(chat, "assistant", "Klyne", required(&reply, "summary")?);
+                chat.status = "Completed".into();
+                return Ok(());
+            }
+        }
+        if !chat.prompt_maker && !crate::performance::greeting(&chat.execution.original_request) {
+            if chat.execution.decisions.enabled && !chat.execution.routing_attempted {
+                chat.execution.routing_attempted = true;
+                self.save(chat)?;
+                let state = json!({"request":chat.execution.original_request,"available_access":chat.access});
+                match self.typed_decision(chat,stop,start,state,crate::decisions::route_questions()) {
+                    Ok(answer)=>chat.execution.routing=Some(crate::decisions::routing(&answer,chat.execution.decisions.threshold)),
+                    Err(_)=>chat.evidence.push(json!({"agent":"Decision router","action":"decision_route","ok":false,"summary":"Decision routing unavailable; using the configured worker and normal inspection."})),
+                }
+                self.save(chat)?;
+                guard(chat, stop, start)?;
+            }
+            if chat.execution.learn_procedures && !chat.execution.procedure_prepared {
+                guard(chat, stop, start)?;
+                chat.used += 1;
+                let (procedure, passed) = crate::procedures::prepare(&self.root, chat)?;
+                chat.execution.procedure = procedure;
+                chat.execution.procedure_initially_satisfied = passed;
+                chat.execution.procedure_prepared = true;
+                self.save(chat)?;
+            }
+        }
         // Ground planning in the user-supplied project before the model can
         // mistake inspectable information or optional preferences for blockers.
         if chat.access.terminal
@@ -1322,7 +1514,7 @@ impl Chats {
                 .evidence
                 .iter()
                 .skip(chat.execution.evidence_start)
-                .all(|e| e["ok"] != true)
+                .all(|e| e["ok"] != true || e["action"] == "typed_decision")
             && crate::chat_paths::project_directory(&chat.execution.original_request).as_ref()
                 == Some(&chat.workspace)
         {
@@ -1413,7 +1605,20 @@ impl Chats {
                         "worker",
                         json!({"agent":task.agent,"instruction":task.instruction,"expected_result":task.expected_result,"step":index+1,"depends_on":task.depends_on,"recalled_memories":recalled,"experiment_experience":crate::improvement::recall(&self.root,&chat.workspace,&task.instruction)}),
                     )?;
-                    if self.check_repeated_write(chat, stop, start, &decision)? {
+                    let loop_detected = chat.pending.is_none()
+                        && chat.execution.failure.is_none()
+                        && chat.execution.progress.stalled(index, &decision);
+                    if loop_detected {
+                        chat.execution.progress.reviews += 1;
+                        chat.evidence.push(json!({"agent":"Host monitor","action":"loop_check","ok":true,"summary":"The worker is repeating an action with recurring results. Review remaining requirements before another attempt."}));
+                        self.save(chat)?;
+                        if chat.execution.progress.reviews > 2 {
+                            return Err(err(
+                                "Repeated actions continued after two recovery reviews. Unfinished work is saved.",
+                            ));
+                        }
+                    }
+                    if loop_detected || self.check_repeated_write(chat, stop, start, &decision)? {
                         match self.review_stalled_task(chat, stop, start, index)? {
                             Some(review) => decision = review,
                             None => continue,
@@ -1472,6 +1677,7 @@ impl Chats {
                         chat.status = "Needs input".into();
                         return Ok(());
                     }
+                    let evidence_start = chat.evidence.len();
                     if let Err(error) =
                         self.action(chat, stop, start, &task.agent, &decision, false)
                     {
@@ -1488,6 +1694,14 @@ impl Chats {
                             break;
                         }
                         return Err(error);
+                    }
+                    if chat.pending.is_none() {
+                        chat.execution.progress.record(
+                            index,
+                            &decision,
+                            &chat.evidence[evidence_start..],
+                        );
+                        self.save(chat)?;
                     }
                 }
             }
@@ -1785,7 +1999,7 @@ impl Chats {
         for _ in 0..8 {
             let review = self.request(chat, stop, start, "independent reviewer", json!({
                 "scope":"stalled_task",
-                "brief":"A repeated unchanged file write was skipped after a fresh host check. Review ONLY the current assigned task against its full instruction and expected result. Inspect other required files with read-only tools. Return complete only if every requirement of this task is satisfied; the whole goal will still receive final review. Otherwise return repair with concrete remaining work in tasks. Do not repeat completed writes, discard requirements, or ask the user whether to continue. You cannot execute changes in this review.",
+                "brief":"The host detected recurring actions/results or freshly verified an unchanged repeated file write. Repetition does not prove completion. Review ONLY the current assigned task against its full instruction and expected result. Inspect required artifacts with read-only tools. Return complete only if every requirement of this task is satisfied; the whole goal will still receive final review. Otherwise return repair with concrete remaining work in tasks. Preserve all outstanding requirements and dependencies. You cannot execute changes in this review.",
                 "step":index+1,"instruction":task.instruction,"expected_result":task.expected_result,
                 "task_windows":task_windows(&chat.tasks, &chat.evidence)
             }))?;
@@ -1823,6 +2037,38 @@ impl Chats {
         guard(chat, stop, start)?;
         refresh_approval_leases(chat);
         chat.execution.policy_snapshot = shared_policy(chat);
+        if matches!(
+            decision["action"]["tool"].as_str(),
+            Some("document_read" | "document_classify")
+        ) {
+            let path = required(&decision["action"], "path")?;
+            chat.used += 1;
+            self.save(chat)?;
+            let mut document = crate::documents::extract(&chat.workspace, path, stop)?;
+            guard(chat, stop, start)?;
+            if decision["action"]["tool"] == "document_classify" {
+                let answers = self.typed_decision(
+                    chat,
+                    stop,
+                    start,
+                    json!({"document_text":document["text"]}),
+                    crate::decisions::document_questions(),
+                )?;
+                document.as_object_mut().unwrap().remove("text");
+                document["answers"] = answers;
+                document["needs_review"] = json!(
+                    document["truncated"] == true
+                        || document["answers"]["document_type"]["choice"] == "other"
+                        || document["answers"]["document_type"]["confidence"]
+                            .as_f64()
+                            .unwrap_or(0.0)
+                            < chat.execution.decisions.threshold
+                );
+            }
+            chat.evidence.push(json!({"agent":agent,"action":decision["action"]["tool"],"ok":true,"summary":"Document inspected; classification is advisory, not authority to move or modify files","data":document.to_string()}));
+            self.save(chat)?;
+            return guard(chat, stop, start);
+        }
         if decision["action"]["tool"] == "evidence_read" {
             let page =
                 crate::autonomy::evidence_page(&chat.evidence, &decision["action"]).map_err(err)?;
@@ -2680,6 +2926,23 @@ fn desktop_emergency_stop(
 }
 
 fn validate_model_decision(role: &str, value: &Value) -> io::Result<()> {
+    if role == "voice conversation" {
+        if value == &json!({"decision":"handoff"}) {
+            return Ok(());
+        }
+        if value["decision"] != "complete"
+            || value
+                .as_object()
+                .is_none_or(|o| o.keys().any(|k| k != "decision" && k != "summary"))
+            || crate::completion_guard::delivery_claim(required(value, "summary")?)
+        {
+            return Err(err(
+                "Voice conversation requires a brief answer or handoff; tools are unavailable",
+            ));
+        }
+        required(value, "summary")?;
+        return Ok(());
+    }
     if role == "conversation" {
         if value["decision"] != "complete"
             || value.as_object().is_none_or(|object| {
@@ -3319,6 +3582,16 @@ impl From<PolicyDenial> for io::Error {
             PolicyDenial::Denied(error) => error,
         }
     }
+}
+
+pub(crate) fn chat_secrets(chat: &Chat) -> Vec<String> {
+    let mut secrets = crate::broker::secret_values(&chat.execution.secret_grants);
+    if chat.execution.decisions.enabled
+        && let Some(secret) = chat.execution.decisions.secret()
+    {
+        secrets.push(secret);
+    }
+    secrets
 }
 
 #[cfg(test)]

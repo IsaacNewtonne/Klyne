@@ -4,6 +4,90 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+/// Small durable history of completed file operations. Hashes retain no content.
+/// This is a stall signal, never evidence of task completion or permission to replay.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Journal {
+    task: Option<usize>,
+    recent: Vec<(String, String)>,
+    pub reviews: u32,
+}
+impl Journal {
+    fn key(decision: &Value) -> Option<String> {
+        if !matches!(decision["decision"].as_str(), Some("act" | "verify")) {
+            return None;
+        }
+        // Polling remote jobs and desktop observations have different progress
+        // semantics. Leave those and all uncertain effects to their own controllers.
+        if !matches!(
+            decision["action"]["tool"].as_str(),
+            Some(
+                "read_file"
+                    | "read_range"
+                    | "hash_file"
+                    | "search_file"
+                    | "list_dir"
+                    | "stat_path"
+                    | "write_file"
+                    | "patch_file"
+            )
+        ) {
+            return None;
+        }
+        Some(format!(
+            "{:x}",
+            Sha256::digest(decision["action"].to_string().as_bytes())
+        ))
+    }
+    pub fn record(&mut self, task: usize, decision: &Value, evidence: &[Value]) {
+        if self.task != Some(task) {
+            *self = Self {
+                task: Some(task),
+                ..Self::default()
+            };
+        }
+        let Some(key) = Self::key(decision) else {
+            self.recent.clear();
+            return;
+        };
+        if evidence.is_empty() {
+            return;
+        }
+        let outcomes: Vec<_> = evidence
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "ok":e["ok"], "data":e["data"], "receipt":e["receipt"]
+                })
+            })
+            .collect();
+        let outcome = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&outcomes).unwrap())
+        );
+        if !self.recent.contains(&(key.clone(), outcome.clone())) {
+            self.reviews = 0;
+        }
+        self.recent.push((key, outcome));
+        if self.recent.len() > 8 {
+            self.recent.remove(0);
+        }
+    }
+    pub fn stalled(&self, task: usize, decision: &Value) -> bool {
+        if self.task != Some(task) {
+            return false;
+        }
+        let Some(key) = Self::key(decision) else {
+            return false;
+        };
+        let Some(last) = self.recent.iter().rev().find(|(k, _)| *k == key) else {
+            return false;
+        };
+        self.recent.iter().filter(|entry| *entry == last).count() >= 3
+    }
+}
+
 /// A candidate still requires a fresh host check before suppressing the write.
 /// Only the newest receipt for this destination in the current goal is eligible.
 pub fn repeated_write(
@@ -46,6 +130,33 @@ mod tests {
         verification::{FileEvidenceVerifier, Verifier},
     };
     use serde_json::json;
+
+    #[test]
+    fn recurring_reads_and_alternating_writes_survive_restart() {
+        let mut journal = Journal::default();
+        let read = json!({"decision":"act","action":{"tool":"read_file","path":"a"}});
+        let result = [json!({"ok":true,"data":"same"})];
+        for _ in 0..3 {
+            journal.record(0, &read, &result);
+        }
+        let saved: Journal =
+            serde_json::from_value(serde_json::to_value(&journal).unwrap()).unwrap();
+        assert!(saved.stalled(0, &read));
+        assert!(!saved.stalled(1, &read));
+        journal.record(0, &read, &[json!({"ok":true,"data":"changed"})]);
+        assert!(!journal.stalled(0, &read));
+        let a = json!({"decision":"act","action":{"tool":"write_file","path":"a","contents":"A"}});
+        let b = json!({"decision":"act","action":{"tool":"write_file","path":"a","contents":"B"}});
+        for _ in 0..3 {
+            journal.record(1, &a, &result);
+            journal.record(1, &b, &result);
+        }
+        assert!(journal.stalled(1, &a));
+        let shell = json!({"decision":"act","action":{"tool":"run_shell","program":"example"}});
+        assert!(!journal.stalled(1, &shell));
+        journal.record(1, &shell, &result);
+        assert!(!journal.stalled(1, &a));
+    }
 
     #[test]
     fn repeats_require_matching_receipt_and_fresh_bytes() {

@@ -31,11 +31,7 @@ fn connection(path: &Path, write: bool) -> io::Result<Connection> {
     Ok(db)
 }
 pub fn save(path: &Path, chat: &Chat) -> io::Result<()> {
-    save_with_secrets(
-        path,
-        chat,
-        &crate::broker::secret_values(&chat.execution.secret_grants),
-    )
+    save_with_secrets(path, chat, &crate::chat::chat_secrets(chat))
 }
 pub(crate) fn save_with_secrets(path: &Path, chat: &Chat, secrets: &[String]) -> io::Result<()> {
     let mut db = connection(path, true)?;

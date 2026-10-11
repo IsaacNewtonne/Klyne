@@ -261,6 +261,12 @@ impl Drop for Server {
     }
 }
 fn model(replies: Vec<Value>) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+    fixture_service(replies, false)
+}
+fn fixture_service(
+    replies: Vec<Value>,
+    raw: bool,
+) -> (String, std::thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     listener.set_nonblocking(true).unwrap();
@@ -288,7 +294,11 @@ fn model(replies: Vec<Value>) -> (String, std::thread::JoinHandle<Vec<Value>>) {
             if let Some(delay) = reply["_delay_ms"].as_u64() {
                 std::thread::sleep(Duration::from_millis(delay));
             }
-            let body = json!({"message":{"content":reply.to_string()}}).to_string();
+            let body = if raw {
+                reply.to_string()
+            } else {
+                json!({"message":{"content":reply.to_string()}}).to_string()
+            };
             let written = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -304,6 +314,166 @@ fn model(replies: Vec<Value>) -> (String, std::thread::JoinHandle<Vec<Value>>) {
 }
 fn request(endpoint: &str) -> Value {
     json!({"message":"Make a short greeting and check it","provider":{"kind":"ollama","endpoint":endpoint,"model":"fixture"},"access":{"web":false,"terminal":false,"apps":false}})
+}
+
+#[test]
+fn recurring_reads_use_a_separate_persisted_read_only_reviewer() {
+    let s = Server::new();
+    let read = json!({"decision":"act","action":{"tool":"list_dir","path":"."}});
+    let (endpoint, worker) = model(vec![
+        plan(),
+        read.clone(),
+        read.clone(),
+        read.clone(),
+        read.clone(),
+    ]);
+    let (review_endpoint, reviewer) = model(vec![
+        read,
+        complete("Inspected the empty workspace."),
+        complete("Inspected the empty workspace."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Inspect the workspace and report what is there");
+    body["reviewer"] = json!({"kind":"ollama","endpoint":review_endpoint,"model":"review-fixture"});
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(chat["execution"]["reviewer"]["model"], "review-fixture");
+    assert_eq!(worker.join().unwrap().len(), 5);
+    for call in reviewer.join().unwrap() {
+        assert_eq!(call["model"], "review-fixture");
+        let context: Value =
+            serde_json::from_str(call["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(context["role_read_only"], true);
+    }
+    assert_eq!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["action"] == "loop_check")
+            .count(),
+        1
+    );
+    let reloaded = s.api(
+        &format!("/api/chats/{}", created["id"].as_str().unwrap()),
+        None,
+    );
+    assert_eq!(
+        reloaded["execution"]["reviewer"],
+        chat["execution"]["reviewer"]
+    );
+}
+
+#[test]
+fn recurring_read_recovery_is_bounded_across_resume() {
+    let s = Server::new();
+    let read = json!({"decision":"act","action":{"tool":"list_dir","path":"."}});
+    let repair = json!({"decision":"repair","summary":"The required file is still missing.","tasks":[{"agent":"Worker","instruction":"Create the required file"}]});
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        read.clone(),
+        read.clone(),
+        read.clone(),
+        read.clone(),
+        repair.clone(),
+        read.clone(),
+        repair,
+        read.clone(),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Create a useful project summary file");
+    let created = s.api("/api/chats", Some(body));
+    let id = created["id"].as_str().unwrap();
+    let chat = s.wait(id);
+    assert_eq!(chat["status"], "Blocked", "{chat}");
+    assert_ne!(chat["tasks"][0]["status"], "Done");
+    assert_eq!(chat["execution"]["progress"]["reviews"], 3);
+    fixture.join().unwrap();
+    let (endpoint, fixture) = model(vec![read]);
+    resume(&s, &endpoint, id, false, false);
+    let chat = s.wait(id);
+    assert_eq!(chat["status"], "Blocked");
+    assert_eq!(chat["execution"]["progress"]["reviews"], 4);
+    fixture.join().unwrap();
+}
+
+#[test]
+fn scheduled_tasks_capture_limits_do_not_overlap_and_pause_on_attention() {
+    let mut s = Server::new();
+    let read = json!({"decision":"act","action":{"tool":"list_dir","path":"."}});
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        read,
+        complete("Inspected the workspace."),
+        complete("Inspected the workspace."),
+        json!({"tasks":[{"agent":"Inspector","instruction":"Inspect the workspace"}],"_delay_ms":1600}),
+        preference_question("Which project should the scheduled inspection use?"),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Inspect the workspace");
+    let created = s.api("/api/chats", Some(body));
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(s.wait(id)["status"], "Completed");
+    let job = s.api(
+        "/api/schedules",
+        Some(json!({"action":"create","chat_id":id,"interval_seconds":60})),
+    );
+    let job_id = job["id"].as_str().unwrap();
+    let db = rusqlite::Connection::open(s.root.path().join("schedules.sqlite3")).unwrap();
+    db.busy_timeout(Duration::from_secs(3)).unwrap();
+    let payload: String = db
+        .query_row("SELECT payload FROM schedules WHERE id=?1", [job_id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut stored: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(stored["request"]["execution"]["max_steps"], 64);
+    assert_eq!(stored["request"]["execution"]["timeout_seconds"], 600);
+    assert_eq!(stored["request"]["execution"]["max_tokens"], 100000);
+    assert!(stored["request"].get("grants").is_none());
+    s.child.kill().unwrap();
+    s.child.wait().unwrap();
+    stored["next_run_ms"] = json!(0);
+    db.execute(
+        "UPDATE schedules SET payload=?1 WHERE id=?2",
+        rusqlite::params![stored.to_string(), job_id],
+    )
+    .unwrap();
+    let port = s.host.rsplit(':').next().unwrap().parse().unwrap();
+    s.child = spawn_verified(s.root.path(), port).expect("restart schedule fixture");
+    let start = Instant::now();
+    let state = loop {
+        let result = s.api("/api/schedules", None);
+        if result["jobs"][0]["enabled"] == false {
+            break result;
+        }
+        assert!(start.elapsed() < Duration::from_secs(15), "{result}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(state["jobs"][0]["state"], "Needs attention");
+    assert_ne!(state["jobs"][0]["last_chat"], json!(id));
+    assert_eq!(
+        s.api("/api/chats", None)["chats"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(fixture.join().unwrap().len(), 6);
+    let enabled = s.api(
+        "/api/schedules",
+        Some(json!({"action":"enable","id":job_id})),
+    );
+    assert_eq!(enabled["ok"], true);
+    let next = s.api("/api/schedules", None);
+    assert_eq!(next["jobs"][0]["state"], "Waiting");
+    assert!(next["jobs"][0]["next_run_ms"].as_u64().unwrap() > 0);
+    assert_eq!(
+        s.api(
+            "/api/schedules",
+            Some(json!({"action":"pause","id":job_id}))
+        )["ok"],
+        true
+    );
+    assert_eq!(s.api("/api/schedules", None)["jobs"][0]["enabled"], false);
 }
 
 #[test]
@@ -2905,4 +3075,276 @@ fn repeated_invalid_worker_decision_stops_without_tool_dispatch() {
             .exists()
     );
     assert_eq!(fixture.join().unwrap().len(), 3);
+}
+
+fn decision_config(endpoint: &str) -> Value {
+    json!({"enabled":true,"endpoint":endpoint,"key_env":"","model":"fixture","threshold":0.8,"input_usd_per_million":1.0})
+}
+fn routing_reply() -> Value {
+    json!({"answers":{"workflow":{"type":"choice","choice":"files","confidence":1.0,"probabilities":{"files":1.0,"code":0.0,"research":0.0,"desktop":0.0,"documents":0.0,"general":0.0}},"complexity":{"type":"choice","choice":"deep","confidence":1.0,"probabilities":{"deep":1.0,"routine":0.0}}},"usage":{"input_tokens":37,"output_tokens":0}})
+}
+#[test]
+fn typed_routing_uses_specialist_and_keeps_separate_review() {
+    let s = Server::new();
+    let (decision_endpoint, decider) = fixture_service(vec![routing_reply()], true);
+    let (worker_endpoint, worker) = model(vec![plan(), complete("Explained the process.")]);
+    let (review_endpoint, review) = model(vec![complete("Explained the process.")]);
+    let mut body = request("http://127.0.0.1:1");
+    body["decisions"] = decision_config(&decision_endpoint);
+    body["decisions"]["specialist"] =
+        json!({"kind":"ollama","endpoint":worker_endpoint,"model":"specialist"});
+    body["reviewer"] = json!({"kind":"ollama","endpoint":review_endpoint,"model":"reviewer"});
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(chat["execution"]["routing"]["workflow"], "files");
+    assert!(chat["prompt_tokens"].as_u64().unwrap_or(0) >= 37, "{chat}");
+    assert!(
+        worker
+            .join()
+            .unwrap()
+            .iter()
+            .all(|r| r["model"] == "specialist")
+    );
+    assert_eq!(review.join().unwrap()[0]["model"], "reviewer");
+    let calls = decider.join().unwrap();
+    assert!(calls[0]["state"].get("request").is_some());
+    assert!(calls[0]["state"].get("messages").is_none());
+}
+#[test]
+fn malformed_typed_route_falls_back_without_granting_tools() {
+    let s = Server::new();
+    let mut reply = routing_reply();
+    reply["answers"]["workflow"]["choice"] = json!("run_shell");
+    let (endpoint, decider) = fixture_service(vec![reply], true);
+    let (worker_endpoint, worker) =
+        model(vec![plan(), complete("Explained."), complete("Explained.")]);
+    let mut body = request(&worker_endpoint);
+    body["decisions"] = decision_config(&endpoint);
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert!(chat["execution"]["routing"].is_null());
+    assert_eq!(chat["access"]["terminal"], false);
+    assert!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "decision_route" && e["ok"] == false)
+    );
+    decider.join().unwrap();
+    worker.join().unwrap();
+}
+#[test]
+fn procedures_require_later_verified_runs_and_reject_failed_trial() {
+    let s = Server::new();
+    for iteration in 0..4 {
+        let replies = if iteration == 3 {
+            vec![
+                plan(),
+                json!({"decision":"fail","reason":"Fixture cannot produce the output"}),
+            ]
+        } else {
+            vec![plan(), write_file("checked"), complete("Written")]
+        };
+        let (endpoint, worker) = model(replies);
+        let mut body = request(&endpoint);
+        body["message"] = json!("Create greeting.txt with checked");
+        body["learn_procedures"] = json!(true);
+        body["contract"] = json!({"goal":"Create greeting.txt with checked","criteria":[{"FileContents":{"path":"greeting.txt","expected":"checked"}}]});
+        let created = s.api("/api/chats", Some(body));
+        let chat = s.wait(created["id"].as_str().unwrap());
+        assert_eq!(
+            chat["status"],
+            if iteration == 3 {
+                "Blocked"
+            } else {
+                "Completed"
+            },
+            "{chat}"
+        );
+        let calls = worker.join().unwrap();
+        let context: Value =
+            serde_json::from_str(calls[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(context["evaluated_procedure"].is_object(), iteration > 0);
+        let started = Instant::now();
+        loop {
+            let library = s.api("/api/procedures", None);
+            let items = library["procedures"].as_array().unwrap();
+            let expected = ["candidate", "candidate", "active", "rejected"][iteration];
+            if items.len() == 1
+                && items[0]["state"] == expected
+                && items[0]["trials"].as_array().unwrap().len() == iteration
+            {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "{library}");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+    let library = s.api("/api/procedures", None);
+    let retired = s.api(
+        "/api/procedures",
+        Some(json!({"action":"retire","id":library["procedures"][0]["id"]})),
+    );
+    assert_eq!(retired["ok"], true);
+    assert_eq!(
+        s.api("/api/procedures", None)["procedures"][0]["state"],
+        "retired"
+    );
+}
+#[test]
+fn pdf_helper_extracts_real_document_text() {
+    let stream = "BT /F1 12 Tf 50 700 Td (Invoice total 42 dollars) Tj ET";
+    let objects=["<< /Type /Catalog /Pages 2 0 R >>".to_string(),"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".into(),"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),format!("<< /Length {} >>\nstream\n{stream}\nendstream",stream.len())];
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = vec![0];
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.push_str(&format!("{} 0 obj\n{object}\nendobj\n", i + 1));
+    }
+    let xref = pdf.len();
+    pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+    for offset in offsets.iter().skip(1) {
+        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+        "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
+        .arg("--extract-pdf")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(pdf.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        result["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invoice total 42 dollars")
+    );
+    assert_eq!(result["truncated"], false);
+}
+
+#[test]
+fn document_classification_uses_content_and_preserves_overlapping_scores() {
+    let s = Server::new();
+    let mut answers = json!({"document_type":{"type":"choice","choice":"invoice","confidence":0.9,"probabilities":{"invoice":0.95,"receipt":0.05,"bank_statement":0.0,"contract":0.0,"report":0.0,"correspondence":0.0,"other":0.0}}});
+    for kind in [
+        "invoice",
+        "receipt",
+        "bank_statement",
+        "contract",
+        "report",
+        "correspondence",
+    ] {
+        answers[format!("is_{kind}")] =
+            json!({"type":"noul","noul":if matches!(kind,"invoice"|"receipt"){0.9}else{0.1}});
+    }
+    let (decision_endpoint, decider) = fixture_service(
+        vec![
+            routing_reply(),
+            json!({"answers":answers,"usage":{"input_tokens":80,"output_tokens":0}}),
+        ],
+        true,
+    );
+    let (endpoint, worker) = model(vec![
+        plan(),
+        write_file("Invoice 123. Total 42 dollars. Paid in full."),
+        json!({"decision":"act","action":{"tool":"document_classify","path":"greeting.txt"}}),
+        complete("The document includes an invoice and payment receipt."),
+        complete("Reviewed the document labels."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Create and classify an invoice example");
+    body["decisions"] = decision_config(&decision_endpoint);
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let calls = decider.join().unwrap();
+    assert_eq!(
+        calls[1]["state"],
+        json!({"document_text":"Invoice 123. Total 42 dollars. Paid in full."})
+    );
+    assert_eq!(chat["prompt_tokens"], 117);
+    let evidence = chat["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["action"] == "document_classify")
+        .unwrap();
+    let data: Value = serde_json::from_str(evidence["data"].as_str().unwrap()).unwrap();
+    assert_eq!(data["answers"]["is_invoice"]["noul"], 0.9);
+    assert_eq!(data["answers"]["is_receipt"]["noul"], 0.9);
+    assert_eq!(data["needs_review"], false);
+    assert!(data.get("text").is_none());
+    worker.join().unwrap();
+}
+
+#[test]
+fn voice_conversation_keeps_history_and_uses_one_call_per_turn() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        complete("A compiler turns source code into a runnable program."),
+        complete("An interpreter runs the instructions as it goes."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("What is a compiler?");
+    body["voice_turn"] = json!(true);
+    let created = s.api("/api/chats", Some(body.clone()));
+    let id = created["id"].as_str().unwrap();
+    let first = s.wait(id);
+    assert_eq!(first["status"], "Completed", "{first}");
+    assert!(first["tasks"].as_array().unwrap().is_empty());
+    body["id"] = json!(id);
+    body["message"] = json!("How does an interpreter differ?");
+    s.api("/api/chats", Some(body));
+    let second = s.wait(id);
+    assert_eq!(second["status"], "Completed", "{second}");
+    let calls = fixture.join().unwrap();
+    assert_eq!(calls.len(), 2);
+    let context: Value =
+        serde_json::from_str(calls[1]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert!(context.to_string().contains("What is a compiler?"));
+    assert!(context.to_string().contains("runnable program"));
+}
+#[test]
+fn voice_actions_handoff_to_the_existing_task_engine() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        json!({"decision":"handoff"}),
+        plan(),
+        json!({"decision":"act","action":{"tool":"list_dir","path":"."}}),
+        complete("The workspace is empty."),
+        complete("The workspace is empty."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Inspect the workspace directory");
+    body["voice_turn"] = json!(true);
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"].as_str().unwrap_or("").starts_with("list_dir"))
+    );
+    assert_eq!(fixture.join().unwrap().len(), 5);
 }

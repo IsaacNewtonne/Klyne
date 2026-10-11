@@ -1,4 +1,7 @@
 /target/
+/.voice/
+# Local exploratory notes; publish maintained setup guides instead.
+/docs/voice-research-*.md
 /node_modules/
 /workspace/*
 !/workspace/.gitkeep

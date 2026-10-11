@@ -2,7 +2,7 @@
 
 **A local-first AI workspace. A little spark. Something real.**
 
-Give Klyne a task, watch the steps unfold, and inspect the result. Built in Rust with a simple browser interface, local model support.
+Give Klyne a task by text or voice, watch the steps unfold, and inspect the result. Built in Rust with a browser interface and your choice of AI connection.
 
 [![Klyne workspace preview open the interactive demo](site/preview.png)](https://isaacnewtonne.github.io/Klyne/)
 
@@ -14,6 +14,9 @@ Run a sample task, switch between conversation and workspace, or open Details. T
 
 - **Work you can follow.** Persisted task dependencies, progress, evidence, and a readable final answer.
 - **Models you choose.** Ollama, Codex, and OpenCode connections; a separately configured fallback can handle model-request failures.
+- **Local voice controls.** Dictate, hold a spoken conversation, hear replies, and interrupt speech. Moonshine Tiny recognition and Kokoro speech run on the CPU without PyTorch. See [voice setup and limits](docs/voice.md).
+- **Optional routing and learning.** Typed decisions can select a specialist, documents can be read and classified, and eligible verified file-task plans can be reused. Routing and procedure reuse default off. See [configuration](docs/typed-decisions-and-procedures.md).
+- **Separate review and recurring work.** Choose a review model independently, recover from recurring file operations, and schedule completed tasks with durable intervals and per-run limits. See [autonomy controls](docs/autonomy-controls.md).
 - **Tools with explicit access.** Files, browser automation, desktop controls, terminal commands, saved APIs, and curated MCP integrations.
 - **Recovery grounded in evidence.** Completed steps survive restarts. Known pre-dispatch connection failures can switch to desktop observation. Uncertain actions are preserved instead of blindly repeated.
 - **Checks beyond a model's claim.** Caller-owned file contracts, supported desktop focus/field checks, and a first Notepad save-reconciliation adapter.
@@ -63,6 +66,20 @@ With Terminal access enabled, you can include an existing project folder directl
 
 The runtime stores local conversations and generated artifacts under `workspace/`, which is excluded from Git. No model weights are bundled. Chrome or Edge is needed for browser workflows; Node/npm is needed for the curated browser MCP adapter. See [provider setup](docs/studio-providers.md) and [app connections](docs/app-connections.md).
 
+## Optional voice setup (Windows)
+
+With Python 3.12 installed, run from the checkout:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-voice.ps1
+```
+
+This downloads the speech runtime and models into the ignored `.voice/` folder. Open **Settings → Voice → Check voice**, then use **🎙 Talk** above the composer. **Conversation** enables repeated listening and automatic submission after a pause. The browser asks for microphone access when you start listening.
+
+English is the default; Vietnamese recognition is a preview. For Vietnamese replies, select an installed Vietnamese computer voice. Speech processing is local; the selected AI provider still processes conversation text. Neural speech can take several seconds, and always-on wake words and end-to-end streaming are not implemented.
+
+If an already-open app is missing voice controls, it may be running an older activated binary. See [updating an existing runtime](docs/voice.md#updating-an-existing-runtime); rebuilding alone does not replace a saved runtime.
+
 ## Development
 
 ```powershell
@@ -102,6 +119,8 @@ Open **http://localhost:8080**. The Pages workflow rebuilds presentation assets 
 | Improvement experiments and history | [Protected evaluation](docs/protected-improvement-evaluation.md) |
 | UX and autonomy implementation | [Audit fixes and validation](docs/autonomy-implementation-2026-09-14.md) |
 | Architecture and next steps | [Autonomy roadmap](docs/autonomy-roadmap.md) |
+| Typed routing and procedure reuse | [Setup and limits](docs/typed-decisions-and-procedures.md) |
+| Local voice controls | [Setup, use and limits](docs/voice.md) |
 | Audit and test tiers | [2026-09 audit](AUDIT-2026-09-13.md) · [Test tiers](docs/test-tiers.md) |
 | Core runtime | [Harness overview](docs/harness-overview.md) |
 

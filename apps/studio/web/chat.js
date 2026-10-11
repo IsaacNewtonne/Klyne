@@ -1,5 +1,43 @@
 'use strict';
 const $ = id => document.getElementById(id);
+const reviewSettings=document.createElement('details');
+reviewSettings.id='review-settings';
+reviewSettings.innerHTML=`<summary>Review model</summary><p class="settings-copy">Use a separate model to inspect results. Reviews share the task's limits and can only read. A different model still needs evidence to judge success.</p>
+<label for="reviewer-kind">Review with</label><select id="reviewer-kind"><option value="">Same as worker</option value="codex">Codex</option><option value="ollama">Ollama</option><option value="opencode">OpenCode</option></select>
+<div id="reviewer-fields" hidden><label for="reviewer-endpoint">Local server address</label><input id="reviewer-endpoint" type="url"><label for="reviewer-model">Model (optional for Codex)</label><input id="reviewer-model" list="reviewer-models"><datalist id="reviewer-models"></datalist><button id="check-reviewer" type="button">Check review connection</button></div><p id="reviewer-status" role="status"></p>`;
+$('execution-settings').before(reviewSettings);
+const scheduleSettings=document.createElement('details');
+scheduleSettings.id='schedule-settings';
+scheduleSettings.innerHTML=`<summary>Scheduled tasks</summary><p class="settings-copy">Repeat the selected completed task using its saved models, access and project. Each run gets a new conversation. Without a project, each gets a fresh workspace. Runs that need attention pause the schedule.</p>
+<label for="schedule-name">Schedule name (optional)</label><input id="schedule-name" maxlength="100"><label for="schedule-minutes">Minutes between completed runs</label><input id="schedule-minutes" type="number" min="1" max="525600" value="1440">
+<p class="settings-copy">Unlimited task settings become 64 steps, 10 minutes, 100,000 tokens and 3 review passes per run. Runs start while Klyne is open, or in background mode with klyne -NoBrowser.</p>
+<button id="schedule-create" type="button">Schedule selected task</button><button id="schedule-refresh" type="button">Refresh schedules</button><p id="schedule-status" role="status"></p><div id="schedule-list"></div>`;
+$('execution-settings').after(scheduleSettings);
+const intelligenceSettings=document.createElement('details');
+intelligenceSettings.id='intelligence-settings';
+intelligenceSettings.innerHTML=`<summary>Routing and learning</summary>
+<label><input id="decisions-enabled" type="checkbox"> Enable TypeSafe Jev decisions</label><p class="settings-copy">Sends the task request and, when requested, extracted document text to TypeSafe. Labels guide the worker; Klyne still checks permissions and results.</p>
+<label for="decision-key-env">API key environment variable name</label><input id="decision-key-env" value="TYPESAFE_API_KEY"><label for="decision-model">Decision model</label><input id="decision-model" value="jev-latest">
+<label for="decision-threshold">Confidence threshold (0–1)</label><input id="decision-threshold" type="number" min="0" max="1" step="0.05" value="0.8"><label for="decision-price">Input price, USD per million tokens</label><input id="decision-price" type="number" min="0" step="0.01" value="0"><p class="settings-copy">Zero means unpriced. A task with a spend limit requires a price before using Jev. Confidence is a routing score, not proof of correctness.</p>
+<label><input id="decision-specialist" type="checkbox"> Use the selected review model for complex work too</label>
+<label><input id="learn-procedures" type="checkbox"> Learn procedures from independently checked tasks</label><p class="settings-copy">Stores successful plans for the same goal and acceptance checks. Two later qualifying runs promote a candidate; a failed check rejects it. Tasks without acceptance checks do not train procedures.</p>
+<button id="procedure-refresh" type="button">Refresh procedures</button><p id="procedure-status" role="status"></p><div id="procedure-list"></div>`;
+scheduleSettings.after(intelligenceSettings);
+let savedDecisionConnection=null, savedDecisionEndpoint='https://api.typesafe.ai/v1/systemone';
+function configureIntelligence(config={},learn=false){
+  $('decisions-enabled').checked=!!config.enabled;$('decision-key-env').value=config.key_env??'TYPESAFE_API_KEY';$('decision-model').value=config.model||'jev-latest';
+  $('decision-threshold').value=config.threshold??0.8;$('decision-price').value=config.input_usd_per_million||0;
+  savedDecisionEndpoint=config.endpoint||'https://api.typesafe.ai/v1/systemone';savedDecisionConnection=config.specialist||null;
+  $('decision-specialist').checked=!!config.specialist;$('learn-procedures').checked=!!learn;
+}
+function intelligenceConfig(){return {learn_procedures:$('learn-procedures').checked,decisions:{enabled:$('decisions-enabled').checked,endpoint:savedDecisionEndpoint,model:$('decision-model').value.trim(),key_env:$('decision-key-env').value.trim(),threshold:Number($('decision-threshold').value),input_usd_per_million:Number($('decision-price').value),specialist:$('decision-specialist').checked?(savedDecisionConnection||reviewerConfig()):null}};}
+for(const id of ['decisions-enabled','decision-key-env','decision-model','decision-threshold','decision-price','decision-specialist','learn-procedures'])$(id).onchange=()=>{
+  if(id==='decision-specialist'){savedDecisionConnection=reviewerConfig();if($('decision-specialist').checked&&!savedDecisionConnection){$('decision-specialist').checked=false;$('procedure-status').textContent='Choose a review model first.';}}
+  try{localStorage.setItem('klyne-intelligence',JSON.stringify(intelligenceConfig()));}catch(_){}
+};
+async function loadProcedures(){try{const data=await api('/api/procedures');setMarkup($('procedure-list'),(data.procedures||[]).map(p=>`<div class="api-row"><div class="app-copy"><strong>${escape(p.name)}</strong><small>Version ${escape(p.version)} · ${escape(p.state)} · ${(p.trials||[]).filter(t=>t.outcome==='passed').length} passed trials</small></div>${['candidate','active','standby'].includes(p.state)?`<button data-retire-procedure="${escape(p.id)}">Retire</button>`:''}</div>`).join('')||'<p class="settings-copy">No learned procedures.</p>');}catch(error){$('procedure-status').textContent=error.message;}}
+$('procedure-refresh').onclick=loadProcedures;
+$('procedure-list').onclick=async event=>{const button=event.target.closest('[data-retire-procedure]');if(!button)return;button.disabled=true;try{await api('/api/procedures',{action:'retire',id:button.dataset.retireProcedure});await loadProcedures();}catch(error){$('procedure-status').textContent=error.message;}finally{button.disabled=false;}};
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const running = chat => ['Planning','Working','Reviewing','Stopping'].includes(chat?.status);
 const names = {codex:'Codex',ollama:'Ollama',opencode:'OpenCode'};
@@ -43,6 +81,10 @@ let configuredChat=null;
 function trustedLaptopDefault(){try{return localStorage.getItem('klyne-trusted-laptop')==='true';}catch(_){return false;}}
 function resetNewChatSettings(){
   configuredChat=null;
+  let reviewer=null;try{reviewer=JSON.parse(localStorage.getItem('klyne-reviewer')||'null');}catch(_){}
+  configureReviewer(reviewer);
+  let intelligence={};try{intelligence=JSON.parse(localStorage.getItem('klyne-intelligence')||'{}');}catch(_){}
+  configureIntelligence(intelligence.decisions,intelligence.learn_procedures);
   const trusted=trustedLaptopDefault();
   for(const id of ['access-web','access-terminal','access-desktop','access-apps'])$(id).checked=trusted;
   $('command-policy').value=trusted?'autonomous':'ask';
@@ -53,6 +95,8 @@ function resetNewChatSettings(){
 function hydrateExecution(chat){
   if(!chat||configuredChat===chat.id)return;
   configuredChat=chat.id;
+  configureReviewer(chat.execution?.reviewer||null);
+  configureIntelligence(chat.execution?.decisions,chat.execution?.learn_procedures);
   if(chat.provider && Object.hasOwn(names,chat.provider.kind)){
     $('provider-kind').value=chat.provider.kind;configureProvider(chat.provider);
   }
@@ -88,6 +132,7 @@ function renderList() {
 }
 function render() {
   hydrateExecution(snapshot);
+  window.klyneVoice?.update(snapshot);
   window.productionView?.update({snapshot,selected,submitting,message:$('instruction').value,provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,desktop:$('access-desktop').checked,apps:$('access-apps').checked}});
   renderStatus();
   renderList();
@@ -170,7 +215,10 @@ async function refresh() {
 }
 function closeSidebar() {$('sidebar').classList.remove('open');$('menu').setAttribute('aria-expanded','false');}
 async function select(id) {
+  window.klyneVoice?.selected(id);
   drafts.set(selected,$('instruction').value);selected=id;snapshot=null;pulseSeq=0;configuredChat=null;
+  const url=new URL(location.href),hash=new URLSearchParams(url.hash.slice(1));
+  if(id)hash.set('chat',id);else hash.delete('chat');url.hash=hash.toString();history.replaceState(null,'',url);
   if(!id)resetNewChatSettings();
   $('instruction').value=drafts.get(id)||'';$('form-error').textContent='';closeSidebar();render();renderList();
   if(!id) { $('instruction').focus();return; }
@@ -197,13 +245,15 @@ $('instruction').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){
 $('chat-form').onsubmit=async e=>{
   e.preventDefault();if(submitting||running(snapshot))return;
   const message=$('instruction').value.trim();if(!message)return;
-  if($('provider-kind').value!=='codex'&&!$('provider-model').value.trim()) {$('form-error').textContent='Choose your AI model in Settings first.';$('settings').showModal();return;}
+  if($('provider-kind').value!=='codex'&&!$('provider-model').value.trim()) {$('form-error').textContent='Choose your AI model in Settings first.';window.klyneVoice?.failed();$('settings').showModal();return;}
   submitting=true;$('send').textContent='…';$('form-error').textContent='';render();
   const source=selected;
+  const voiceTurn=window.klyneVoice?.consumeTurn()||false;
   try {
-    const data=await api('/api/chats',{id:source,message,execution:executionConfig(),workspace:$('access-terminal').checked?$('host-workspace').value.trim():'',prompt_maker:$('writing-mode').value==='prompt_maker',provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,apps:$('access-apps').checked,desktop:$('access-desktop').checked}});
+    const data=await api('/api/chats',{id:source,message,voice_turn:voiceTurn,...intelligenceConfig(),reviewer:reviewerConfig(),execution:executionConfig(),workspace:$('access-terminal').checked?$('host-workspace').value.trim():'',prompt_maker:$('writing-mode').value==='prompt_maker',provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,apps:$('access-apps').checked,desktop:$('access-desktop').checked}});
+    if(voiceTurn)window.klyneVoice?.sent(data.id);
     drafts.delete(source);$('instruction').value='';selected=data.id;snapshot=null;render();await refresh();
-  }catch(error){$('form-error').textContent=error.message;}
+  }catch(error){$('form-error').textContent=error.message;if(voiceTurn)window.klyneVoice?.failed();}
   finally{submitting=false;$('send').textContent='↑';render();}
 };
 $('stop-chat').onclick=async()=>{
@@ -216,6 +266,47 @@ $('export').onclick=()=>{
   const a=document.createElement('a');a.href=url;a.download=`klyne-chat-${snapshot.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 };
 function providerConfig(){return {kind:$('provider-kind').value,endpoint:$('provider-endpoint').value.trim(),model:$('provider-model').value.trim()};}
+function reviewerConfig(){return $('reviewer-kind').value?{kind:$('reviewer-kind').value,endpoint:$('reviewer-endpoint').value.trim(),model:$('reviewer-model').value.trim()}:null;}
+function configureReviewer(config){
+  ++reviewerRevision;
+  $('reviewer-kind').value=config?.kind||'';$('reviewer-endpoint').value=config?.endpoint||'';$('reviewer-model').value=config?.model||'';
+  $('reviewer-fields').hidden=!$('reviewer-kind').value;
+  $('reviewer-endpoint').disabled=$('reviewer-kind').value==='codex';
+  $('reviewer-status').textContent='';$('reviewer-models').replaceChildren();
+}
+let reviewerRevision=0;
+function saveReviewer(){++reviewerRevision;try{localStorage.setItem('klyne-reviewer',JSON.stringify(reviewerConfig()));}catch(_){}$('reviewer-status').textContent='Settings changed. Check the connection.';}
+$('reviewer-kind').onchange=()=>{const kind=$('reviewer-kind').value;configureReviewer({kind,endpoint:({ollama:'http://127.0.0.1:11434',opencode:'http://127.0.0.1:4096'})[kind]||''});saveReviewer();};
+for(const id of ['reviewer-endpoint','reviewer-model'])$(id).oninput=saveReviewer;
+$('check-reviewer').onclick=async()=>{
+  const current=reviewerRevision;$('check-reviewer').disabled=true;
+  try{const result=await api('/api/connections/check',reviewerConfig());if(current!==reviewerRevision)return;
+    $('reviewer-status').textContent=result.message;
+    $('reviewer-models').replaceChildren(...result.models.map(model=>{const option=document.createElement('option');option.value=model;return option;}));
+  }catch(error){if(current===reviewerRevision)$('reviewer-status').textContent=error.message;}
+  finally{$('check-reviewer').disabled=false;}
+};
+async function loadSchedules(){
+  try{const data=await api('/api/schedules');
+    setMarkup($('schedule-list'),(data.jobs||[]).map(job=>`<div class="api-row"><div class="app-copy"><strong>${escape(job.name)}</strong><small>${job.enabled?escape(job.state):'Paused'} · Every ${escape(job.interval_seconds/60)} min</small><small>${escape(job.note)}</small>${job.enabled&&job.state==='Waiting'?`<small>Next: ${escape(new Date(job.next_run_ms).toLocaleString())}</small>`:''}</div><div class="api-actions">${job.last_chat?`<button data-schedule-chat="${escape(job.last_chat)}">Open last run</button>`:''}<button data-schedule-id="${escape(job.id)}" data-action="${job.enabled?'pause':'enable'}">${job.enabled?'Pause':'Enable future runs'}</button><button data-schedule-id="${escape(job.id)}" data-action="delete">Remove schedule</button></div></div>`).join('')||'<p class="settings-copy">No scheduled tasks.</p>');
+  }catch(error){$('schedule-status').textContent=error.message;}
+}
+$('schedule-refresh').onclick=loadSchedules;
+$('schedule-create').onclick=async()=>{
+  if(!selected||snapshot?.status!=='Completed'){$('schedule-status').textContent='Select a completed task first.';return;}
+  const interval=Number($('schedule-minutes').value)*60;
+  if(!Number.isInteger(interval)||interval<60||interval>31536000){$('schedule-status').textContent='Choose an interval between one minute and one year.';return;}
+  $('schedule-create').disabled=true;
+  try{await api('/api/schedules',{action:'create',chat_id:selected,interval_seconds:interval,...($('schedule-name').value.trim()?{name:$('schedule-name').value.trim()}:{})});$('schedule-status').textContent='Scheduled with the completed task’s saved settings. Its first run starts after the interval.';await loadSchedules();}
+  catch(error){$('schedule-status').textContent=error.message;}finally{$('schedule-create').disabled=false;}
+};
+$('schedule-list').onclick=async event=>{
+  const open=event.target.closest('[data-schedule-chat]');
+  if(open){$('settings').close();await select(open.dataset.scheduleChat);return;}
+  const button=event.target.closest('[data-schedule-id]');if(!button)return;button.disabled=true;
+  try{await api('/api/schedules',{id:button.dataset.scheduleId,action:button.dataset.action});$('schedule-status').textContent=button.dataset.action==='pause'?'Future runs paused. An active run can be stopped in its conversation.':'Schedule updated.';await loadSchedules();}
+  catch(error){$('schedule-status').textContent=error.message;}finally{button.disabled=false;}
+};
 function savedProviderFor(kind){
   try{const value=JSON.parse(localStorage.getItem('klyne-provider-'+kind)||'null')||JSON.parse(localStorage.getItem('klyne-provider')||'null');
     if(value?.kind===kind)return {endpoint:typeof value.endpoint==='string'?value.endpoint:'',model:typeof value.model==='string'?value.model:''};
@@ -247,7 +338,7 @@ $('available-models').onchange=()=>{
 };
 $('provider-kind').onchange=()=>configureProvider(savedProviderFor($('provider-kind').value));
 for(const id of ['provider-endpoint','provider-model'])$(id).oninput=()=>{++revision;$('provider-status').textContent='Settings changed. Check again.';clearAvailableModels();saveProvider();};
-$('settings-button').onclick=$('model-shortcut').onclick=()=>{$('settings').showModal();loadApiConnections();};
+$('settings-button').onclick=$('model-shortcut').onclick=()=>{$('settings').showModal();loadApiConnections();loadSchedules();loadProcedures();};
 let installedApps=[];
 function renderApps() {
   const query=$('apps-search').value.toLowerCase();
@@ -298,8 +389,8 @@ $('api-connections').onclick=async e=>{
   try{
     if(action==='operations'){await showApiOperations(name);$('api-status').textContent='Saved API definitions; operations have not been tested.';return;}
     const result=await api('/api/apps',{tool:action==='inspect'?'app_inspect':'app_forget',name});
-    $('api-status').textContent=action==='inspect'?`${result.discovered} operations discovered. Definitions saved; operations are not yet tested.`:'Connection forgotten.';
     $('api-operation-details').hidden=true;await loadApiConnections();
+    $('api-status').textContent=action==='inspect'?`${result.discovered} operations discovered. Definitions saved; operations are not yet tested.`:'Connection forgotten.';
   }catch(error){$('api-status').textContent=error.message;}finally{button.disabled=false;}
 };
 $('apps-list').onclick=async e=>{
@@ -333,14 +424,14 @@ configureProvider(savedProviderFor($('provider-kind').value));resetNewChatSettin
 function executionConfig(){return {max_steps:Number($('max-steps').value)||0,timeout_seconds:Number($('max-seconds').value)||0,max_review_rounds:Number($('max-reviews').value)||0,command_policy:$('command-policy').value,max_tokens:Number($('max-tokens').value)||0,max_cost_usd:Number($('max-cost').value)||0};}
 $('resume-chat').onclick=async()=>{
   if(!snapshot||submitting)return; submitting=true;
-  try {await api('/api/chats',{id:selected,message:'Continue the saved goal from its current task state.',resume:true,execution:executionConfig(),provider:providerConfig(),access:snapshot.access});await refresh();}
+  try {await api('/api/chats',{id:selected,message:'Continue the saved goal from its current task state.',resume:true,...intelligenceConfig(),reviewer:reviewerConfig(),execution:executionConfig(),provider:providerConfig(),access:snapshot.access});await refresh();}
   catch(e){toast(e.message);}finally{submitting=false;render();}
 };
 $('pending-disposition').onchange=()=>{$('resolve-action').textContent=snapshot?.pending?.proposal && $('pending-disposition').value==='approved'?'Approve and continue':'Record decision';};
 $('resolve-action').onclick=async()=>{
   if(submitting || !snapshot?.pending)return;
   const id=selected,approval=!!snapshot.pending.proposal,disposition=$('pending-disposition').value;
-  const continuation={id,message:'Continue the saved goal after approval.',resume:true,execution:executionConfig(),provider:providerConfig(),access:snapshot.access};
+  const continuation={id,message:'Continue the saved goal after approval.',resume:true,...intelligenceConfig(),reviewer:reviewerConfig(),execution:executionConfig(),provider:providerConfig(),access:snapshot.access};
   submitting=true;$('resolve-action').disabled=true;
   try {const resolution=await api(`/api/chats/${id}/resolve`,{request_id:snapshot.pending.request_id,disposition,note:$('pending-note').value.trim() || (approval?`User selected ${disposition} for the displayed proposal.`:'')});if(selected===id)$('pending-note').value='';if(approval && disposition==='approved') {if(resolution.renewal_required)toast('This request expired or changed. Klyne will prepare a fresh proposal.');await api('/api/chats',continuation);}await refresh();}
   catch(e){toast(e.message);}finally{submitting=false;$('resolve-action').disabled=false;render();}

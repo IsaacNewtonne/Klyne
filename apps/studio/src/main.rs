@@ -11,9 +11,11 @@ mod chat_store;
 mod clarification;
 mod completion_guard;
 mod connections;
+mod decisions;
 mod desktop;
 mod diagnostics;
 mod document_save;
+mod documents;
 mod execution_graph;
 mod failure_policy;
 mod improvement;
@@ -21,11 +23,14 @@ mod local_apps;
 mod mcp;
 mod network;
 mod performance;
+mod procedures;
 mod progress;
 mod recovery;
 mod restart_reconciliation;
 mod route_recovery;
+mod schedules;
 mod telemetry;
+mod voice;
 
 use harness_core::{
     AgentRuntime, Objective, PermissionPolicy, ShutdownHandle, SqliteEventStore, ToolRegistry,
@@ -236,7 +241,7 @@ impl Studio {
 fn respond(stream: &mut TcpStream, status: &str, mime: &str, body: &[u8]) -> io::Result<()> {
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)
@@ -315,6 +320,14 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
                 "text/javascript",
                 include_bytes!("../web/chat.js").as_slice(),
             )),
+            "/voice.js" => Some((
+                "text/javascript",
+                include_bytes!("../web/voice.js").as_slice(),
+            )),
+            "/voice-worklet.js" => Some((
+                "text/javascript",
+                include_bytes!("../web/voice-worklet.js").as_slice(),
+            )),
             "/app.js" => Some((
                 "text/javascript",
                 include_bytes!("../web/app.js").as_slice(),
@@ -326,6 +339,9 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         }
     }
     let result: io::Result<Value> = (|| {
+        if method == "GET" && path == "/api/voice" {
+            return Ok(voice::status());
+        }
         if method == "GET" && path == "/api/runtime/ready" {
             return Ok(
                 json!({"pid":std::process::id(),"ready":studio.chats.active_count()==0 && studio.active.lock().unwrap().is_empty()}),
@@ -346,6 +362,12 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         }
         if method == "GET" && path == "/api/chats" {
             return studio.chats.list();
+        }
+        if method == "GET" && path == "/api/schedules" {
+            return schedules::list(&studio.root);
+        }
+        if method == "GET" && path == "/api/procedures" {
+            return procedures::list(&studio.root.join("conversations"));
         }
         if method == "GET"
             && let Some(rest) = path.strip_prefix("/api/chats/")
@@ -399,8 +421,13 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
             .ok_or_else(|| err("length required"))?
             .parse()
             .map_err(err)?;
-        if length > 16384 {
-            return Err(err("request exceeds 16 KiB"));
+        let body_cap = if path == "/api/voice" {
+            1_400_000
+        } else {
+            16384
+        };
+        if length > body_cap {
+            return Err(err("request exceeds endpoint size limit"));
         }
         let mut body = vec![0; length];
         stream.read_exact(&mut body)?;
@@ -411,9 +438,16 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
             return Err(err("unsupported request"));
         }
         let body: Value = serde_json::from_slice(&body).map_err(err)?;
+        if path == "/api/voice/cancel" {
+            return voice::cancel(&body);
+        }
+        if path == "/api/voice" {
+            return voice::request(&body);
+        }
         let starting = matches!(
             path,
             "/api/chats"
+                | "/api/schedules"
                 | "/api/runs"
                 | "/api/desktop/launch"
                 | "/api/apps/select"
@@ -460,6 +494,17 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         }
         if path == "/api/chats" {
             return studio.chats.send(&body);
+        }
+        if path == "/api/schedules" {
+            return schedules::manage(studio, &body);
+        }
+        if path == "/api/procedures" && body["action"] == "retire" {
+            return procedures::retire(
+                &studio.root.join("conversations"),
+                body["id"]
+                    .as_str()
+                    .ok_or_else(|| err("Missing procedure ID"))?,
+            );
         }
         if let Some(id) = path
             .strip_prefix("/api/chats/")
@@ -583,6 +628,9 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
     )
 }
 fn main() -> io::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--extract-pdf") {
+        return documents::helper();
+    }
     if std::env::args().nth(1).as_deref() == Some("--stage-runtime") {
         let arguments: Vec<String> = std::env::args().skip(2).collect();
         if arguments.len() < 5 || arguments[3] != "--" {
@@ -658,6 +706,20 @@ fn main() -> io::Result<()> {
         active: Mutex::new(HashMap::new()),
     });
     studio.chats.recover()?;
+    schedules::recover(&studio.root)?;
+    let scheduler = Arc::downgrade(&studio);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let Some(studio) = scheduler.upgrade() else {
+                break;
+            };
+            if let Err(error) = schedules::tick(&studio, desktop::now_ms()) {
+                eprintln!("Scheduler paused after persistence error: {error}");
+                break;
+            }
+        }
+    });
     // Serial bounded HTTP handling; agent execution occurs on separate workers.
     let http_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for stream in listener.incoming() {

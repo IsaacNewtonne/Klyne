@@ -209,3 +209,5 @@ main{container-type:size;container-name:chat-main;min-height:0}
 @keyframes task-pulse{50%{opacity:.35}}
 @media(prefers-reduced-motion:reduce){#task-indicator:before{animation:none!important}}
 @media(max-width:700px){.app>header{flex-wrap:wrap;gap:8px}#task-indicator{padding:5px 9px;font-size:11px}.header-title{max-width:90px}}
+
+.voice-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 8px;font-size:12px}.voice-controls button{padding:7px 10px;border:1px solid var(--border,#393431);border-radius:14px;background:#201c1a;color:inherit;cursor:pointer}.voice-controls button[aria-pressed="true"]{background:#733d21;border-color:#e99453}.voice-controls span{flex:1;min-width:120px;color:#bcb4ad}.voice-controls button:focus-visible{outline:2px solid #e99453;outline-offset:2px}
