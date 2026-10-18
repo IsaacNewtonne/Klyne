@@ -15,6 +15,194 @@ fn preference_question(question: &str) -> Value {
 }
 
 #[test]
+fn coordinator_runs_independent_goals_and_waits_for_verified_dependencies() {
+    let s = Server::new();
+    let mut fixtures = Vec::new();
+    let mut jobs = Vec::new();
+    for id in ["first", "second", "third"] {
+        let marker = s.root.path().join(id);
+        let mut slow = plan();
+        slow["_delay_ms"] = json!(1500);
+        slow["_marker"] = json!(marker);
+        let (endpoint, fixture) = model(vec![slow, write_file(id), complete("Saved.")]);
+        fixtures.push(fixture);
+        let mut request = request(&endpoint);
+        request["contract"] = json!({"goal":request["message"],"criteria":[{"FileContents":{"path":"greeting.txt","expected":id}}]});
+        jobs.push(json!({"id":id,"request":request,"depends_on":if id=="third" {vec!["first","second"]}else{vec![]}}));
+    }
+    let submitted = s.api("/api/goals", Some(json!({"action":"submit","jobs":jobs})));
+    assert_eq!(
+        submitted["jobs"].as_array().unwrap().len(),
+        3,
+        "{submitted}"
+    );
+    let start = Instant::now();
+    loop {
+        if s.root.path().join("first").exists() && s.root.path().join("second").exists() {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!s.root.path().join("third").exists());
+    let simultaneous = s.api("/api/goals", None);
+    assert_eq!(simultaneous["jobs"][0]["state"], "running");
+    assert_eq!(simultaneous["jobs"][1]["state"], "running");
+    loop {
+        let board = s.api("/api/goals", None);
+        if board["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["state"] == "completed")
+        {
+            let mut workspaces = std::collections::HashSet::new();
+            for job in board["jobs"].as_array().unwrap() {
+                assert!(job.get("request").is_none());
+                let chat = s.api(
+                    &format!("/api/chats/{}", job["chat"].as_str().unwrap()),
+                    None,
+                );
+                assert_eq!(chat["result"]["outcome"], "verified");
+                workspaces.insert(chat["workspace"].as_str().unwrap().to_string());
+            }
+            assert_eq!(workspaces.len(), 3);
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "{board}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for fixture in fixtures {
+        assert_eq!(fixture.join().unwrap().len(), 3);
+    }
+}
+
+#[test]
+fn coordinator_failed_goal_blocks_dependents_and_rejects_unbounded_jobs() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"fail","reason":"Missing dependency"}),
+    ]);
+    let mut body = request(&endpoint);
+    body["execution"] = json!({"max_steps":0});
+    assert!(s.api("/api/goals",Some(json!({"action":"submit","jobs":[{"id":"bad","request":body,"require_verified":false}]})))["error"].is_string());
+    body.as_object_mut().unwrap().remove("execution");
+    s.api("/api/goals",Some(json!({"action":"submit","jobs":[{"id":"a","request":body,"require_verified":false},{"id":"b","request":body,"require_verified":false,"depends_on":["a"]}]})));
+    let start = Instant::now();
+    loop {
+        let board = s.api("/api/goals", None);
+        if board["jobs"][0]["state"] == "needs_attention" {
+            assert_eq!(board["jobs"][1]["state"], "queued");
+            assert!(board["jobs"][1]["chat"].is_null());
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "{board}");
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    assert_eq!(fixture.join().unwrap().len(), 2);
+    let duplicate = s.api(
+        "/api/goals",
+        Some(
+            json!({"action":"submit","jobs":[{"id":"a","request":body,"require_verified":false}]}),
+        ),
+    );
+    assert!(duplicate["error"].is_string());
+}
+
+#[test]
+fn coordinator_coding_workers_use_distinct_real_worktrees() {
+    let s = Server::new();
+    let repo = s.root.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    };
+    git(&["init"]);
+    fs::write(repo.join("original.txt"), "preserved").unwrap();
+    git(&["add", "original.txt"]);
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-m",
+        "baseline",
+    ]);
+    let mut jobs = Vec::new();
+    let mut fixtures = Vec::new();
+    for id in ["code-a", "code-b"] {
+        let workspace = s.root.path().join(id);
+        git(&[
+            "worktree",
+            "add",
+            "--detach",
+            workspace.to_str().unwrap(),
+            "HEAD",
+        ]);
+        let mut slow = plan();
+        slow["_delay_ms"] = json!(1500);
+        slow["_marker"] = json!(s.root.path().join(format!("{id}-started")));
+        let (endpoint, fixture) = model(vec![slow, write_file(id), complete("Saved and checked.")]);
+        fixtures.push(fixture);
+        let mut body = request(&endpoint);
+        body["access"]["terminal"] = json!(true);
+        body["workspace"] = json!(workspace);
+        body["contract"] = json!({"goal":body["message"],"criteria":[{"FileContents":{"path":"greeting.txt","expected":id}}]});
+        jobs.push(json!({"id":id,"isolation":"worktree","request":body}));
+    }
+    let result = s.api("/api/goals", Some(json!({"action":"submit","jobs":jobs})));
+    assert!(result["jobs"].is_array(), "{result}");
+    let start = Instant::now();
+    let mut overlapped = false;
+    loop {
+        let board = s.api("/api/goals", None);
+        if board["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["state"] == "running")
+        {
+            overlapped = true;
+        }
+        if board["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["state"] == "completed")
+        {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "{board}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(overlapped);
+    for id in ["code-a", "code-b"] {
+        assert_eq!(
+            fs::read_to_string(s.root.path().join(id).join("greeting.txt")).unwrap(),
+            id
+        );
+    }
+    assert!(!repo.join("greeting.txt").exists());
+    assert_eq!(
+        fs::read_to_string(repo.join("original.txt")).unwrap(),
+        "preserved"
+    );
+    for fixture in fixtures {
+        assert_eq!(fixture.join().unwrap().len(), 3);
+    }
+}
+
+#[test]
 fn live_conversation_logs_status_and_queues_without_overwriting_running_work() {
     let s = Server::new();
     let marker = s.root.path().join("waiting-model");
@@ -45,7 +233,7 @@ fn live_conversation_logs_status_and_queues_without_overwriting_running_work() {
     );
     assert_eq!(status["state"], "answered", "{status}");
     assert!(started.elapsed() < Duration::from_secs(1));
-    let task = json!({"request_id":"task-1","message":"Then prepare the next result in next.txt","mode":"queue"});
+    let task = json!({"request_id":"task-1","message":"Hi! I want you to write the next result in next.txt","mode":"auto"});
     for _ in 0..2 {
         let queued = s.api(&format!("/api/chats/{id}/conversation"), Some(task.clone()));
         assert_eq!(queued["state"], "queued", "{queued}");
@@ -129,7 +317,7 @@ fn live_questions_are_read_only_and_cancelled_queue_survives_reload() {
         calls[2]["messages"][0]["content"]
             .as_str()
             .unwrap()
-            .contains("NO tools")
+            .contains("cannot invoke tools directly")
     );
 }
 
@@ -3974,17 +4162,16 @@ fn voice_conversation_keeps_history_and_uses_one_call_per_turn() {
     assert!(context.to_string().contains("runnable program"));
 }
 #[test]
-fn voice_actions_handoff_to_the_existing_task_engine() {
+fn voice_actions_bypass_conversation_and_use_the_existing_task_engine() {
     let s = Server::new();
     let (endpoint, fixture) = model(vec![
-        json!({"decision":"handoff"}),
         plan(),
         json!({"decision":"act","action":{"tool":"list_dir","path":"."}}),
         complete("The workspace is empty."),
         complete("The workspace is empty."),
     ]);
     let mut body = request(&endpoint);
-    body["message"] = json!("Inspect the workspace directory");
+    body["message"] = json!("Hi, are you there? I want you to inspect the workspace directory");
     body["voice_turn"] = json!(true);
     let created = s.api("/api/chats", Some(body));
     let chat = s.wait(created["id"].as_str().unwrap());
@@ -3996,5 +4183,5 @@ fn voice_actions_handoff_to_the_existing_task_engine() {
             .iter()
             .any(|e| e["action"].as_str().unwrap_or("").starts_with("list_dir"))
     );
-    assert_eq!(fixture.join().unwrap().len(), 5);
+    assert_eq!(fixture.join().unwrap().len(), 4);
 }

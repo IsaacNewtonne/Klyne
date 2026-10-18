@@ -1,0 +1,10 @@
+{
+  "url": "http://127.0.0.1:4317/",
+  "ready": "#goals-button",
+  "output": "workspace/studio-qa/design-audit",
+  "viewports": [{"width": 1280, "height": 800}, {"width": 390, "height": 844}],
+  "rules": [
+    {"selector": "#goals-button", "text": "Goals", "minWidth": 24, "minHeight": 24},
+    {"selector": "#instruction", "minHeight": 24}
+  ]
+}

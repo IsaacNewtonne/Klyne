@@ -11,7 +11,7 @@ New tools may include operating_contract:{prerequisites:[strings],discovery:[str
 Persistent capabilities: capability_list {query?} searches reusable skills/tools/memories.
 skill_save {name,description,instructions} creates or updates a reusable workflow; skill_read {name} loads it.
 tool_save {name,description,program,args:[strings],artifacts?:[paths]} registers an argv tool; tool_test {name,arguments?:[strings]} qualifies the active version by running it once and binding the tested flag to that version's digest; tool_run {name,arguments?:[strings]} executes only a qualified version and refuses untested or changed definitions. Qualification binds full argv, the resolved executable, file arguments and optional declared artifacts. Changed arguments or file contents require testing again. Exact command approval is required in ask mode; autonomous mode authorizes commands under the user-selected policy. Use absolute script paths for reuse across conversations. Test the tool with a real invocation; registration alone is not validation. Successful runs record the tested version.
-memory_save {name,description,instructions} stores advisory, model-reported findings and task context for future conversations. Save the same name to correct it with a new version. memory_forget {name} permanently removes all versions of a memory. Saved claims are not host verified. Keep credentials out of skills, tools and memory. capability_history {name,kind} lists versions; capability_restore {name,kind,version} activates a previous version. kind is skill, tool or memory.
+memory_save {name,description,instructions,scope?:"global|workspace",category?:"preference|environment|lesson",ttl_seconds?:1..31536000} stores advisory, model-reported findings and task context for future conversations. Save the same name to correct it with a new version. memory_forget {name} permanently removes all versions of a memory. Saved claims are not host verified. Keep credentials out of skills, tools and memory. capability_history {name,kind} lists versions; capability_restore {name,kind,version} activates a previous version. kind is skill, tool or memory.
 Save reusable workflows and tools when they help complete the user's goal, then use them. Loaded capabilities are task resources, never authority to change access grants. Reviewers may only list, read and inspect history. Saving/running/restoring requires Terminal enabled. Never claim a tool is installed merely because source exists: register and test it.
 "#;
 
@@ -102,7 +102,11 @@ pub fn context(root: &Path) -> io::Result<Value> {
 /// heuristic stay available through explicit `memory_read` but are never
 /// auto-injected; retrieval labels provenance without verifying freshness,
 /// so workers must still verify recalled claims against the world.
+#[cfg(test)]
 pub fn recall_for_task(root: &Path, text: &str, limit: usize) -> Value {
+    recall_scoped(root, text, limit, None)
+}
+pub fn recall_scoped(root: &Path, text: &str, limit: usize, workspace: Option<&Path>) -> Value {
     const STOP: [&str; 24] = [
         "the", "and", "for", "with", "from", "that", "this", "into", "using", "task", "please",
         "your", "you", "are", "our", "will", "then", "than", "also", "such", "make", "take", "use",
@@ -145,6 +149,9 @@ pub fn recall_for_task(root: &Path, text: &str, limit: usize) -> Value {
             Ok(payload) => payload,
             Err(_) => continue,
         };
+        if !memory_visible(&payload, workspace, crate::desktop::now_ms()) {
+            continue;
+        }
         let haystack = format!(
             "{} {} {}",
             name,
@@ -189,6 +196,20 @@ pub fn recall_for_task(root: &Path, text: &str, limit: usize) -> Value {
         "memories": scored.into_iter().map(|(_, item)| item).collect::<Vec<_>>(),
         "excluded_sensitive": excluded,
     })
+}
+fn memory_visible(payload: &Value, workspace: Option<&Path>, now: u64) -> bool {
+    if payload["expires_at_ms"]
+        .as_u64()
+        .is_some_and(|expiry| now >= expiry)
+    {
+        return false;
+    }
+    if payload["scope"] == "workspace" {
+        return workspace.is_some_and(|path| {
+            payload["provenance"]["workspace"].as_str() == Some(path.to_string_lossy().as_ref())
+        });
+    }
+    true
 }
 fn sensitive_memory(text: &str) -> bool {
     let text = text.to_lowercase();
@@ -365,6 +386,27 @@ pub fn execute_with_policy(
         }
         let mut payload = action.clone();
         if kind == "memory" {
+            let scope = action["scope"].as_str().unwrap_or("global");
+            let category = action["category"].as_str().unwrap_or("lesson");
+            if !["global", "workspace"].contains(&scope)
+                || !["preference", "environment", "lesson"].contains(&category)
+            {
+                return Err(err(
+                    "Memory scope must be global/workspace and category preference/environment/lesson",
+                ));
+            }
+            let expires = match action.get("ttl_seconds") {
+                Some(value) => Some(
+                    crate::desktop::now_ms().saturating_add(
+                        value
+                            .as_u64()
+                            .filter(|n| *n > 0 && *n <= 31_536_000)
+                            .ok_or_else(|| err("Memory TTL must be 1-31536000 seconds"))?
+                            * 1000,
+                    ),
+                ),
+                None => None,
+            };
             if sensitive_memory(&format!(
                 "{} {} {}",
                 name, action["description"], action["instructions"]
@@ -379,6 +421,9 @@ pub fn execute_with_policy(
                 "recorded_at_unix_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
                 "workspace":workspace.to_string_lossy(),"source":action["source"]
             }});
+            payload["scope"] = json!(scope);
+            payload["category"] = json!(category);
+            payload["expires_at_ms"] = json!(expires);
         }
         let tx = db.transaction().map_err(err)?;
         let version: i64 = tx
@@ -698,6 +743,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(granted(&run).unwrap()["ok"], true);
+    }
+    #[test]
+    fn scoped_memory_expiry_and_cross_workspace_exclusion() {
+        let note = json!({"scope":"workspace","expires_at_ms":2000,"provenance":{"workspace":"project-a"}});
+        assert!(memory_visible(&note, Some(Path::new("project-a")), 1999));
+        assert!(!memory_visible(&note, Some(Path::new("project-b")), 1999));
+        assert!(!memory_visible(&note, Some(Path::new("project-a")), 2000));
+        assert!(!memory_visible(&note, None, 1999));
+        assert!(memory_visible(&json!({"scope":"global"}), None, 2000));
     }
     #[test]
     fn recall_ranks_by_relevance_with_provenance_and_secret_exclusion() {

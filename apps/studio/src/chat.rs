@@ -62,6 +62,8 @@ pub struct Task {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Execution {
+    /// Advisory coordinator results, never permissions or current evidence.
+    pub dependency_context: Vec<Value>,
     pub voice_turn: bool,
     pub voice_routed: bool,
     pub decisions: crate::decisions::Config,
@@ -698,6 +700,13 @@ impl Chats {
             ));
         }
         if !resume {
+            chat.execution.dependency_context = match body.get("dependency_context") {
+                Some(value) if value.to_string().len() <= 16000 => {
+                    serde_json::from_value(value.clone()).map_err(err)?
+                }
+                Some(_) => return Err(err("Dependency context exceeds 16 KiB")),
+                None => Vec::new(),
+            };
             chat.execution.voice_turn = body["voice_turn"].as_bool().unwrap_or(false);
             chat.execution.voice_routed = false;
             chat.execution.progress = crate::progress::Journal::default();
@@ -1008,6 +1017,7 @@ impl Chats {
         context["desktop_fallbacks"] = json!(chat.execution.desktop_fallbacks);
         context["tool_operating_context"] =
             crate::autonomy::context(&chat.evidence, chat.execution.evidence_start);
+        context["dependency_results_untrusted"] = json!(chat.execution.dependency_context);
         // Keep completed file changes visible even after reads or other tools
         // displace their full observations. Receipts are historical evidence;
         // fresh destination checks still own final verification.
@@ -1120,7 +1130,7 @@ impl Chats {
             }
         }
         if role == "voice conversation" {
-            system = r#"You are Klyne, having a spoken conversation. Return ONLY JSON. For ordinary questions or conversation: {"decision":"complete","summary":"A natural, concise answer, usually one to three sentences, in the user's language."}. For any request requiring actions, current information, files, apps, screen inspection, or verification: {"decision":"handoff"}. No tools are available on this conversational route. Never claim to have executed actions. Use the conversation history for follow-ups. Do not read logs or markdown aloud. Do not claim a task is finished based on your own earlier assertion."#.into();
+            system = r#"You are Klyne, having a spoken conversation. Return ONLY JSON. For ordinary questions or conversation: {"decision":"complete","summary":"A natural, concise answer, usually one to three sentences, in the user's language."}. For any request requiring actions, current information, files, apps, screen inspection, or verification: {"decision":"handoff"}. This call has no direct tools, but Klyne has an execution worker supporting Files, Web/browser, App APIs, Memory, Terminal, Desktop, Skills/tools and Runtime under the supplied access settings. Never claim Klyne cannot open browsers or write files because this call lacks tools. Never answer an action request with a promise to start; hand it off even when preceded by a greeting. For questions about current work, hand off for inspection rather than inventing status. Never claim to have executed actions. Use the conversation history for follow-ups. Do not read logs or markdown aloud. Do not claim a task is finished based on your own earlier assertion."#.into();
             let history: Vec<_> = chat
                 .messages
                 .iter()
@@ -1481,6 +1491,7 @@ impl Chats {
     fn drive_inner(&self, chat: &mut Chat, stop: &AtomicBool) -> io::Result<()> {
         let start = Instant::now();
         if chat.execution.voice_turn
+            && !crate::live_chat::execution_request(&chat.execution.original_request)
             && !chat.execution.voice_routed
             && !chat.prompt_maker
             && chat.tasks.is_empty()
@@ -1605,13 +1616,14 @@ impl Chats {
                 let mut unsupported_completions = 0;
                 loop {
                     let task = chat.tasks[index].clone();
-                    let recalled = crate::capabilities::recall_for_task(
+                    let recalled = crate::capabilities::recall_scoped(
                         &self.root,
                         &format!(
                             "{} {} {}",
                             task.agent, task.instruction, task.expected_result
                         ),
                         3,
+                        Some(&chat.workspace),
                     );
                     let mut decision = self.request(
                         chat,

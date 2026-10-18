@@ -213,3 +213,5 @@ main{container-type:size;container-name:chat-main;min-height:0}
 .voice-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 8px;font-size:12px}.voice-controls button{padding:7px 10px;border:1px solid var(--border,#393431);border-radius:14px;background:#201c1a;color:inherit;cursor:pointer}.voice-controls button[aria-pressed="true"]{background:#733d21;border-color:#e99453}.voice-controls span{flex:1;min-width:120px;color:#bcb4ad}.voice-controls button:focus-visible{outline:2px solid #e99453;outline-offset:2px}
 
 .live-stop-slot{width:72px;min-height:34px;flex:0 0 72px}.live-stop-slot button{width:100%;white-space:nowrap}#live-chat-controls select{max-width:100%;min-width:0;font-size:12px}#live-chat-log:empty{display:none}
+
+#goals-dialog{width:min(760px,94vw);max-height:88vh}#goals-dialog textarea{width:100%;box-sizing:border-box}.goal-card{padding:16px 0;border-top:1px solid #555}.goal-card h3,.goal-card p{overflow-wrap:anywhere}.goal-card button{margin-right:8px}#goal-list{max-height:45vh;overflow:auto}

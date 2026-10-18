@@ -12,6 +12,7 @@ mod chat_store;
 mod clarification;
 mod completion_guard;
 mod connections;
+mod coordinator;
 mod decisions;
 mod desktop;
 mod diagnostics;
@@ -327,6 +328,10 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
                 "text/javascript",
                 include_bytes!("../web/voice.js").as_slice(),
             )),
+            "/goals.js" => Some((
+                "text/javascript",
+                include_bytes!("../web/goals.js").as_slice(),
+            )),
             "/voice-worklet.js" => Some((
                 "text/javascript",
                 include_bytes!("../web/voice-worklet.js").as_slice(),
@@ -365,6 +370,9 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         }
         if method == "GET" && path == "/api/chats" {
             return studio.chats.list();
+        }
+        if method == "GET" && path == "/api/goals" {
+            return coordinator::overview(studio);
         }
         if method == "GET" && path == "/api/schedules" {
             return schedules::list(&studio.root);
@@ -453,6 +461,7 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         let starting = matches!(
             path,
             "/api/chats"
+                | "/api/goals"
                 | "/api/schedules"
                 | "/api/runs"
                 | "/api/desktop/launch"
@@ -500,6 +509,9 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         }
         if path == "/api/chats" {
             return studio.chats.send(&body);
+        }
+        if path == "/api/goals" {
+            return coordinator::manage(studio, &body);
         }
         if let Some(id) = path
             .strip_prefix("/api/chats/")
@@ -732,6 +744,7 @@ fn main() -> io::Result<()> {
     });
     studio.chats.recover()?;
     schedules::recover(&studio.root)?;
+    coordinator::recover(&studio.root)?;
     live_chat::recover(&studio.root)?;
     let scheduler = Arc::downgrade(&studio);
     std::thread::spawn(move || {
@@ -746,6 +759,10 @@ fn main() -> io::Result<()> {
             }
             if let Err(error) = live_chat::tick(&studio) {
                 eprintln!("Conversation queue paused: {error}");
+            }
+            if let Err(error) = coordinator::tick(&studio) {
+                eprintln!("Goal coordinator paused after persistence error: {error}");
+                break;
             }
         }
     });

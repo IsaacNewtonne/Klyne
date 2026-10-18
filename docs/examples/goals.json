@@ -1,0 +1,22 @@
+{
+  "jobs": [
+    {
+      "id": "research-a",
+      "request": {
+        "message": "create file proof.txt with content checked",
+        "provider": {"kind": "ollama", "endpoint": "http://127.0.0.1:11434", "model": "YOUR_INSTALLED_MODEL"},
+        "access": {"web": false, "terminal": false, "desktop": false, "apps": false},
+        "learn_procedures": true
+      }
+    },
+    {
+      "id": "research-b",
+      "depends_on": ["research-a"],
+      "request": {
+        "message": "create file next.txt with content next checked",
+        "provider": {"kind": "ollama", "endpoint": "http://127.0.0.1:11434", "model": "YOUR_INSTALLED_MODEL"},
+        "access": {"web": false, "terminal": false, "desktop": false, "apps": false}
+      }
+    }
+  ]
+}

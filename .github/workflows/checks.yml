@@ -24,8 +24,15 @@ jobs:
       - name: Core fixtures without browser or desktop requirements
         run: cargo test --locked --workspace --exclude klyne-studio --exclude harness-browser -- --test-threads=1
       - run: python -m unittest discover -s scripts -p test_klyne_recovery.py
+      - run: python scripts/test-jobs.py
       - run: npm ci --ignore-scripts
       - run: npx playwright install --with-deps chromium
+      - name: Use the pinned browser for Studio fixtures
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_ENV, 'CHROME_BINARY=' + require('playwright').chromium.executablePath() + '\n')"
+      - name: Studio goal, recovery and acceptance checks
+        run: |
+          cargo test --locked -p klyne-studio --bin klyne-studio -- --test-threads=1
+          cargo test --locked -p klyne-studio --test chat -- --test-threads=1 --skip production_view --skip chat_browser --skip recovery_screenshot
       - run: npm test
       - name: Check generated presentation assets
         run: |
@@ -60,6 +67,7 @@ jobs:
       - run: cargo test --locked --workspace --no-fail-fast -- --test-threads=1
       - run: npm test
       - run: python -m unittest discover -s scripts -p test_klyne_recovery.py
+      - run: python scripts/test-jobs.py
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
