@@ -107,13 +107,15 @@
     if(!enabled && composer.parentNode!==composerHome.parentNode)composerHome.after(composer);
   }
   function updateSideChat(chat){
-    const users=(chat?.messages||[]).filter(m=>m.role==='user');
+    const users=[...(chat?.messages||[]).filter(m=>m.role==='user'),...(chat?.dialogue||[]).map(t=>({text:t.message}))];
     markup($('prod-input-history'),users.map(m=>'<p>'+esc(m.text)+'</p>').join(''));
     const answers=(chat?.messages||[]).filter(m=>m.role!=='user'&&m.agent==='Klyne');
     const output=$('prod-output-content'),nearEnd=output.scrollHeight-output.scrollTop-output.clientHeight<50;
-    markup(output,answers.length?answers.map(m=>'<article>'+esc(m.text)+'</article>').join(''):'<p class="prod-output-empty">Klyne’s response will appear here.</p>');
+    const live=(chat?.dialogue||[]).map(t=>'<article><small>'+esc(t.state.replaceAll('_',' '))+'</small><p>'+esc(t.reply||'Thinking…')+'</p>'+(['queued','responding'].includes(t.state)?'<button type="button" data-live-cancel="'+esc(t.id)+'">Cancel '+(t.state==='queued'?'queued task':'reply')+'</button>':'')+'</article>').join('');
+    markup(output,answers.length||live?answers.map(m=>'<article>'+esc(m.text)+'</article>').join('')+live:'<p class="prod-output-empty">Klyne’s response will appear here.</p>');
     if(nearEnd)output.scrollTop=output.scrollHeight;
   }
+  $('prod-output-content').addEventListener('click',event=>{const button=event.target.closest('[data-live-cancel]');if(button)document.querySelector('#live-chat-log [data-cancel-turn="'+button.dataset.liveCancel+'"]')?.click();});
   const health=root.querySelector('.prod-health');
   const header=document.querySelector('.app>header') || document.querySelector('header');
   if(header) header.insertBefore(health,$('settings-button'));

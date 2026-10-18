@@ -156,6 +156,12 @@ pub fn validate(body: &Value) -> io::Result<()> {
     id(body)?;
     match body["operation"].as_str() {
         Some("health") => Ok(()),
+        Some("warmup")
+            if matches!(body["language"].as_str(), Some("en" | "vi"))
+                && body["tts"].is_boolean() =>
+        {
+            Ok(())
+        }
         Some("transcribe")
             if body["audio"]
                 .as_str()

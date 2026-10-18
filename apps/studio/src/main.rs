@@ -20,6 +20,7 @@ mod documents;
 mod execution_graph;
 mod failure_policy;
 mod improvement;
+mod live_chat;
 mod local_apps;
 mod mcp;
 mod network;
@@ -388,6 +389,7 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
                 .and_then(|n| n.parse::<u64>().ok())
                 .unwrap_or(0);
             let mut value = studio.chats.pulse(id, since)?;
+            value["dialogue_revision"] = json!(live_chat::revision(&studio.root, id)?);
             value["serve_ms"] =
                 serde_json::json!(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
             return Ok(value);
@@ -395,7 +397,9 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         if method == "GET"
             && let Some(id) = path.strip_prefix("/api/chats/")
         {
-            return serde_json::to_value(studio.chats.get(id)?).map_err(err);
+            let mut value = serde_json::to_value(studio.chats.get(id)?).map_err(err)?;
+            value["dialogue"] = live_chat::list(&studio.root, id)?;
+            return Ok(value);
         }
         if method == "GET"
             && let Some(id) = path.strip_prefix("/api/runs/")
@@ -496,6 +500,25 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         }
         if path == "/api/chats" {
             return studio.chats.send(&body);
+        }
+        if let Some(id) = path
+            .strip_prefix("/api/chats/")
+            .and_then(|p| p.strip_suffix("/conversation"))
+        {
+            if studio.quiescing.load(Ordering::SeqCst) {
+                return Err(err("Runtime upgrade in progress; retry after reconnection"));
+            }
+            if body["operation"] == "cancel" {
+                studio.chats.get(id)?;
+                return live_chat::cancel(
+                    &studio.root,
+                    id,
+                    body["request_id"]
+                        .as_str()
+                        .ok_or_else(|| err("Missing request ID"))?,
+                );
+            }
+            return live_chat::submit(studio, id, &body);
         }
         if path == "/api/schedules" {
             return schedules::manage(studio, &body);
@@ -709,6 +732,7 @@ fn main() -> io::Result<()> {
     });
     studio.chats.recover()?;
     schedules::recover(&studio.root)?;
+    live_chat::recover(&studio.root)?;
     let scheduler = Arc::downgrade(&studio);
     std::thread::spawn(move || {
         loop {
@@ -719,6 +743,9 @@ fn main() -> io::Result<()> {
             if let Err(error) = schedules::tick(&studio, desktop::now_ms()) {
                 eprintln!("Scheduler paused after persistence error: {error}");
                 break;
+            }
+            if let Err(error) = live_chat::tick(&studio) {
+                eprintln!("Conversation queue paused: {error}");
             }
         }
     });

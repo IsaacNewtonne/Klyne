@@ -185,6 +185,9 @@ pub struct Chats {
     active: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 impl Chats {
+    pub fn is_active(&self, id: &str) -> bool {
+        self.active.lock().unwrap().contains_key(id)
+    }
     pub fn active_count(&self) -> usize {
         self.active.lock().unwrap().len()
     }
@@ -429,6 +432,7 @@ impl Chats {
                     return Err(err("Conversation already deleted"));
                 }
                 fs::rename(&dir, destination)?;
+                crate::live_chat::forget(self.root.parent().unwrap(), id)?;
                 Ok(json!({"deleted":true}))
             }
             _ => Err(err("Choose rename or confirm deletion")),

@@ -70,6 +70,23 @@ accessSummary.onclick=()=>{$('settings').showModal();$('execution-settings').ope
 $('activity-details').querySelector('summary').textContent='Details';
 $('activity-details').querySelector('summary').after($('tasks'));
 const workerMessages=document.createElement('div');workerMessages.id='worker-messages';$('activity-details').append(workerMessages);
+const liveControls=document.createElement('div');liveControls.className='voice-controls';liveControls.id='live-chat-controls';
+liveControls.innerHTML='<label for="live-chat-mode">While working</label><select id="live-chat-mode"><option value="auto">Chat or add a task</option><option value="ask">Ask only</option><option value="queue">Queue a task</option></select><button type="button" id="live-chat-status">Progress update</button>';
+$('chat-form').before(liveControls);
+const liveStop=document.createElement('div');liveStop.className='live-stop-slot';liveStop.append($('stop-chat'));liveControls.append(liveStop);
+const liveLog=document.createElement('div');liveLog.id='live-chat-log';liveLog.setAttribute('aria-live','polite');$('messages').after(liveLog);
+let dialogueRevision=0,liveRequest=null;
+async function sendLive(message,mode,voiceTurn=false){
+  const source=selected;
+  // Preserve the key across a lost acknowledgement; retry cannot enqueue twice.
+  if(!liveRequest||liveRequest.source!==source||liveRequest.message!==message||liveRequest.mode!==mode)liveRequest={source,message,mode,request_id:crypto.randomUUID()};
+  const data=await api(`/api/chats/${source}/conversation`,liveRequest);
+  liveRequest=null;if(voiceTurn)window.klyneVoice?.sent(source,data.turn_id);
+  if(selected===source){snapshot=await api(`/api/chats/${source}`);render();}
+  return data;
+}
+$('live-chat-status').onclick=async()=>{if(!selected||submitting)return;submitting=true;render();try{await sendLive('What are you doing?','status');}catch(error){toast(error.message);}finally{submitting=false;render();}};
+liveLog.onclick=async event=>{const button=event.target.closest('[data-cancel-turn]');if(!button)return;button.disabled=true;try{await api(`/api/chats/${selected}/conversation`,{operation:'cancel',request_id:button.dataset.cancelTurn});await refresh();}catch(error){toast(error.message);}finally{button.disabled=false;}};
 const recoveryLink = document.createElement('a');
 recoveryLink.textContent = 'Recovery tools'; recoveryLink.className = 'quiet';
 recoveryLink.href = `http://127.0.0.1:${Number(location.port || 4317) + 1}/`;
@@ -161,7 +178,11 @@ function render() {
   $('writing-mode').disabled=active || submitting;
   $('welcome').hidden=!!selected; $('conversation').hidden=!selected;
   $('chat-title').textContent=snapshot?.title || (selected?'Opening conversation…':'Your workspace');
-  $('send').hidden=active; $('send').disabled=submitting || !!selected&&!snapshot;
+  $('send').hidden=false; $('send').disabled=submitting || !!selected&&!snapshot;
+  liveControls.hidden=!selected;
+  $('live-chat-status').disabled=submitting;
+  liveLog.hidden=!selected;
+  setMarkup(liveLog,(snapshot?.dialogue||[]).map(turn=>`<article class="message user"><p class="message-label">You · ${new Date(turn.created_ms).toLocaleTimeString()}</p><div class="message-text">${escape(turn.message)}</div></article><article class="message assistant"><p class="message-label">Klyne · ${escape(turn.state.replaceAll('_',' '))}</p><div class="message-text">${escape(turn.reply||'Thinking…')}</div>${['queued','responding'].includes(turn.state)?`<button type="button" data-cancel-turn="${escape(turn.id)}">Cancel ${turn.state==='queued'?'queued task':'reply'}</button>`:''}</article>`).join(''));
   $('stop-chat').hidden=!active;
   $('resume-chat').hidden=!snapshot || active || snapshot.status==='Completed' || !!snapshot.pending;
   $('pending-action').hidden=!snapshot?.pending || active;
@@ -180,8 +201,8 @@ function render() {
     panel.querySelector('label').textContent=approval?'Note (optional)':'What did you verify?';
     $('resolve-action').textContent=approval && $('pending-disposition').value==='approved'?'Approve and continue':'Record decision';
   }
-  $('instruction').placeholder=snapshot?.status==='Needs input'||snapshot?.pending?.proposal?'Klyne needs your input…':active?'You can draft your next instruction while Klyne works…':selected?'Add an instruction or ask a follow-up…':'Describe what you’d like to do…';
-  $('composer-hint').textContent=active?'Your team is working · You can stop at any time':'Enter to send · Shift + Enter for a new line';
+  $('instruction').placeholder=snapshot?.status==='Needs input'||snapshot?.pending?.proposal?'Klyne needs your input…':active?'Ask about progress, chat, or add a task while Klyne works…':selected?'Add an instruction or ask a follow-up…':'Describe what you’d like to do…';
+  $('composer-hint').textContent=active?'Chat while work continues · New tasks are logged and queued':'Enter to send · Shift + Enter for a new line';
   for(const id of ['access-web','access-terminal','access-desktop','access-apps','command-policy','max-tokens','max-cost']) $(id).disabled=active || submitting;
   if(!snapshot) { $('messages').replaceChildren(); delete $('messages').dataset.markup; $('work-panel').hidden=true; return; }
   const main=$('main'), nearBottom=main.scrollHeight-main.scrollTop-main.clientHeight<100;
@@ -219,8 +240,9 @@ async function refresh() {
       try {
         const pulse=await api(`/api/chats/${id}/pulse?since=${pulseSeq}`);
         if(selected!==id) return;
-        if(pulse.status!==snapshot?.status||pulse.seq!==pulseSeq) full=true;
+        if(pulse.status!==snapshot?.status||pulse.seq!==pulseSeq||(pulse.dialogue_revision||0)!==dialogueRevision) full=true;
         else pulseSeq=pulse.seq;
+        dialogueRevision=pulse.dialogue_revision||0;
         if(full) {
           const fresh=await api(`/api/chats/${id}`);
           if(selected!==id) return;
@@ -262,15 +284,18 @@ $('writing-mode').onchange=modeChanged;
 function accessChanged() {const count=['access-web','access-terminal','access-desktop','access-apps'].filter(id=>$(id).checked).length;accessSummary.textContent=count?`Access · ${count} enabled`:'Access · Workspace';$('terminal-note').hidden=!$('access-terminal').checked;$('desktop-note').hidden=!$('access-desktop').checked;}
 $('access-terminal').onchange=accessChanged;
 $('access-desktop').onchange=accessChanged;$('access-web').onchange=accessChanged;$('access-apps').onchange=accessChanged;accessChanged();
-$('instruction').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(!running(snapshot)&&!submitting)$('chat-form').requestSubmit();}};
+$('instruction').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(!submitting)$('chat-form').requestSubmit();}};
 $('chat-form').onsubmit=async e=>{
-  e.preventDefault();if(submitting||running(snapshot))return;
+  e.preventDefault();if(submitting)return;
   const message=$('instruction').value.trim();if(!message)return;
   if($('provider-kind').value!=='codex'&&!$('provider-model').value.trim()) {$('form-error').textContent='Choose your AI model in Settings first.';window.klyneVoice?.failed();$('settings').showModal();return;}
   submitting=true;$('send').textContent='…';$('form-error').textContent='';render();
   const source=selected;
   const voiceTurn=window.klyneVoice?.consumeTurn()||false;
   try {
+    if(source && (running(snapshot)||$('live-chat-mode').value==='ask'||$('live-chat-mode').value==='queue'||/^(status|task status|progress|what are you doing|what are you working on|how is it going|are you done)[?.!]*$/i.test(message))){
+      await sendLive(message,$('live-chat-mode').value,voiceTurn);drafts.delete(source);$('instruction').value='';return;
+    }
     const data=await api('/api/chats',{id:source,message,...reportContract(message),voice_turn:voiceTurn,...intelligenceConfig(),reviewer:reviewerConfig(),execution:executionConfig(),workspace:$('access-terminal').checked?$('host-workspace').value.trim():'',prompt_maker:$('writing-mode').value==='prompt_maker',provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,apps:$('access-apps').checked,desktop:$('access-desktop').checked}});
     $('report-required').checked=false;$('report-fields').hidden=true;
     if(voiceTurn)window.klyneVoice?.sent(data.id);

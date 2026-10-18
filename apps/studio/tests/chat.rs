@@ -15,6 +15,168 @@ fn preference_question(question: &str) -> Value {
 }
 
 #[test]
+fn live_conversation_logs_status_and_queues_without_overwriting_running_work() {
+    let s = Server::new();
+    let marker = s.root.path().join("waiting-model");
+    let mut slow = plan();
+    slow["_delay_ms"] = json!(1500);
+    slow["_marker"] = json!(marker);
+    let (endpoint, fixture) = model(vec![
+        slow,
+        write_file("first result"),
+        complete("First result saved."),
+        complete("First reviewed."),
+        plan(),
+        json!({"decision":"act","action":{"tool":"write_file","path":"next.txt","contents":"next result"}}),
+        complete("Next result saved."),
+        complete("Next reviewed."),
+    ]);
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let id = created["id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let started = Instant::now();
+    let status = s.api(
+        &format!("/api/chats/{id}/conversation"),
+        Some(json!({"request_id":"status-1","message":"What are you doing?","mode":"auto"})),
+    );
+    assert_eq!(status["state"], "answered", "{status}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let task = json!({"request_id":"task-1","message":"Then prepare the next result in next.txt","mode":"queue"});
+    for _ in 0..2 {
+        let queued = s.api(&format!("/api/chats/{id}/conversation"), Some(task.clone()));
+        assert_eq!(queued["state"], "queued", "{queued}");
+    }
+    let during = s.api(&format!("/api/chats/{id}"), None);
+    assert_eq!(
+        during["execution"]["original_request"],
+        request(&endpoint)["message"]
+    );
+    assert_eq!(during["dialogue"].as_array().unwrap().len(), 2);
+    assert!(
+        during["dialogue"][0]["reply"]
+            .as_str()
+            .unwrap()
+            .contains("Waiting for the model")
+    );
+    let done = loop {
+        let state = s.api(&format!("/api/chats/{id}"), None);
+        if state["dialogue"][1]["state"] == "completed" {
+            break state;
+        }
+        assert!(Instant::now() < deadline, "{state}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let root = std::path::Path::new(done["workspace"].as_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(root.join("greeting.txt")).unwrap(),
+        "first result"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("next.txt")).unwrap(),
+        "next result"
+    );
+    assert_eq!(fixture.join().unwrap().len(), 8);
+}
+
+#[test]
+fn live_questions_are_read_only_and_cancelled_queue_survives_reload() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"fail","reason":"Missing prerequisite"}),
+        json!({"decision":"answer","summary":"The task is blocked by a missing prerequisite."}),
+    ]);
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let id = created["id"].as_str().unwrap();
+    let before = s.wait(id);
+    let reply = s.api(
+        &format!("/api/chats/{id}/conversation"),
+        Some(json!({"request_id":"ask-1","message":"Why did you stop?","mode":"ask"})),
+    );
+    assert_eq!(reply["state"], "responding");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = s.api(&format!("/api/chats/{id}"), None);
+        if state["dialogue"][0]["state"] == "answered" {
+            assert_eq!(state["status"], before["status"]);
+            assert_eq!(state["tasks"], before["tasks"]);
+            assert_eq!(state["evidence"], before["evidence"]);
+            break;
+        }
+        assert!(Instant::now() < deadline, "{state}");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    s.api(
+        &format!("/api/chats/{id}/conversation"),
+        Some(json!({"request_id":"queued-1","message":"Write a second result","mode":"queue"})),
+    );
+    assert_eq!(
+        s.api(
+            &format!("/api/chats/{id}/conversation"),
+            Some(json!({"request_id":"queued-1","operation":"cancel"}))
+        )["cancelled"],
+        true
+    );
+    let state = s.api(&format!("/api/chats/{id}"), None);
+    assert_eq!(state["dialogue"][1]["state"], "cancelled");
+    assert_eq!(state["status"], "Blocked");
+    let calls = fixture.join().unwrap();
+    assert!(
+        calls[2]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("NO tools")
+    );
+}
+
+#[test]
+fn live_cancel_suppresses_late_task_decisions_and_status_stays_available() {
+    let s = Server::new();
+    let marker = s.root.path().join("conversation-model");
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"fail","reason":"Paused fixture"}),
+        json!({"decision":"queue","_delay_ms":1500,"_marker":marker,"_disconnect_ok":true}),
+    ]);
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let id = created["id"].as_str().unwrap();
+    s.wait(id);
+    s.api(
+        &format!("/api/chats/{id}/conversation"),
+        Some(json!({"request_id":"slow-reply","message":"Prepare another result","mode":"auto"})),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let status = s.api(
+        &format!("/api/chats/{id}/conversation"),
+        Some(json!({"request_id":"quick-status","message":"status"})),
+    );
+    assert_eq!(status["state"], "answered", "{status}");
+    assert_eq!(
+        s.api(
+            &format!("/api/chats/{id}/conversation"),
+            Some(json!({"operation":"cancel","request_id":"slow-reply"}))
+        )["cancelled"],
+        true
+    );
+    fixture.join().unwrap();
+    let state = s.api(&format!("/api/chats/{id}"), None);
+    assert_eq!(state["dialogue"][0]["state"], "cancelled");
+    assert_eq!(state["status"], "Blocked");
+    assert_eq!(
+        state["execution"]["original_request"],
+        request(&endpoint)["message"]
+    );
+}
+
+#[test]
 fn binary_artifact_route_recovers_bad_arguments_and_verifies_actual_bytes() {
     use sha2::{Digest, Sha256};
     let s = Server::new();

@@ -1,0 +1,53 @@
+﻿{
+    "before":  {
+                   "en":  [
+                              {
+                                  "tts_ms":  22302,
+                                  "asr_ms":  2235,
+                                  "audio_seconds":  2.6666666666666665,
+                                  "transcript":  "Hello, the voice assistant is ready."
+                              },
+                              {
+                                  "tts_ms":  8627,
+                                  "asr_ms":  1345,
+                                  "audio_seconds":  2.6666666666666665,
+                                  "transcript":  "Hello, the voice assistant is ready."
+                              },
+                              {
+                                  "tts_ms":  8770,
+                                  "asr_ms":  1406,
+                                  "audio_seconds":  2.6666666666666665,
+                                  "transcript":  "Hello, the voice assistant is ready."
+                              }
+                          ]
+               },
+    "note":  "Synthetic English; no microphone; sequential samples, not controlled load or end-to-end conversation latency.",
+    "runtime_smoke":  {
+                          "asr_ms":  828,
+                          "tts_ms":  1250,
+                          "cancel_restart":  "passed",
+                          "intent_guard":  "passed"
+                      },
+    "after":  {
+                  "en":  [
+                             {
+                                 "tts_ms":  2521,
+                                 "asr_ms":  419,
+                                 "audio_seconds":  2.6666666666666665,
+                                 "transcript":  "Hello, the voice assistant is ready."
+                             },
+                             {
+                                 "tts_ms":  8880,
+                                 "asr_ms":  964,
+                                 "audio_seconds":  2.6666666666666665,
+                                 "transcript":  "Hello, the voice assistant is ready."
+                             },
+                             {
+                                 "tts_ms":  7608,
+                                 "asr_ms":  794,
+                                 "audio_seconds":  2.6666666666666665,
+                                 "transcript":  "Hello, the voice assistant is ready."
+                             }
+                         ]
+              }
+}

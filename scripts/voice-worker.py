@@ -80,22 +80,26 @@ class Speech:
         kind = request.get('operation')
         if kind == 'health':
             self.load_asr('en')
-            self.release_asr()
             self.load_tts('en')
             return {'ready': True, 'asr': 'Moonshine Tiny Streaming 34M', 'tts': 'Kokoro 82M / George / English', 'local': True}
+        if kind == 'warmup':
+            language = request.get('language', 'en')
+            if language not in LANGUAGES:
+                raise ValueError('Unsupported recognition language')
+            self.load_asr(language)
+            if request.get('tts', False):
+                self.load_tts('en')
+            return {'ready': True, 'local': True}
         if kind == 'transcribe':
             samples = decode_wav(request.get('audio', ''))
             language = request.get('language', 'en')
             if language not in LANGUAGES:
                 raise ValueError('Unsupported recognition language')
             self.load_asr(language)
-            try:
-                transcript = self.asr.transcribe_without_streaming(samples, 16000)
-                text = ' '.join(line.text.strip() for line in transcript.lines).strip()
-            finally:
-                # The native recognizer owns several ORT sessions. Release them
-                # between turns so their pools do not compete with synthesis.
-                self.release_asr()
+            # Inference stays serialized; retain single-threaded recognition
+            # sessions so each utterance does not reload the model from disk.
+            transcript = self.asr.transcribe_without_streaming(samples, 16000)
+            text = ' '.join(line.text.strip() for line in transcript.lines).strip()
             return {'text': text[:8000], 'language': language}
         if kind == 'speak':
             text = request.get('text')

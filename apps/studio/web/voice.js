@@ -7,6 +7,7 @@
   <label><input id="voice-read-replies" type="checkbox" checked> Speak replies to my voice requests</label>
   <label><input id="voice-auto-send" type="checkbox"> Send voice transcripts automatically</label>
   <label><input id="voice-interrupt" type="checkbox"> Interrupt by speaking in conversation mode (headphones recommended)</label>
+  <label for="voice-pause">Pause before sending</label><select id="voice-pause"><option value="500">Quick · 0.5 seconds</option><option value="800" selected>Balanced · 0.8 seconds</option><option value="1200">Patient · 1.2 seconds</option></select>
   <label for="voice-output">Speaking voice</label><select id="voice-output"><option value="en">Kokoro · George · British English</option><option value="computer">Installed computer voice</option></select><select id="voice-computer" aria-label="Installed local voice"></select>
   <p class="settings-copy">Choose the language you will speak. For Vietnamese replies, choose an installed Vietnamese computer voice. Conversation mode sends turns after a pause; use headphones for reliable interruption detection.</p>
   <button id="voice-check" type="button">Check voice</button><button id="voice-preview" type="button">Test speaking voice</button><p id="voice-health" role="status"></p>`;
@@ -19,7 +20,8 @@
   let monitoring=false;
   let pendingVoice=false,watch=null,currentChat=null,observedChat=null,pausedForReply=false;
   let speechQueue=[],speechActive=false,speechResolve=null,recordChat=null;
-  const savedIds=['voice-language','voice-read-replies','voice-auto-send','voice-output','voice-computer','voice-interrupt'];
+  let warming=null;
+  const savedIds=['voice-language','voice-read-replies','voice-auto-send','voice-output','voice-computer','voice-interrupt','voice-pause'];
   let saved={};try{saved=JSON.parse(localStorage.getItem('klyne-voice')||'{}');}catch(_){}
   for(const id of savedIds){if(id==='voice-computer')continue;if(saved[id]!==undefined){if(el(id).type==='checkbox')el(id).checked=!!saved[id];else el(id).value=saved[id];}}
   for(const id of ['voice-language','voice-output'])if(!el(id).value)el(id).value='en';
@@ -70,6 +72,7 @@
   async function startRecording(monitor=false){
     if(recording||opening)return;
     if(!monitor)await stopSpeech();const epoch=generation;opening=true;monitoring=monitor;recordChat=currentChat;status('Opening microphone…');
+    if(!monitor&&!request)warming=call('warmup',{language:el('voice-language').value,tts:el('voice-output').value!=='computer'}).catch(()=>null);
     try{
       if(!navigator.mediaDevices?.getUserMedia)throw Error('Microphone access requires localhost and a supported browser.');
       const captured=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
@@ -94,7 +97,8 @@
         }
         if(loud){voiced+=part.length;silence=0;}else silence+=part.length;
         if(continuous && !voiced && samples>16000*5){chunks=[];samples=0;silence=0;}
-        if(samples>=480000 || continuous&&voiced>3200&&silence>19200)finishRecording();
+        const pause=Math.max(500,Math.min(1200,Number(el('voice-pause').value)||800))*16;
+        if(samples>=480000 || continuous&&voiced>3200&&silence>pause)finishRecording();
       };
       el('voice-record').textContent='Finish';el('voice-record').setAttribute('aria-pressed','true');status(continuous?'Listening · speak, then pause':'Listening · click Finish when done');
     }catch(error){releaseMic();continuous=false;el('voice-conversation').setAttribute('aria-pressed','false');status(error.message);}
@@ -105,6 +109,8 @@
     if(count<1600){status('Recording was too short.');return;}
     status('Transcribing locally…');
     try{
+      if(warming)await warming;
+      if(epoch!==generation||origin!==currentChat)return;
       const result=await call('transcribe',{audio:wavBase64(parts,count),language:el('voice-language').value});
       if(epoch!==generation || origin!==currentChat)return;
       const text=result.text.trim();
@@ -116,8 +122,6 @@
           if(!el('stop-chat').hidden)el('stop-chat').click();el('instruction').value='';status('Task stop requested.');if(continuous)startRecording();return;
         }
         if(['stop listening','sleep','go to sleep','stop voice'].includes(command)){el('instruction').value='';stopAll();return;}
-        if(['status','task status','how is the task going','how’s the task going','how is it going'].includes(command)&&observedChat){el('instruction').value='';await speak(`The task is ${observedChat.status.toLowerCase()}.`);return;}
-        if(!el('stop-chat').hidden){status('Task is running. Your transcript is ready to review; stop or finish the task before sending.');return;}
         pendingVoice=true;pausedForReply=true;status('Waiting for Klyne…');el('chat-form').requestSubmit();
       }else{status('Transcript ready · edit it or press Send');pendingVoice=true;el('instruction').focus();}
     }catch(error){if(epoch===generation){status(error.name==='AbortError'?'Voice stopped':error.message);continuous=false;el('voice-conversation').setAttribute('aria-pressed','false');}}
@@ -126,17 +130,17 @@
     const plain=text.replace(/```[\s\S]*?```/g,'Code is shown in the conversation.').replace(/\[([^\]]+)\]\([^)]+\)/g,'$1').replace(/[#*_`]/g,'').trim();
     const shortened=plain.length>1600?plain.slice(0,1500)+' The full answer is in the conversation.':plain;
     const result=[];let remaining=shortened;
-    while(remaining.length){let end=Math.min(320,remaining.length);if(end<remaining.length){const boundary=Math.max(remaining.lastIndexOf('. ',end),remaining.lastIndexOf('? ',end),remaining.lastIndexOf('! ',end));const space=remaining.lastIndexOf(' ',end);end=boundary>60?boundary+1:space>60?space:end;}
+    while(remaining.length){let end=Math.min(result.length?280:140,remaining.length);if(end<remaining.length){const boundary=Math.max(remaining.lastIndexOf('. ',end),remaining.lastIndexOf('? ',end),remaining.lastIndexOf('! ',end));const space=remaining.lastIndexOf(' ',end);end=boundary>30?boundary+1:space>30?space:end;}
       result.push(remaining.slice(0,end).trim());remaining=remaining.slice(end).trim();}
     return result.filter(Boolean);
   }
-  async function play(chunk,epoch){
+  async function play(chunk,epoch,prepared=null){
     if(el('voice-output').value==='computer'){
       const voice=window.speechSynthesis?.getVoices().find(v=>v.localService && v.voiceURI===el('voice-computer').value);
       if(!voice)throw Error('Choose an installed computer voice in Settings.');
       return new Promise((resolve,reject)=>{speechResolve=resolve;const utterance=new SpeechSynthesisUtterance(chunk);utterance.voice=voice;utterance.onend=()=>{speechResolve=null;resolve();};utterance.onerror=()=>{speechResolve=null;epoch===generation?reject(Error('Computer speech was interrupted.')):resolve();};window.speechSynthesis.speak(utterance);});
     }
-    const result=await call('speak',{text:chunk,language:el('voice-output').value});if(epoch!==generation)return;
+    const result=prepared||await call('speak',{text:chunk,language:el('voice-output').value});if(epoch!==generation)return;
     const bytes=Uint8Array.from(atob(result.audio),c=>c.charCodeAt(0));const url=URL.createObjectURL(new Blob([bytes],{type:'audio/wav'}));
     try{await new Promise((resolve,reject)=>{speechResolve=resolve;audio=new Audio(url);audio.onended=()=>{speechResolve=null;resolve();};audio.onerror=()=>{speechResolve=null;reject(Error('Could not play voice audio.'));};audio.play().catch(reject);});}
     finally{URL.revokeObjectURL(url);audio=null;}
@@ -144,7 +148,16 @@
   async function speak(text){
     await stopSpeech();releaseMic();const epoch=generation;speechActive=true;speechQueue=splitSpeech(text);status('Speaking · Talk to interrupt');
     try{if(continuous&&el('voice-interrupt').checked){await startRecording(true);status('Speaking · listening for interruption');}
-      while(speechQueue.length && epoch===generation)await play(speechQueue.shift(),epoch);
+      // Synthesize the next chunk during playback; at most one chunk is ahead.
+      const synth=chunk=>call('speak',{text:chunk,language:el('voice-output').value}).then(value=>({value}),error=>({error}));
+      let prepared=null;
+      while(speechQueue.length && epoch===generation){
+        const chunk=speechQueue.shift();
+        if(el('voice-output').value==='computer'){await play(chunk,epoch);continue;}
+        const result=await (prepared||synth(chunk));if(epoch!==generation)break;if(result.error)throw result.error;
+        prepared=speechQueue.length?synth(speechQueue[0]):null;
+        await play(chunk,epoch,result.value);
+      }
       if(epoch===generation){speechActive=false;if(monitoring)releaseMic();status('Voice ready');if(continuous)startRecording();}
     }catch(error){if(epoch===generation){speechActive=false;releaseMic();status(error.message);continuous=false;el('voice-conversation').setAttribute('aria-pressed','false');}}
   }
@@ -157,10 +170,20 @@
   window.addEventListener('pagehide',stopAll);
   window.klyneVoice={
     consumeTurn(){const value=pendingVoice;pendingVoice=false;return value;},
-    sent(id){watch={id,after:observedChat?.id===id?observedChat.messages.length:0};currentChat=id;},
+    sent(id,turn=null){watch={id,turn,after:observedChat?.id===id?observedChat.messages.length:0};currentChat=id;},
     failed(){pausedForReply=false;watch=null;status('Could not send. Review the message and connection settings.');continuous=false;el('voice-conversation').setAttribute('aria-pressed','false');},
     selected(id){if(currentChat!==id){stopAll();currentChat=id;observedChat=null;}},
     update(chat){observedChat=chat;if(!chat)return;currentChat=chat.id;
+      if(watch?.id===chat.id&&watch.turn){
+        const turn=(chat.dialogue||[]).find(t=>t.id===watch.turn);
+        if(turn?.reply){watch=null;pausedForReply=false;if(el('voice-read-replies').checked)speak(turn.reply);else if(continuous)startRecording();}
+        return;
+      }
+      if(watch?.id===chat.id&&continuous&&['Working','Reviewing'].includes(chat.status)&&chat.tasks?.length){
+        watch=null;pausedForReply=false;
+        if(el('voice-read-replies').checked)speak('The task is running. You can keep talking, ask for progress, or queue another task.');else startRecording();
+        return;
+      }
       if(watch?.id===chat.id && !['Planning','Working','Reviewing','Stopping'].includes(chat.status)){
         const reply=chat.messages.slice(watch.after).filter(m=>m.role==='assistant'&&m.agent==='Klyne').at(-1);watch=null;pausedForReply=false;
         if(reply&&el('voice-read-replies').checked)speak(reply.text);else if(continuous)startRecording();
