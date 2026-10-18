@@ -81,7 +81,8 @@ pub fn available_tools(web: bool, terminal: bool, apps: bool, desktop: bool) -> 
         "workspace_files": ["read_file", "read_range", "hash_file", "search_file", "list_dir", "stat_path", "write_file", "patch_file", "make_dir", "copy_file", "move_file", "delete_path"],
         "saved_capability_discovery": ["capability_list", "skill_read", "memory_read", "capability_history"],
         "history": ["evidence_read"],
-        "documents": ["document_read", "document_classify"],
+        "documents": ["document_read", "document_classify", "document_create"],
+        "resources": ["resource_route", "artifact_read", "artifact_write", "artifact_inspect", "artifact_verify"],
         "workspace_root": ".",
         "note": "Built-in inventory, independent of saved extensions. Host policy, review restrictions and path checks apply at dispatch."
     });

@@ -37,6 +37,13 @@ function Get-KlyneProcess {
         $actualPath = ConvertTo-KlyneComparablePath $process.Path
         $expectedPath = ConvertTo-KlyneComparablePath $expected
         if (-not $actualPath -or $actualPath -ne $expectedPath) { throw 'Unexpected server' }
+        # Identity and serving health are separate from idle readiness. A recovered
+        # task can be busy while this is already the correct running server.
+        if ($health.root) {
+            $actualRoot = ConvertTo-KlyneComparablePath $health.root
+            $expectedRoot = ConvertTo-KlyneComparablePath $root
+            if ($actualRoot -ne $expectedRoot) { throw 'Server uses a different Klyne data directory' }
+        }
         return $process
     } catch { return $null }
 }

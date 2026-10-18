@@ -1,6 +1,7 @@
 mod activation;
 mod app_adapter;
 mod app_schema;
+mod artifacts;
 mod autonomy;
 mod broker;
 mod browser_tools;
@@ -26,6 +27,7 @@ mod performance;
 mod procedures;
 mod progress;
 mod recovery;
+mod resource_routes;
 mod restart_reconciliation;
 mod route_recovery;
 mod schedules;
@@ -344,7 +346,7 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         }
         if method == "GET" && path == "/api/runtime/ready" {
             return Ok(
-                json!({"pid":std::process::id(),"ready":studio.chats.active_count()==0 && studio.active.lock().unwrap().is_empty()}),
+                json!({"pid":std::process::id(),"serving":true,"root":fs::canonicalize(&studio.root).unwrap_or_else(|_| studio.root.clone()),"executable":std::env::current_exe().ok(),"ready":studio.chats.active_count()==0 && studio.active.lock().unwrap().is_empty()}),
             );
         }
         if method == "GET" && path == "/api/runtime/load" {

@@ -56,6 +56,19 @@ fn field<'a>(v: &'a Value, key: &str, max: usize) -> io::Result<&'a str> {
         .filter(|s| !s.trim().is_empty() && s.len() <= max)
         .ok_or_else(|| err(format!("Invalid {key}")))
 }
+pub fn format_name(value: &Value) -> io::Result<&str> {
+    value
+        .as_str()
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 16
+                && s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+        .ok_or_else(|| {
+            err("Format must be a lowercase extension without a dot, 1–16 ASCII letters/digits")
+        })
+}
 fn name(v: &Value) -> io::Result<&str> {
     let name = field(v, "name", 80)?;
     if !name
@@ -253,6 +266,10 @@ pub fn execute_with_policy(
     }
     let mut db = open(root)?;
     if tool == "capability_list" {
+        let format = action
+            .get("format")
+            .map(|v| format_name(v).map(str::to_owned))
+            .transpose()?;
         let query = action["query"].as_str().unwrap_or("").to_lowercase();
         let mut stmt = db.prepare("SELECT v.kind,v.name,v.version,v.payload,v.tested FROM active a JOIN versions v USING(kind,name,version) ORDER BY v.kind,v.name").map_err(err)?;
         let rows = stmt
@@ -270,11 +287,19 @@ pub fn execute_with_policy(
         for row in rows {
             let (kind, name, version, payload, tested) = row.map_err(err)?;
             let payload: Value = serde_json::from_str(&payload).map_err(err)?;
+            if format.as_ref().is_some_and(|format| {
+                kind != "tool"
+                    || !payload["formats"]
+                        .as_array()
+                        .is_some_and(|formats| formats.iter().any(|f| f.as_str() == Some(format)))
+            }) {
+                continue;
+            }
             if format!("{name} {}", payload["description"])
                 .to_lowercase()
                 .contains(&query)
             {
-                items.push(json!({"kind":kind,"name":name,"version":version,"description":payload["description"],"tested":tested,"operating_contract":payload["operating_contract"]}));
+                items.push(json!({"kind":kind,"name":name,"version":version,"description":payload["description"],"tested":tested,"formats":payload["formats"],"operating_contract":payload["operating_contract"]}));
             }
         }
         let offset = action["offset"].as_u64().unwrap_or(0) as usize;
@@ -312,6 +337,18 @@ pub fn execute_with_policy(
     if tool.ends_with("_save") {
         field(action, "description", 512)?;
         if kind == "tool" {
+            if let Some(formats) = action.get("formats") {
+                let formats = formats
+                    .as_array()
+                    .filter(|v| !v.is_empty() && v.len() <= 32)
+                    .ok_or_else(|| err("formats must contain 1–32 lowercase extensions"))?;
+                let mut seen = std::collections::BTreeSet::new();
+                for format in formats {
+                    if !seen.insert(format_name(format)?) {
+                        return Err(err("Duplicate format"));
+                    }
+                }
+            }
             if let Some(contract) = action.get("operating_contract") {
                 crate::autonomy::validate_tool_contract(contract).map_err(err)?;
             }

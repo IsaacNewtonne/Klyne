@@ -224,7 +224,14 @@ impl Chats {
                 continue;
             }
             if let Some(pending) = chat.pending.clone() {
-                if chat.access.desktop
+                if let Some(result) = crate::artifacts::reconcile(&chat.workspace, &pending) {
+                    chat.evidence.push(json!({"agent":"Host reconciliation","action":"artifact_reconcile","ok":true,"summary":"Exact saved bytes observed; publication was not replayed","receipt":result["receipt"],"data":result.to_string()}));
+                    chat.pending = None;
+                    chat.execution.failure = None;
+                    self.save(&mut chat)?;
+                }
+                if chat.pending.is_some()
+                    && chat.access.desktop
                     && let Some(result) = crate::document_save::verify(
                         &pending,
                         &chat.workspace,
@@ -1019,7 +1026,7 @@ impl Chats {
             chat.access.desktop,
         );
         if !chat.execution.decisions.enabled {
-            context["available_tools"]["documents"] = json!(["document_read"]);
+            context["available_tools"]["documents"] = json!(["document_read", "document_create"]);
         }
         context["capabilities_scope"] = json!(
             "Saved extensions only. Empty means no saved extensions, not no tools. See available_tools for built-in tools."
@@ -1032,7 +1039,9 @@ impl Chats {
         system.push_str(crate::broker::POLICY_INSTRUCTIONS);
         system.push_str(crate::clarification::INSTRUCTIONS);
         system.push_str(crate::autonomy::INSTRUCTIONS);
-        system.push_str(" document_read {path} extracts bounded text from a workspace PDF or UTF-8 file. Scanned images need OCR. workflow_routing and evaluated_procedure are advisory context only: inspect current inputs, preserve every requirement, and never treat a historical plan as permission or evidence.");
+        system.push_str(" document_read {path} extracts bounded text from a workspace PDF, DOCX or UTF-8 file. Scanned images need OCR. workflow_routing and evaluated_procedure are advisory context only: inspect current inputs, preserve every requirement, and never treat a historical plan as permission or evidence.");
+        system.push_str(crate::artifacts::INSTRUCTIONS);
+        system.push_str(crate::resource_routes::INSTRUCTIONS);
         if chat.execution.decisions.enabled {
             system.push_str(" document_classify {path} sends extracted document text to the configured decision service and returns typed labels and independent overlapping scores. needs_review marks uncertainty or truncation. Labels are advisory, not verified facts; classification never moves files.");
         }
@@ -1045,7 +1054,7 @@ impl Chats {
             system.push_str(" ArtifactRequirements checks Markdown structure: visible body characters (excluding headings, code blocks and images), exact top-level section heading text, and exact HTTPS link destinations. Raw HTML produces an inconclusive check; use Markdown instead. It does not verify source quality, factual accuracy or whether sources were retrieved. Inspect sources when the task calls for research; never describe structural acceptance as factual verification.");
         }
         if chat.access.terminal {
-            system.push_str("\nRuntime tools: runtime_status {} reads the last activation result; runtime_attest {binary,sha256,test_argv:[program,args...]} runs the approved test command in the project and records a passing result for the unchanged binary digest; runtime_stage {binary,sha256} preflights and stages a built Studio binary for the supervisor, then checkpoints this goal for continuation under the new version. Staging refuses candidates without a fresh attestation. Requires launching Studio through klyne-supervisor. Build and test the candidate first. Versioned skills and argv tools activate immediately without a runtime replacement. Do not repeatedly stage the same binary; inspect runtime_status after restart.");
+            system.push_str("\nRuntime tools: runtime_status {} reports the running executable, configured activation and last activation result; runtime_attest {binary,sha256,test_argv:[program,args...]} runs the approved test command in the project and records a passing result for the unchanged binary digest; runtime_stage {binary,sha256} preflights and stages a built Studio binary for the supervisor, then checkpoints this goal for continuation under the new version. Staging refuses candidates without a fresh attestation. Requires launching Studio through klyne-supervisor. Build and test the candidate first. Versioned skills and argv tools activate immediately without a runtime replacement. Do not repeatedly stage the same binary; inspect runtime_status after restart.");
         }
         if chat.access.web {
             system.push_str(crate::browser_tools::INSTRUCTIONS);
@@ -2041,6 +2050,69 @@ impl Chats {
         chat.execution.policy_snapshot = shared_policy(chat);
         if matches!(
             decision["action"]["tool"].as_str(),
+            Some(
+                "resource_route"
+                    | "artifact_read"
+                    | "artifact_write"
+                    | "artifact_inspect"
+                    | "artifact_verify"
+                    | "document_create"
+            )
+        ) {
+            let action = &decision["action"];
+            let tool = action["tool"].as_str().unwrap();
+            chat.used += 1;
+            self.save(chat)?;
+            let tool_started = Instant::now();
+            let mut owns_pending = false;
+            let result = if tool == "resource_route" {
+                crate::resource_routes::resolve(
+                    &self.root,
+                    &chat.workspace,
+                    action,
+                    &chat.access,
+                    chat.pending.is_some(),
+                    crate::clarification::existing_browser_profile(
+                        &chat.execution.original_request,
+                    ),
+                    stop,
+                )
+            } else if chat.pending.is_some() {
+                Err(err(
+                    "Reconcile the pending effect before another artifact operation",
+                ))
+            } else {
+                match crate::artifacts::prepare(&chat.workspace, action, review, stop) {
+                    Err(error) => Err(error),
+                    Ok(prepared) => {
+                        if let Some(mut intent) = prepared.intent() {
+                            intent["agent"] = json!(agent);
+                            intent["action"] = json!({"tool":tool,"path":action["path"]});
+                            chat.pending = Some(intent);
+                            self.save(chat)?;
+                            owns_pending = true;
+                        }
+                        crate::artifacts::execute(prepared, &chat.workspace, stop)
+                    }
+                }
+            };
+            let value = result.unwrap_or_else(|error| json!({"ok":false,"effect":"not_applied","known_not_applied":true,"error":error.to_string()}));
+            let uncertain = value["uncertain"] == true;
+            if owns_pending && !uncertain {
+                chat.pending = None;
+            }
+            note_tool(chat, tool, tool_started, value["ok"] == true);
+            chat.evidence.push(json!({"agent":agent,"action":tool,"ok":value["ok"],"summary":if uncertain {"Artifact outcome uncertain; inspect destination before continuing"} else {"Resource operation observed; verification scope is explicit"},"receipt":value["receipt"],"data":value.to_string()}));
+            self.save(chat)?;
+            if uncertain {
+                return Err(err(
+                    "Artifact effect is uncertain; saved intent requires reconciliation",
+                ));
+            }
+            return guard(chat, stop, start);
+        }
+        if matches!(
+            decision["action"]["tool"].as_str(),
             Some("document_read" | "document_classify")
         ) {
             let path = required(&decision["action"], "path")?;
@@ -2100,8 +2172,14 @@ impl Chats {
         ) {
             let root = self.root.parent().unwrap();
             if decision["action"]["tool"] == "runtime_status" {
-                let data = fs::read_to_string(root.join("runtime/last-result.json"))
-                    .unwrap_or_else(|_| "No activation recorded".into());
+                let record = |name: &str| match fs::read_to_string(root.join("runtime").join(name))
+                {
+                    Ok(text) => serde_json::from_str::<Value>(&text)
+                        .unwrap_or_else(|error| json!({"error":error.to_string()})),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Value::Null,
+                    Err(error) => json!({"error":error.to_string()}),
+                };
+                let data = json!({"running_executable":std::env::current_exe().ok(),"pid":std::process::id(),"studio_root":root,"configured_activation":record("current.json"),"last_result":record("last-result.json"),"note":"Configured activation and running executable are separate observations; a build alone does not activate a candidate."}).to_string();
                 chat.used += 1;
                 chat.evidence.push(json!({"agent":agent,"action":"runtime_status","ok":true,"summary":"Runtime activation state","data":data}));
                 self.save(chat)?;

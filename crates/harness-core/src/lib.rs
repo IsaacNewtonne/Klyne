@@ -5,6 +5,7 @@ pub mod delegation;
 pub mod delegation_budget;
 pub mod event_store;
 pub mod execution;
+pub mod file_formats;
 pub mod inspect;
 pub mod large_files;
 pub mod model;

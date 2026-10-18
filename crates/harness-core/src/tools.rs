@@ -183,6 +183,9 @@ impl Tool for WorkspaceFsTool {
                 },
             },
             Action::WriteFile { path, contents } => {
+                if crate::file_formats::binary_extension(path) {
+                    return Observation { ok: false, summary: "Binary format requires a real encoder or application".into(), data: "Use resource_route to discover a format adapter; write_file only writes UTF-8 text. Changing an extension does not encode a document.".into() };
+                }
                 if contents.len() > MAX_FILE_BYTES {
                     return Observation {
                         ok: false,

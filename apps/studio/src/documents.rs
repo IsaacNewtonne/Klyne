@@ -38,6 +38,16 @@ pub fn helper() -> io::Result<()> {
     Ok(())
 }
 pub fn extract(workspace: &Path, path: &str, stop: &AtomicBool) -> io::Result<Value> {
+    if crate::artifacts::extension(path) == "docx" {
+        if stop.load(Ordering::SeqCst) {
+            return Err(err("Document read stopped"));
+        }
+        let result = crate::artifacts::read_document(workspace, path)?;
+        if stop.load(Ordering::SeqCst) {
+            return Err(err("Document read stopped"));
+        }
+        return Ok(result);
+    }
     let policy = PermissionPolicy::milestone_default(workspace);
     if policy.check(&Action::ReadFile { path: path.into() }) != PermissionDecision::Allow {
         return Err(err("Document path is outside the permitted workspace"));

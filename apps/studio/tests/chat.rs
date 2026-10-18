@@ -15,6 +15,235 @@ fn preference_question(question: &str) -> Value {
 }
 
 #[test]
+fn binary_artifact_route_recovers_bad_arguments_and_verifies_actual_bytes() {
+    use sha2::{Digest, Sha256};
+    let s = Server::new();
+    let digest = format!("{:x}", Sha256::digest([0, 255, 97]));
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"resource_route","operation":"create_file","path":"proof.bin"}}),
+        json!({"decision":"act","action":{"tool":"artifact_write","path":"proof.bin","encoding":"base64","data":"!"}}),
+        json!({"decision":"act","action":{"tool":"artifact_write","path":"proof.bin","encoding":"base64","data":"AP9h"}}),
+        json!({"decision":"verify","action":{"tool":"artifact_verify","path":"proof.bin","expected_sha256":digest}}),
+        complete("Saved three bytes and checked byte integrity."),
+        complete("Byte integrity checked; file format validity is not established."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] =
+        json!("Save exactly the binary bytes 00 FF 61 in proof.bin and verify their integrity.");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert!(chat["pending"].is_null());
+    assert_eq!(
+        fs::read(std::path::Path::new(chat["workspace"].as_str().unwrap()).join("proof.bin"))
+            .unwrap(),
+        [0, 255, 97]
+    );
+    let evidence = chat["evidence"].as_array().unwrap();
+    assert!(evidence.iter().any(|e| e["action"] == "artifact_write"
+        && e["ok"] == false
+        && e["data"].as_str().unwrap().contains("known_not_applied")));
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e["receipt"]["effect"] == "file_write")
+    );
+    assert_eq!(fixture.join().unwrap().len(), 7);
+}
+
+#[test]
+fn native_docx_is_created_and_read_in_the_worker_loop() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"document_create","path":"note.docx","paragraphs":["A real Word package & Unicode: Việt."]}}),
+        json!({"decision":"verify","action":{"tool":"document_read","path":"note.docx"}}),
+        complete("Saved note.docx and extracted its text."),
+        complete("Document text checked; Word rendering remains untested."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Create note.docx with a short paragraph and check the saved text.");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "document_read"
+                && e["ok"] == true
+                && e["data"].as_str().unwrap().contains("Việt"))
+    );
+    fixture.join().unwrap();
+}
+
+#[test]
+fn enabled_app_api_response_becomes_an_inspected_json_artifact() {
+    let s = Server::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let api = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut request = [0; 4096];
+        let length = stream.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /value "));
+        let body = r#"{"value":42}"#;
+        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+    });
+    let artifact = json!({"source":format!("{origin}/value"),"value":42}).to_string();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"resource_route","operation":"api"}}),
+        json!({"decision":"act","action":{"tool":"app_connect","name":"fixture","base_url":origin}}),
+        json!({"decision":"act","action":{"tool":"app_call","name":"fixture","path":"/value","method":"GET"}}),
+        json!({"decision":"act","action":{"tool":"artifact_write","path":"response.json","encoding":"utf8","data":artifact}}),
+        json!({"decision":"verify","action":{"tool":"artifact_verify","path":"response.json"}}),
+        complete("Saved the response with its source."),
+        complete("Source-linked JSON inspected."),
+    ]);
+    let mut body = request(&endpoint);
+    body["access"]["apps"] = json!(true);
+    body["message"] = json!(
+        "Read the configured fixture API and save its value with the source URL as response.json."
+    );
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let actual: Value = serde_json::from_slice(
+        &fs::read(std::path::Path::new(chat["workspace"].as_str().unwrap()).join("response.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(actual["value"], 42);
+    assert_eq!(actual["source"], format!("{origin}/value"));
+    assert!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "app_call" && e["ok"] == true)
+    );
+    api.join().unwrap();
+    fixture.join().unwrap();
+}
+
+#[test]
+fn terminal_output_is_independently_inspected_as_csv() {
+    let s = Server::new();
+    #[cfg(windows)]
+    let action = json!({"tool":"run_shell","program":"cmd.exe","args":["/d","/c","(echo name,value&echo sample,42)>export.csv"]});
+    #[cfg(not(windows))]
+    let action = json!({"tool":"run_shell","program":"/bin/sh","args":["-c","printf 'name,value\nsample,42\n' > export.csv"]});
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":action}),
+        json!({"decision":"verify","action":{"tool":"artifact_inspect","path":"export.csv"}}),
+        json!({"decision":"verify","action":{"tool":"read_file","path":"export.csv"}}),
+        complete("CSV created and read independently."),
+        complete("CSV contents inspected."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!(
+        "Run a command to create export.csv with name,value and sample,42; inspect the actual file."
+    );
+    body["access"]["terminal"] = json!(true);
+    body["execution"] = json!({"command_policy":"autonomous"});
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(
+        fs::read_to_string(
+            std::path::Path::new(chat["workspace"].as_str().unwrap()).join("export.csv")
+        )
+        .unwrap()
+        .replace("\r\n", "\n"),
+        "name,value\nsample,42\n"
+    );
+    fixture.join().unwrap();
+}
+
+#[test]
+fn restart_reconciles_saved_artifact_intent_without_repeating_publication() {
+    use sha2::{Digest, Sha256};
+    let mut s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"fail","reason":"Simulated interruption before acknowledgement"}),
+        complete("Saved bytes already reconciled."),
+        complete("Byte integrity confirmed after restart."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Save proof.bin and inspect its byte integrity.");
+    let created = s.api("/api/chats", Some(body));
+    let id = created["id"].as_str().unwrap();
+    let paused = s.wait(id);
+    assert_eq!(paused["status"], "Blocked");
+    s.child.kill().unwrap();
+    s.child.wait().unwrap();
+    // Reconstruct the crash boundary: publication reached disk, acknowledgement
+    // did not. Only host intent and the independently saved bytes are present.
+    fs::write(
+        std::path::Path::new(paused["workspace"].as_str().unwrap()).join("proof.bin"),
+        [0, 255, 97],
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(
+        s.root
+            .path()
+            .join("conversations")
+            .join(id)
+            .join("chat.sqlite3"),
+    )
+    .unwrap();
+    let payload: String = db
+        .query_row("SELECT payload FROM chat WHERE id=1", [], |r| r.get(0))
+        .unwrap();
+    let mut payload: Value = serde_json::from_str(&payload).unwrap();
+    payload["status"] = json!("Working");
+    payload["tasks"][0]["status"] = json!("Working");
+    payload["pending"] = json!({"agent":"Worker","action":{"tool":"artifact_write","path":"proof.bin"},"artifact_intent":{"version":1,"path":"proof.bin","bytes":3,"sha256":format!("{:x}",Sha256::digest([0,255,97]))}});
+    db.execute(
+        "UPDATE chat SET payload=?1 WHERE id=1",
+        [payload.to_string()],
+    )
+    .unwrap();
+    drop(db);
+    s.child = spawn_verified(
+        s.root.path(),
+        s.host.split(':').nth(1).unwrap().parse().unwrap(),
+    )
+    .unwrap();
+    let done = s.wait(id);
+    assert_eq!(done["status"], "Completed", "{done}");
+    assert!(done["pending"].is_null());
+    assert!(
+        done["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "artifact_reconcile" && e["receipt"]["effect"] == "file_write")
+    );
+    assert!(
+        !done["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "artifact_write")
+    );
+    assert_eq!(
+        fs::read(std::path::Path::new(done["workspace"].as_str().unwrap()).join("proof.bin"))
+            .unwrap(),
+        [0, 255, 97]
+    );
+    assert_eq!(fixture.join().unwrap().len(), 4);
+}
+
+#[test]
 fn missing_document_is_observed_and_recovered_without_resubmission() {
     let s = Server::new();
     let (endpoint, fixture) = model(vec![
