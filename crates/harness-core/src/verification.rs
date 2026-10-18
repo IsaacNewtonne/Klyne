@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SuccessCriterion {
+    ArtifactRequirements(crate::artifact_requirements::ArtifactRequirements),
     FileContents {
         path: String,
         expected: String,
@@ -53,6 +54,9 @@ impl SuccessCriterion {
 
     pub fn observation_action(&self) -> Action {
         match self {
+            Self::ArtifactRequirements(requirements) => Action::ReadFile {
+                path: requirements.path.clone(),
+            },
             Self::FileContents { path, .. } => Action::ReadFile { path: path.clone() },
             Self::FileDigest { path, .. } => Action::HashFile { path: path.clone() },
             Self::FileRange {
@@ -95,6 +99,17 @@ impl Verifier for FileEvidenceVerifier {
     ) -> Verification {
         let bound = action == &criterion.observation_action() && observation.ok;
         let (passed, evidence) = match criterion {
+            SuccessCriterion::ArtifactRequirements(requirements) => {
+                if !bound {
+                    (false, "Report verification inconclusive: a successful bound file read is required".into())
+                } else {
+                    let (outcome, evidence) = requirements.check(&observation.data);
+                    (
+                        outcome == crate::artifact_requirements::CheckOutcome::Passed,
+                        evidence,
+                    )
+                }
+            }
             SuccessCriterion::FileContents { path, expected } => {
                 let passed = bound && observation.data == *expected;
                 (

@@ -6,6 +6,25 @@ reviewSettings.innerHTML=`<summary>Review model</summary><p class="settings-copy
 <label for="reviewer-kind">Review with</label><select id="reviewer-kind"><option value="">Same as worker</option value="codex">Codex</option><option value="ollama">Ollama</option><option value="opencode">OpenCode</option></select>
 <div id="reviewer-fields" hidden><label for="reviewer-endpoint">Local server address</label><input id="reviewer-endpoint" type="url"><label for="reviewer-model">Model (optional for Codex)</label><input id="reviewer-model" list="reviewer-models"><datalist id="reviewer-models"></datalist><button id="check-reviewer" type="button">Check review connection</button></div><p id="reviewer-status" role="status"></p>`;
 $('execution-settings').before(reviewSettings);
+const reportSettings=document.createElement('details');
+reportSettings.id='report-settings';
+reportSettings.innerHTML=`<summary>Report requirements</summary>
+<label><input id="report-required" type="checkbox"> Require a Markdown report for my next message</label>
+<p class="settings-copy">Klyne will reopen the saved report and check these requirements before marking them verified. These checks do not establish factual accuracy or source quality. Resume keeps the original requirements.</p>
+<div id="report-fields" hidden><label for="report-path">Output path within the project</label><input id="report-path" value="report.md" maxlength="1024">
+<label for="report-min-content">Minimum body characters (excluding spaces)</label><input id="report-min-content" type="number" min="1" max="1048576" value="100">
+<label for="report-headings">Required headings, one per line</label><textarea id="report-headings" rows="3" maxlength="6432">Summary\nSources</textarea>
+<label for="report-sources">Required source URLs, one per line (optional)</label><textarea id="report-sources" rows="3" maxlength="16000" placeholder="https://example.com/source"></textarea></div>`;
+$('execution-settings').before(reportSettings);
+$('report-required').onchange=()=>{$('report-fields').hidden=!$('report-required').checked;};
+function reportContract(message){
+  if(!$('report-required').checked)return {};
+  if($('writing-mode').value==='prompt_maker')throw new Error('Switch to general mode to create a report.');
+  const lines=id=>$(id).value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  const min=Number($('report-min-content').value),path=$('report-path').value.trim(),headings=lines('report-headings'),sources=lines('report-sources');
+  if(!Number.isSafeInteger(min)||min<1||min>1048576||!path||!headings.length)throw new Error('Set a report path, positive minimum body length and required headings in Settings.');
+  return {contract:{goal:message,criteria:[{ArtifactRequirements:{path,min_content_chars:min,required_headings:headings,source_references:sources}}]}};
+}
 const scheduleSettings=document.createElement('details');
 scheduleSettings.id='schedule-settings';
 scheduleSettings.innerHTML=`<summary>Scheduled tasks</summary><p class="settings-copy">Repeat the selected completed task using its saved models, access and project. Each run gets a new conversation. Without a project, each gets a fresh workspace. Runs that need attention pause the schedule.</p>
@@ -80,6 +99,7 @@ const drafts = new Map();
 let configuredChat=null;
 function trustedLaptopDefault(){try{return localStorage.getItem('klyne-trusted-laptop')==='true';}catch(_){return false;}}
 function resetNewChatSettings(){
+  $('report-required').checked=false;$('report-fields').hidden=true;
   configuredChat=null;
   let reviewer=null;try{reviewer=JSON.parse(localStorage.getItem('klyne-reviewer')||'null');}catch(_){}
   configureReviewer(reviewer);
@@ -137,6 +157,7 @@ function render() {
   renderStatus();
   renderList();
   const active=running(snapshot);
+  for(const input of reportSettings.querySelectorAll('input,textarea'))input.disabled=active||submitting;
   $('writing-mode').disabled=active || submitting;
   $('welcome').hidden=!!selected; $('conversation').hidden=!selected;
   $('chat-title').textContent=snapshot?.title || (selected?'Opening conversation…':'Your workspace');
@@ -250,7 +271,8 @@ $('chat-form').onsubmit=async e=>{
   const source=selected;
   const voiceTurn=window.klyneVoice?.consumeTurn()||false;
   try {
-    const data=await api('/api/chats',{id:source,message,voice_turn:voiceTurn,...intelligenceConfig(),reviewer:reviewerConfig(),execution:executionConfig(),workspace:$('access-terminal').checked?$('host-workspace').value.trim():'',prompt_maker:$('writing-mode').value==='prompt_maker',provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,apps:$('access-apps').checked,desktop:$('access-desktop').checked}});
+    const data=await api('/api/chats',{id:source,message,...reportContract(message),voice_turn:voiceTurn,...intelligenceConfig(),reviewer:reviewerConfig(),execution:executionConfig(),workspace:$('access-terminal').checked?$('host-workspace').value.trim():'',prompt_maker:$('writing-mode').value==='prompt_maker',provider:providerConfig(),access:{web:$('access-web').checked,terminal:$('access-terminal').checked,apps:$('access-apps').checked,desktop:$('access-desktop').checked}});
+    $('report-required').checked=false;$('report-fields').hidden=true;
     if(voiceTurn)window.klyneVoice?.sent(data.id);
     drafts.delete(source);$('instruction').value='';selected=data.id;snapshot=null;render();await refresh();
   }catch(error){$('form-error').textContent=error.message;if(voiceTurn)window.klyneVoice?.failed();}

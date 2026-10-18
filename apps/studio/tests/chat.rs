@@ -748,6 +748,159 @@ fn contract_rejects_model_success_without_the_requested_artifact() {
     );
 }
 
+fn report_request(endpoint: &str) -> Value {
+    let mut body = request(endpoint);
+    body["message"] = json!("Save a Markdown research report with Summary and Sources sections.");
+    body["contract"] = json!({"goal":body["message"],"criteria":[{"ArtifactRequirements":{"path":"report.md","min_content_chars":10,"required_headings":["Summary","Sources"],"source_references":["https://example.com/research"]}}]});
+    body
+}
+fn valid_report() -> &'static str {
+    "# Summary\nThe fixture provides these research findings.\n## Sources\n[Reference](https://example.com/research)\n"
+}
+
+#[test]
+fn report_contract_rejects_supportive_review_of_wrong_or_unsaved_output() {
+    for failed_save in [false, true] {
+        let s = Server::new();
+        let project = tempfile::tempdir().unwrap();
+        if failed_save {
+            fs::create_dir(project.path().join("report.md")).unwrap();
+        }
+        let (endpoint, fixture) = model(vec![
+            plan(),
+            json!({"decision":"act","action":{"tool":"write_file","path":"report.md","contents":if failed_save {valid_report()} else {"# Summary\nA nonempty report which omits the required sources section."}}}),
+            complete("The report is complete."),
+            complete("Everything passed review."),
+            complete("Everything passed review."),
+        ]);
+        let mut body = report_request(&endpoint);
+        body["access"]["terminal"] = json!(true);
+        body["workspace"] = json!(project.path());
+        let created = s.api("/api/chats", Some(body));
+        let chat = s.wait(created["id"].as_str().unwrap());
+        assert_eq!(chat["status"], "Blocked", "{chat}");
+        assert_eq!(chat["result"]["outcome"], "unmet", "{chat}");
+        assert_eq!(chat["result"]["checks"][0]["passed"], false);
+        assert_eq!(
+            chat["result"]["checks"][0]["outcome"],
+            if failed_save {
+                "inconclusive"
+            } else {
+                "failed"
+            }
+        );
+        if failed_save {
+            assert!(project.path().join("report.md").is_dir());
+            assert!(
+                chat["evidence"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["ok"] == false
+                        && e["action"].as_str().unwrap_or("").starts_with("write_file"))
+            );
+        }
+        assert_eq!(fixture.join().unwrap().len(), 5);
+    }
+}
+
+#[test]
+fn report_contract_validates_before_dispatch_and_cannot_be_replaced_on_resume() {
+    let s = Server::new();
+    for (key, value) in [
+        ("path", json!("../outside.md")),
+        ("min_content_chars", json!(0)),
+        (
+            "source_references",
+            json!(["https://user:pass@example.com/"]),
+        ),
+        ("evaluator", json!("run code")),
+    ] {
+        let mut body = report_request("http://127.0.0.1:1");
+        body["contract"]["criteria"][0]["ArtifactRequirements"][key] = value;
+        let response = s.api("/api/chats", Some(body));
+        assert!(response["error"].is_string(), "{response}");
+        assert!(response["id"].is_null());
+    }
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        preference_question("Choose the report's tone."),
+    ]);
+    let created = s.api("/api/chats", Some(report_request(&endpoint)));
+    let id = created["id"].as_str().unwrap();
+    let paused = s.wait(id);
+    assert_eq!(paused["status"], "Needs input", "{paused}");
+    fixture.join().unwrap();
+    let mut replacement = report_request(&endpoint);
+    replacement["id"] = json!(id);
+    replacement["resume"] = json!(true);
+    replacement["contract"]["criteria"][0]["ArtifactRequirements"]["required_headings"] =
+        json!(["Summary"]);
+    assert!(
+        s.api("/api/chats", Some(replacement))["error"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot replace")
+    );
+    assert_eq!(
+        s.api(&format!("/api/chats/{id}"), None)["contract"],
+        paused["contract"]
+    );
+}
+
+#[test]
+fn report_contract_survives_crash_after_save_and_verifies_without_rewriting() {
+    let mut s = Server::new();
+    let marker = s.root.path().join("report-completion-requested");
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"write_file","path":"report.md","contents":valid_report()}}),
+        json!({"decision":"complete","summary":"Interrupted response","_delay_ms":700,"_marker":marker,"_disconnect_ok":true}),
+        complete("The report was saved."),
+    ]);
+    let created = s.api("/api/chats", Some(report_request(&endpoint)));
+    let id = created["id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let before = s.api(&format!("/api/chats/{id}"), None);
+    let path = std::path::Path::new(before["workspace"].as_str().unwrap()).join("report.md");
+    assert_eq!(fs::read_to_string(&path).unwrap(), valid_report());
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    s.child.kill().unwrap();
+    s.child.wait().unwrap();
+    s.child = FixtureProcess::new(
+        Command::new(env!("CARGO_BIN_EXE_klyne-studio"))
+            .args(["--port", s.host.split(':').nth(1).unwrap(), "--root"])
+            .arg(s.root.path())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    while TcpStream::connect(&s.host).is_err() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let done = s.wait(id);
+    assert_eq!(done["status"], "Completed", "{done}");
+    assert_eq!(done["result"]["outcome"], "verified");
+    assert_eq!(done["result"]["checks"][0]["outcome"], "passed");
+    assert_eq!(done["contract"], before["contract"]);
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    assert_eq!(
+        done["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["action"].as_str().unwrap_or("").starts_with("write_file"))
+            .count(),
+        1
+    );
+    assert_eq!(fixture.join().unwrap().len(), 4);
+}
+
 #[test]
 fn contract_verifies_actual_file_and_survives_loading() {
     let s = Server::new();

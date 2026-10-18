@@ -714,6 +714,7 @@ impl Chats {
             };
             if let Some(contract) = &chat.contract {
                 contract.validate(text)?;
+                contract.validate_scope(&PermissionPolicy::milestone_default(&chat.workspace))?;
             }
             chat.result = None;
             chat.tasks.clear();
@@ -1041,6 +1042,7 @@ impl Chats {
         system.push_str(crate::capabilities::INSTRUCTIONS);
         if chat.contract.is_some() {
             system.push_str(" The task_contract is caller-owned and immutable for this task. Fulfill every acceptance criterion. The host independently verifies them before success. Failed Host verification observations require repair; do not repeat a completion claim without fixing the result.");
+            system.push_str(" ArtifactRequirements checks Markdown structure: visible body characters (excluding headings, code blocks and images), exact top-level section heading text, and exact HTTPS link destinations. Raw HTML produces an inconclusive check; use Markdown instead. It does not verify source quality, factual accuracy or whether sources were retrieved. Inspect sources when the task calls for research; never describe structural acceptance as factual verification.");
         }
         if chat.access.terminal {
             system.push_str("\nRuntime tools: runtime_status {} reads the last activation result; runtime_attest {binary,sha256,test_argv:[program,args...]} runs the approved test command in the project and records a passing result for the unchanged binary digest; runtime_stage {binary,sha256} preflights and stages a built Studio binary for the supervisor, then checkpoints this goal for continuation under the new version. Staging refuses candidates without a fresh attestation. Requires launching Studio through klyne-supervisor. Build and test the candidate first. Versioned skills and argv tools activate immediately without a runtime replacement. Do not repeatedly stage the same binary; inspect runtime_status after restart.");

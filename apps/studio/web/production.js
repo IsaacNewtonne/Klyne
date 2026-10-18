@@ -460,6 +460,7 @@
     if(terminal) {
       $('prod-result-icon').textContent=status==='Completed'?'✓':'!';
       $('prod-result-title').textContent=status==='Completed'?(chat.result?.outcome==='verified'?'Klyne - Verified':chat.result?.outcome==='reviewed'?'Klyne - Reviewed':'Klyne'):labels[status] || status;
+      if(status==='Completed'&&chat.result?.outcome==='verified'&&chat.contract?.criteria?.some(c=>c.ArtifactRequirements))$('prod-result-title').textContent='Klyne - Report requirements verified';
       $('prod-result-text').textContent=chat.messages?.filter(m=>m.agent==='Klyne').at(-1)?.text || 'Progress is saved. Use the controls below to continue.';
       if(chat.execution?.failure?.guidance)$('prod-result-text').textContent+='\n\nNext: '+chat.execution.failure.guidance;
     }
@@ -515,6 +516,7 @@
     inspect=key;const [kind,...parts]=key.split(':'),id=parts.join(':'),chat=current?.snapshot;let title='',data;
     if(kind==='log') {data=(chat?.evidence || []).map(e=>(e.ok?'\u2713 ':'! ')+(e.action||'Observation')+'\n'+(e.summary||'')).join('\n\n') || 'No observations recorded yet.';title='Observations';}
     if(kind==='result') {data=chat?.messages?.filter(m=>m.agent==='Klyne').at(-1)?.text || 'Progress is saved.';
+      if(chat?.result?.checks?.length)data+='\n\nAcceptance checks:\n'+chat.result.checks.map(c=>`${c.outcome||(c.passed?'passed':'failed')}: ${c.evidence}`).join('\n');
       if(chat?.execution?.failure?.guidance)data+='\n\nNext: '+chat.execution.failure.guidance;
       title=chat?.status==='Completed'?'Result':'Work needs attention';}
     if(kind==='steps'){data=chat?.tasks || [];title='Steps';}

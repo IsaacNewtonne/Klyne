@@ -1,5 +1,6 @@
 pub mod action_journal;
 pub mod agent;
+pub mod artifact_requirements;
 pub mod delegation;
 pub mod delegation_budget;
 pub mod event_store;
