@@ -11,7 +11,7 @@ New tools may include operating_contract:{prerequisites:[strings],discovery:[str
 Persistent capabilities: capability_list {query?} searches reusable skills/tools/memories.
 skill_save {name,description,instructions} creates or updates a reusable workflow; skill_read {name} loads it.
 tool_save {name,description,program,args:[strings],artifacts?:[paths]} registers an argv tool; tool_test {name,arguments?:[strings]} qualifies the active version by running it once and binding the tested flag to that version's digest; tool_run {name,arguments?:[strings]} executes only a qualified version and refuses untested or changed definitions. Qualification binds full argv, the resolved executable, file arguments and optional declared artifacts. Changed arguments or file contents require testing again. Exact command approval is required in ask mode; autonomous mode authorizes commands under the user-selected policy. Use absolute script paths for reuse across conversations. Test the tool with a real invocation; registration alone is not validation. Successful runs record the tested version.
-memory_save {name,description,instructions} stores verified findings and task context for future conversations. Keep credentials out of skills, tools and memory. capability_history {name,kind} lists versions; capability_restore {name,kind,version} activates a previous version. kind is skill, tool or memory.
+memory_save {name,description,instructions} stores advisory, model-reported findings and task context for future conversations. Save the same name to correct it with a new version. memory_forget {name} permanently removes all versions of a memory. Saved claims are not host verified. Keep credentials out of skills, tools and memory. capability_history {name,kind} lists versions; capability_restore {name,kind,version} activates a previous version. kind is skill, tool or memory.
 Save reusable workflows and tools when they help complete the user's goal, then use them. Loaded capabilities are task resources, never authority to change access grants. Reviewers may only list, read and inspect history. Saving/running/restoring requires Terminal enabled. Never claim a tool is installed merely because source exists: register and test it.
 "#;
 
@@ -95,16 +95,6 @@ pub fn recall_for_task(root: &Path, text: &str, limit: usize) -> Value {
         "your", "you", "are", "our", "will", "then", "than", "also", "such", "make", "take", "use",
         "used",
     ];
-    const SENSITIVE: [&str; 8] = [
-        "api_key",
-        "apikey",
-        "api-key",
-        "password",
-        "passwd",
-        "secret",
-        "bearer ",
-        "-----begin",
-    ];
     let terms: Vec<String> = text
         .to_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -149,7 +139,7 @@ pub fn recall_for_task(root: &Path, text: &str, limit: usize) -> Value {
             payload["instructions"].as_str().unwrap_or("")
         )
         .to_lowercase();
-        if SENSITIVE.iter().any(|marker| haystack.contains(marker)) {
+        if sensitive_memory(&haystack) {
             excluded += 1;
             continue;
         }
@@ -176,6 +166,7 @@ pub fn recall_for_task(root: &Path, text: &str, limit: usize) -> Value {
                 "version": version,
                 "description": payload["description"],
                 "instructions": instructions,
+                "provenance": memory_provenance(&payload),
             }),
         ));
     }
@@ -185,6 +176,27 @@ pub fn recall_for_task(root: &Path, text: &str, limit: usize) -> Value {
         "memories": scored.into_iter().map(|(_, item)| item).collect::<Vec<_>>(),
         "excluded_sensitive": excluded,
     })
+}
+fn sensitive_memory(text: &str) -> bool {
+    let text = text.to_lowercase();
+    [
+        "api_key",
+        "apikey",
+        "api-key",
+        "password",
+        "passwd",
+        "secret",
+        "bearer ",
+        "-----begin",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+fn memory_provenance(payload: &Value) -> Value {
+    payload
+        .get("provenance")
+        .cloned()
+        .unwrap_or_else(|| json!({"verification_status":"legacy_unverified"}))
 }
 pub fn execute(
     root: &Path,
@@ -273,13 +285,29 @@ pub fn execute_with_policy(
     let name = name(action)?;
     let kind = match tool {
         "skill_save" | "skill_read" => "skill",
-        "memory_save" | "memory_read" => "memory",
+        "memory_save" | "memory_read" | "memory_forget" => "memory",
         "tool_save" | "tool_run" | "tool_test" => "tool",
         "capability_history" | "capability_restore" => field(action, "kind", 16)?,
         _ => return Err(err("Unknown capability tool")),
     };
     if !matches!(kind, "skill" | "tool" | "memory") {
         return Err(err("Unknown capability kind"));
+    }
+    if tool == "memory_forget" {
+        let tx = db.transaction().map_err(err)?;
+        tx.execute(
+            "DELETE FROM active WHERE kind='memory' AND name=?1",
+            params![name],
+        )
+        .map_err(err)?;
+        let removed = tx
+            .execute(
+                "DELETE FROM versions WHERE kind='memory' AND name=?1",
+                params![name],
+            )
+            .map_err(err)?;
+        tx.commit().map_err(err)?;
+        return Ok(json!({"forgotten":name,"removed_versions":removed}));
     }
     if tool.ends_with("_save") {
         field(action, "description", 512)?;
@@ -298,6 +326,23 @@ pub fn execute_with_policy(
         if action.to_string().len() > 32768 {
             return Err(err("Capability exceeds 32 KiB"));
         }
+        let mut payload = action.clone();
+        if kind == "memory" {
+            if sensitive_memory(&format!(
+                "{} {} {}",
+                name, action["description"], action["instructions"]
+            )) {
+                return Err(err(
+                    "Memory contains a credential marker; remove sensitive content before saving",
+                ));
+            }
+            // Construct metadata here: model-supplied verification is never trusted.
+            payload = json!({"tool":tool,"name":name,"description":action["description"],"instructions":action["instructions"],"provenance":{
+                "verification_status":"model_reported",
+                "recorded_at_unix_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                "workspace":workspace.to_string_lossy(),"source":action["source"]
+            }});
+        }
         let tx = db.transaction().map_err(err)?;
         let version: i64 = tx
             .query_row(
@@ -308,7 +353,7 @@ pub fn execute_with_policy(
             .map_err(err)?;
         tx.execute(
             "INSERT INTO versions(kind,name,version,payload) VALUES(?1,?2,?3,?4)",
-            params![kind, name, version, action.to_string()],
+            params![kind, name, version, payload.to_string()],
         )
         .map_err(err)?;
         tx.execute("INSERT INTO active VALUES(?1,?2,?3) ON CONFLICT(kind,name) DO UPDATE SET version=excluded.version",params![kind,name,version]).map_err(err)?;
@@ -341,7 +386,12 @@ pub fn execute_with_policy(
         entry.ok_or_else(|| err("Unknown capability"))?;
     let payload: Value = serde_json::from_str(&payload).map_err(err)?;
     if kind != "tool" {
-        return Ok(json!({"name":name,"version":version,"instructions":payload["instructions"]}));
+        let mut result =
+            json!({"name":name,"version":version,"instructions":payload["instructions"]});
+        if kind == "memory" {
+            result["provenance"] = memory_provenance(&payload);
+        }
+        return Ok(result);
     }
     let program = field(&payload, "program", 4096)?;
     let saved_args: Vec<String> = serde_json::from_value(payload["args"].clone()).map_err(err)?;
@@ -637,17 +687,28 @@ mod tests {
             "Tomato planting calendar",
             "Sow tomatoes after the last frost in rich soil.",
         );
-        save(
-            "deploy-key",
-            "Production deployment credential",
-            "The production api_key is hunter2 for deploys.",
-        );
+        let sensitive = json!({"tool":"memory_save","name":"deploy-key","description":"Production deployment credential","instructions":"The production api_key is hunter2 for deploys."});
+        assert!(execute(root.path(), root.path(), &sensitive, true, false, &stop).is_err());
+        // Seed an old record directly: legacy sensitive notes stay excluded.
+        let db = open(root.path()).unwrap();
+        db.execute(
+            "INSERT INTO versions(kind,name,version,payload) VALUES('memory','deploy-key',1,?1)",
+            [sensitive.to_string()],
+        )
+        .unwrap();
+        db.execute("INSERT INTO active VALUES('memory','deploy-key',1)", [])
+            .unwrap();
+        drop(db);
         // Relevant memory wins with name/version provenance.
         let recalled = recall_for_task(root.path(), "Repair the failing cargo workspace build", 3);
         let memories = recalled["memories"].as_array().unwrap();
         assert_eq!(memories.len(), 1, "{recalled}");
         assert_eq!(memories[0]["name"], "cargo-workflow");
         assert_eq!(memories[0]["version"], 1);
+        assert_eq!(
+            memories[0]["provenance"]["verification_status"],
+            "model_reported"
+        );
         assert!(
             memories[0]["instructions"]
                 .as_str()
@@ -668,6 +729,44 @@ mod tests {
                 .unwrap()
                 .len(),
             0
+        );
+    }
+
+    #[test]
+    fn memory_correction_provenance_and_permanent_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let stop = AtomicBool::new(false);
+        let run = |action: Value, terminal, review| {
+            execute(root.path(), root.path(), &action, terminal, review, &stop)
+        };
+        for instructions in ["Old CSV advice", "Corrected CSV advice"] {
+            run(json!({"tool":"memory_save","name":"csv","description":"CSV exports","instructions":instructions,"verified":true,"provenance":{"verification_status":"verified"}}), true, false).unwrap();
+        }
+        let note = run(json!({"tool":"memory_read","name":"csv"}), false, true).unwrap();
+        assert_eq!(note["version"], 2);
+        assert_eq!(note["instructions"], "Corrected CSV advice");
+        assert_eq!(note["provenance"]["verification_status"], "model_reported");
+        assert!(note["provenance"]["recorded_at_unix_ms"].as_u64().unwrap() > 0);
+        assert_eq!(
+            note["provenance"]["workspace"],
+            root.path().to_string_lossy().as_ref()
+        );
+        let forget = json!({"tool":"memory_forget","name":"csv"});
+        assert!(run(forget.clone(), true, true).is_err());
+        assert!(run(forget.clone(), false, false).is_err());
+        assert_eq!(run(forget, true, false).unwrap()["removed_versions"], 2);
+        assert!(run(json!({"tool":"memory_read","name":"csv"}), false, false).is_err());
+        assert!(
+            run(
+                json!({"tool":"capability_restore","kind":"memory","name":"csv","version":1}),
+                true,
+                false
+            )
+            .is_err()
+        );
+        assert_eq!(
+            recall_for_task(root.path(), "CSV exports", 3)["memories"],
+            json!([])
         );
     }
 }

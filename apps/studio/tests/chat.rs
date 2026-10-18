@@ -15,6 +15,43 @@ fn preference_question(question: &str) -> Value {
 }
 
 #[test]
+fn missing_document_is_observed_and_recovered_without_resubmission() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"document_read","path":"missing.txt"}}),
+        json!({"decision":"act","action":{"tool":"list_dir","path":"."}}),
+        write_file("The requested document is absent."),
+        json!({"decision":"verify","action":{"tool":"read_file","path":"greeting.txt"}}),
+        complete("Saved and checked the finding."),
+        complete("Reviewed the finding."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!(
+        "Read missing.txt; if absent inspect the folder and save the finding in greeting.txt."
+    );
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let evidence = chat["evidence"].as_array().unwrap();
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e["action"] == "document_read" && e["ok"] == false)
+    );
+    assert_eq!(
+        fs::read_to_string(
+            std::path::Path::new(chat["workspace"].as_str().unwrap()).join("greeting.txt")
+        )
+        .unwrap(),
+        "The requested document is absent."
+    );
+    let calls = fixture.join().unwrap();
+    assert_eq!(calls.len(), 7);
+    assert!(calls[2].to_string().contains("Document inspection failed"));
+}
+
+#[test]
 fn unfamiliar_tool_questions_recover_into_discovery_without_user_input() {
     let s = Server::new();
     let (endpoint, fixture) = model(vec![
@@ -129,6 +166,73 @@ fn retry_feedback_redacts_granted_secrets_before_model_dispatch() {
         "open"
     );
     assert!(!chat.to_string().contains(secret));
+}
+
+#[test]
+fn memory_persistence_scrubs_grants_and_recalls_source_in_new_conversation() {
+    let synthetic = "synthetic-value-927463810";
+    unsafe {
+        std::env::set_var("KLYNE_MEMORY_TEST_VALUE", synthetic);
+    }
+    let s = Server::new();
+    unsafe {
+        std::env::remove_var("KLYNE_MEMORY_TEST_VALUE");
+    }
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"memory_save","name":"csv-checks","description":"CSV export checks","instructions":format!("Check CSV headers and reopen exports. Example value: {synthetic}"),"provenance":{"verification_status":"verified"},"source":{"conversation":"forged"}}}),
+        complete("Remembered CSV export checks."),
+        complete("Reviewed the saved note."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Remember CSV export checks for later tasks.");
+    body["access"]["terminal"] = json!(true);
+    body["grants"] =
+        json!({"secrets":[{"name":"KLYNE_MEMORY_TEST_VALUE","origins":["http://127.0.0.1/"]}]});
+    let created = s.api("/api/chats", Some(body));
+    let first = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(first["status"], "Completed", "{first}");
+    fixture.join().unwrap();
+    let db = rusqlite::Connection::open(
+        s.root
+            .path()
+            .join("conversations")
+            .join("capabilities.sqlite3"),
+    )
+    .unwrap();
+    let raw: String = db
+        .query_row(
+            "SELECT payload FROM versions WHERE kind='memory'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!raw.contains(synthetic));
+    assert!(raw.contains("[redacted]"));
+    let note: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(note["provenance"]["source"]["conversation"], first["id"]);
+    assert_eq!(note["provenance"]["verification_status"], "model_reported");
+    drop(db);
+
+    let (endpoint, fixture) = model(vec![
+        json!({"tasks":[{"agent":"Writer","instruction":"Create CSV export and check headers"}]}),
+        json!({"decision":"act","action":{"tool":"write_file","path":"export.csv","contents":"name,count\napples,2\n"}}),
+        json!({"decision":"verify","action":{"tool":"read_file","path":"export.csv"}}),
+        complete("Checked the CSV export."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Create a CSV export with name,count headers and apples,2.");
+    body["contract"] = json!({"goal":"Create CSV export","criteria":[{"FileContents":{"path":"export.csv","expected":"name,count\napples,2\n"}}]});
+    body["contract"]["goal"] = body["message"].clone();
+    let created = s.api("/api/chats", Some(body));
+    assert!(created["id"].is_string(), "{created}");
+    let second = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(second["status"], "Completed", "{second}");
+    assert_eq!(second["result"]["outcome"], "verified");
+    let calls = fixture.join().unwrap();
+    assert!(calls[1].to_string().contains("csv-checks"));
+    assert!(calls[1].to_string().contains(first["id"].as_str().unwrap()));
+    assert!(!calls[1].to_string().contains(synthetic));
 }
 
 #[test]
@@ -943,6 +1047,7 @@ fn opening_a_login_page_cannot_support_a_worker_send_claim() {
 }
 
 #[test]
+#[cfg(windows)]
 fn restart_reconciles_saved_document_from_file_without_desktop_input() {
     let mut s = Server::new();
     let (endpoint, fixture) = model(vec![
@@ -1035,6 +1140,7 @@ fn restart_reconciles_saved_document_from_file_without_desktop_input() {
 }
 
 #[test]
+#[cfg(windows)]
 fn api_connection_failure_switches_once_to_desktop_without_replaying() {
     let s = Server::new();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

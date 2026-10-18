@@ -349,6 +349,7 @@ fn emergency() -> bool {
 /// Strip a Windows verbatim `\\?\` prefix (`\\?\UNC\` for shares) so helper
 /// scripts and .NET file APIs receive a regular path.
 pub(crate) fn normal_path(directory: &Path) -> PathBuf {
+    #[cfg(windows)]
     let text = directory.to_string_lossy();
     #[cfg(windows)]
     if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {

@@ -420,9 +420,8 @@ fn timeout_terminates_the_process_and_stays_usable() {
 }
 
 #[test]
+#[cfg(windows)]
 fn windows_tree_kill_reaps_parent_and_child() {
-    #[cfg(not(windows))]
-    return;
     let root = Workspace::new();
     let limits = ProcessLimits {
         timeout: Duration::from_secs(3),

@@ -2044,7 +2044,22 @@ impl Chats {
             let path = required(&decision["action"], "path")?;
             chat.used += 1;
             self.save(chat)?;
-            let mut document = crate::documents::extract(&chat.workspace, path, stop)?;
+            let tool_started = Instant::now();
+            let result = crate::documents::extract(&chat.workspace, path, stop);
+            note_tool(
+                chat,
+                decision["action"]["tool"].as_str().unwrap(),
+                tool_started,
+                result.is_ok(),
+            );
+            let mut document = match result {
+                Ok(document) => document,
+                Err(error) => {
+                    chat.evidence.push(json!({"agent":agent,"action":decision["action"]["tool"],"ok":false,"summary":"Document inspection failed; no changes made","data":error.to_string()}));
+                    self.save(chat)?;
+                    return guard(chat, stop, start);
+                }
+            };
             guard(chat, stop, start)?;
             if decision["action"]["tool"] == "document_classify" {
                 let answers = self.typed_decision(
@@ -2330,10 +2345,21 @@ impl Chats {
             chat.pending = Some(json!({"agent":agent,"action":decision["action"]}));
             self.save(chat)?;
             let tool_started = Instant::now();
+            let mut capability_action = decision["action"].clone();
+            if capability_action["tool"]
+                .as_str()
+                .is_some_and(|tool| tool.ends_with("_save"))
+            {
+                crate::broker::scrub_value(&mut capability_action, &chat_secrets(chat));
+            }
+            if capability_action["tool"] == "memory_save" {
+                capability_action["source"] = json!({"conversation":chat.id,"goal":chat.execution.original_request,"evidence_count":chat.evidence.len()});
+                crate::broker::scrub_value(&mut capability_action, &chat_secrets(chat));
+            }
             let result = crate::capabilities::execute_with_policy(
                 &self.root,
                 &chat.workspace,
-                &decision["action"],
+                &capability_action,
                 chat.access.terminal,
                 review,
                 stop,

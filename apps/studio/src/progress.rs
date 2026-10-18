@@ -31,6 +31,12 @@ impl Journal {
                     | "stat_path"
                     | "write_file"
                     | "patch_file"
+                    | "document_read"
+                    | "document_classify"
+                    | "capability_list"
+                    | "capability_history"
+                    | "memory_read"
+                    | "skill_read"
             )
         ) {
             return None;
@@ -70,7 +76,8 @@ impl Journal {
             self.reviews = 0;
         }
         self.recent.push((key, outcome));
-        if self.recent.len() > 8 {
+        // Three observations of each operation in a cycle of up to eight.
+        if self.recent.len() > 24 {
             self.recent.remove(0);
         }
     }
@@ -130,6 +137,28 @@ mod tests {
         verification::{FileEvidenceVerifier, Verifier},
     };
     use serde_json::json;
+
+    #[test]
+    fn multi_file_and_discovery_cycles_survive_reload() {
+        for length in [4, 8] {
+            let mut journal = Journal::default();
+            let actions: Vec<_> = (0..length).map(|i| json!({"decision":"act","action":{"tool":if i % 2 == 0 {"document_read"} else {"memory_read"},"path":format!("{i}.txt"),"name":format!("note-{i}")}})).collect();
+            for _ in 0..3 {
+                for action in &actions {
+                    journal.record(0, action, &[json!({"ok":true,"data":"unchanged"})]);
+                }
+            }
+            let saved: Journal =
+                serde_json::from_value(serde_json::to_value(&journal).unwrap()).unwrap();
+            assert!(saved.stalled(0, &actions[0]));
+            journal.record(
+                0,
+                &actions[0],
+                &[json!({"ok":true,"data":"new information"})],
+            );
+            assert!(!journal.stalled(0, &actions[0]));
+        }
+    }
 
     #[test]
     fn recurring_reads_and_alternating_writes_survive_restart() {

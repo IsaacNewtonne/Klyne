@@ -702,12 +702,16 @@ impl WorkspaceShellTool {
         {
             // Own process group per child so timeouts can signal the tree.
             use std::os::unix::process::CommandExt;
-            command.pre_exec(|| {
-                unsafe {
-                    libc::setsid();
-                }
-                Ok(())
-            });
+            // SAFETY: the child hook only calls async-signal-safe setsid and
+            // reads errno on failure; it does not allocate or acquire locks.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
         command
             .args(args)

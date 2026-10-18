@@ -104,6 +104,7 @@ pub fn available_tools(web: bool, terminal: bool, apps: bool, desktop: bool) -> 
             "tool_run",
             "skill_save",
             "memory_save",
+            "memory_forget",
             "capability_restore",
             "runtime_status",
             "runtime_attest",
