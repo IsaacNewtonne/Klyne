@@ -388,7 +388,10 @@ $('available-models').onchange=()=>{
 };
 $('provider-kind').onchange=()=>configureProvider(savedProviderFor($('provider-kind').value));
 for(const id of ['provider-endpoint','provider-model'])$(id).oninput=()=>{++revision;$('provider-status').textContent='Settings changed. Check again.';clearAvailableModels();saveProvider();};
-$('settings-button').onclick=$('model-shortcut').onclick=()=>{$('settings').showModal();loadApiConnections();loadSchedules();loadProcedures();};
+const ROLES=['planner','worker','reviewer','voice'];
+async function loadRoleModels(){try{const data=await api('/api/quality/models');const tags=data.installed||[];for(const role of ROLES){const sel=$('role-'+role),cur=(data.models||{})[role]||'';const opts=['<option value="">Same as main</option>',...tags.map(t=>`<option value="${escape(t)}">${escape(t)}</option>`)];if(cur&&!tags.includes(cur))opts.push(`<option value="${escape(cur)}">${escape(cur)} (not installed)</option>`);setMarkup(sel,opts.join(''));sel.value=cur;}$('role-status').textContent=(data.warnings||[]).join(' ')||(data.installed?'':'Ollama is not reachable; showing saved values.');}catch(error){$('role-status').textContent=error.message;}}
+$('role-save').onclick=async()=>{try{const body={};for(const role of ROLES)body[role]=$('role-'+role).value;const data=await api('/api/quality/models',body);$('role-status').textContent=(data.warnings||[]).join(' ')||'Saved. New turns use these models.';}catch(error){$('role-status').textContent=error.message;}};
+$('settings-button').onclick=$('model-shortcut').onclick=()=>{$('settings').showModal();loadApiConnections();loadSchedules();loadProcedures();loadRoleModels();};
 let installedApps=[];
 function renderApps() {
   const query=$('apps-search').value.toLowerCase();

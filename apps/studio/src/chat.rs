@@ -99,6 +99,9 @@ pub struct Execution {
     pub replay_action: Option<Value>,
     /// `{name, program, args}` of tools saved here (shell → tool_run mapping).
     pub saved_tools: Vec<Value>,
+    /// Host-verified final answer that ends the task without another model
+    /// round (already removed, nothing by that name, verified save).
+    pub host_finish: Option<String>,
     pub desktop_fallbacks: Vec<String>,
     pub failure: Option<crate::failure_policy::FailureDecision>,
     pub previous_plans: Vec<Vec<Task>>,
@@ -1867,6 +1870,20 @@ impl Chats {
                         );
                         self.save(chat)?;
                     }
+                    if let Some(answer) = chat.execution.host_finish.take() {
+                        push(chat, "assistant", "Klyne", &answer);
+                        chat.tasks[index].status = "Done".into();
+                        chat.tasks[index].evidence_end = Some(chat.evidence.len());
+                        chat.tasks[index].evidence_bound = true;
+                        if chat.tasks.iter().all(|t| t.status == "Done") {
+                            chat.status = "Completed".into();
+                            chat.execution.failure = None;
+                            self.save(chat)?;
+                            return Ok(());
+                        }
+                        self.save(chat)?;
+                        break;
+                    }
                 }
             }
             if !chat.execution.approval_queue.is_empty() {
@@ -1964,7 +1981,7 @@ impl Chats {
                         let unmet = if crate::quality::load(self.studio_root()).evidence {
                             let mut unmet = crate::verify::unsatisfied(evidence);
                             unmet.extend(crate::verify::unsupported_claims(
-                                review["summary"].as_str().unwrap_or(""),
+                                &final_answer_text(&chat.messages, &review),
                                 evidence,
                             ));
                             unmet
@@ -2174,7 +2191,26 @@ impl Chats {
                                     })
                                     .map(|m| m.text.clone())
                                     .unwrap_or_else(|| "Done; Klyne verified the result.".into());
+                                let answer = if crate::verify::unsupported_claims(&answer, episode)
+                                    .is_empty()
+                                {
+                                    answer
+                                } else {
+                                    "Done; Klyne verified the result. (The model's summary claimed actions without evidence, so it was not shown.)".into()
+                                };
                                 chat.evidence.push(json!({"agent":"Host verifier","action":"review_finish","ok":true,"summary":"Reviewer kept re-reading after host checks were satisfied; finished from verified evidence."}));
+                                push(chat, "assistant", "Klyne", &answer);
+                                chat.status = "Completed".into();
+                                chat.execution.failure = None;
+                                self.save(chat)?;
+                                return Ok(());
+                            }
+                            ReviewStep::Stuck
+                                if read_only_episode_verified(&chat.messages, episode) =>
+                            {
+                                let answer = last_worker_answer(&chat.messages)
+                                    .unwrap_or_else(|| "Done; nothing needed changing.".into());
+                                chat.evidence.push(json!({"agent":"Host verifier","action":"review_finish","ok":true,"summary":"No acting steps and no unsupported claims; finished from the verified listing instead of repeating checks."}));
                                 push(chat, "assistant", "Klyne", &answer);
                                 chat.status = "Completed".into();
                                 chat.execution.failure = None;
@@ -2521,10 +2557,50 @@ impl Chats {
             .unwrap_or(&[]);
         if tool == "tool_save" && (action["program"].is_string() || action["code"].is_string()) {
             let name = action["name"].clone();
+            let args = match action["args"].as_str() {
+                Some(line) => json!(line.split_whitespace().collect::<Vec<_>>()),
+                None => action["args"].clone(),
+            };
             chat.execution.saved_tools.retain(|t| t["name"] != name);
-            chat.execution
-                .saved_tools
-                .push(json!({"name":name,"program":action["program"],"args":action["args"],"code":action["code"]}));
+            chat.execution.saved_tools.push(
+                json!({"name":name,"program":action["program"],"args":args,"code":action["code"]}),
+            );
+        }
+        if matches!(tool.as_str(), "skill_forget" | "tool_forget")
+            && let Some(name) = action["name"].as_str().filter(|n| !n.is_empty())
+        {
+            let name = name.to_owned();
+            let kind = tool.trim_end_matches("_forget").to_owned();
+            if crate::verify::already_removed(&chat.evidence, &action) {
+                let answer = format!(
+                    "Already removed: the saved {kind} {name} was deleted and verified earlier. Nothing else to do."
+                );
+                chat.execution.host_finish = Some(answer.clone());
+                return Some(
+                    json!({"agent":agent,"action":tool,"ok":true,"summary":answer,
+                    "data":json!({"forgotten":name,"kind":kind,"already_removed":true}).to_string()}),
+                );
+            }
+            let names = crate::capabilities::context(&self.root).unwrap_or(json!([]));
+            let other = if kind == "tool" { "skill" } else { "tool" };
+            let here = capability_present_kind(&names, &kind, &name);
+            let there = capability_present_kind(&names, other, &name);
+            if here == Some(false) && there == Some(true) {
+                chat.evidence.push(json!({"agent":"Host verifier","action":"forget_kind_switched","ok":true,
+                    "summary":format!("No saved {kind} named {name}; a saved {other} has that name, so Klyne forgets the {other} instead (absent-after check still applies)."),
+                    "data":"{}"}));
+                decision["action"]["tool"] = json!(format!("{other}_forget"));
+                return None;
+            }
+            if here == Some(false) && there == Some(false) {
+                let answer = format!(
+                    "Nothing by that name: there is no saved skill or tool named {name}, so nothing was removed."
+                );
+                chat.execution.host_finish = Some(answer.clone());
+                return Some(
+                    json!({"agent":"Host verifier","action":"forget_absent","ok":true,"summary":answer,"data":"{}"}),
+                );
+            }
         }
         if matches!(
             tool.as_str(),
@@ -2550,10 +2626,33 @@ impl Chats {
                 "summary":format!("Already removed: {target} was deleted and verified earlier in this task. Nothing to do; do not request it again."),
                 "data":data.to_string()}));
         }
+        let mapped = if tool == "run_shell" {
+            crate::verify::native_for_shell(&action, &chat.execution.saved_tools)
+        } else {
+            None
+        };
+        let run = mapped.as_ref().unwrap_or(&action);
+        if matches!(run["tool"].as_str(), Some("tool_run" | "tool_test"))
+            && chat
+                .execution
+                .saved_tools
+                .iter()
+                .any(|t| t["name"] == run["name"])
+            && crate::verify::all_satisfied(window)
+            && !crate::verify::asks_to_run(&chat.execution.original_request)
+        {
+            let name = run["name"].as_str().unwrap_or("").to_owned();
+            chat.execution.host_finish = Some(format!(
+                "Saved the tool {name}; Klyne verified it is stored. It was not run, as requested."
+            ));
+            return Some(
+                json!({"agent":"Host verifier","action":"verify_satisfied","ok":true,
+                "summary":format!("Postcondition checks already hold; the extra verification run of {name} was dropped (not requested). Finishing with the evidence."),
+                "data":"{}"}),
+            );
+        }
         if tool == "run_shell" {
-            if let Some(native) =
-                crate::verify::native_for_shell(&action, &chat.execution.saved_tools)
-            {
+            if let Some(native) = mapped {
                 chat.evidence.push(json!({"agent":"Host verifier","action":"shell_mapped","ok":true,
                     "summary":format!("run_shell mapped to native {} (no shell approval needed)", native["tool"].as_str().unwrap_or("")),
                     "data":native.to_string()}));
@@ -4210,6 +4309,77 @@ fn revoke_card_grant(execution: &mut Execution, lease: &Value) {
 }
 
 /// Whether capability_list output names an active item of this kind.
+/// Whether a named capability of this kind is saved; None when the list
+/// carries no kinds (cannot tell).
+fn capability_present_kind(list: &Value, kind: &str, name: &str) -> Option<bool> {
+    let items: Vec<&Value> = list
+        .as_array()
+        .or_else(|| list["items"].as_array())
+        .or_else(|| list["data"].as_array())
+        .or_else(|| list["capabilities"].as_array())
+        .into_iter()
+        .flatten()
+        .collect();
+    if items
+        .iter()
+        .any(|i| i["name"] == name && i["kind"].is_null())
+    {
+        return None;
+    }
+    Some(items.iter().any(|i| i["name"] == name && i["kind"] == kind))
+}
+
+/// Text of the final answer for claim checks: the reviewer's summary and
+/// answer plus the worker answers given since the latest user message.
+fn final_answer_text(messages: &[Message], review: &Value) -> String {
+    let mut parts = vec![
+        review["summary"].as_str().unwrap_or("").to_owned(),
+        review["answer"].as_str().unwrap_or("").to_owned(),
+    ];
+    for m in messages.iter().rev().take_while(|m| m.role != "user") {
+        if m.role == "assistant" && !matches!(m.agent.as_str(), "Klyne" | "Planner" | "Recovery") {
+            parts.push(m.text.clone());
+        }
+    }
+    parts.join("\n")
+}
+
+fn last_worker_answer(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .take_while(|m| m.role != "user")
+        .find(|m| {
+            m.role == "assistant" && !matches!(m.agent.as_str(), "Klyne" | "Planner" | "Recovery")
+        })
+        .map(|m| m.text.clone())
+}
+
+/// A turn with no acting steps, a successful listing and an answer whose
+/// claims are all supported: repeating checks adds nothing.
+fn read_only_episode_verified(messages: &[Message], episode: &[Value]) -> bool {
+    let acted = episode.iter().any(|e| {
+        e["agent"] != "Host verifier"
+            && e["agent"] != "Completion review"
+            && e["agent"] != "Reviewer"
+            && e["ok"] == true
+            && e["verify"]["status"]
+                .as_str()
+                .is_some_and(|s| s != "not_applicable")
+    });
+    let listed = episode.iter().any(|e| {
+        e["ok"] == true
+            && e["action"]
+                .as_str()
+                .is_some_and(|a| a.starts_with("capability_list") || a.starts_with("list_dir"))
+    });
+    let answer = last_worker_answer(messages).unwrap_or_default();
+    !acted
+        && listed
+        && crate::verify::unsatisfied(episode).is_empty()
+        && crate::verify::unsupported_claims(&answer, episode).is_empty()
+}
+
 fn capability_present(list: &Value, kind: &str, name: &str) -> bool {
     let items = list
         .as_array()

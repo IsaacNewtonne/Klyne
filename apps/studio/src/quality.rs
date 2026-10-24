@@ -286,3 +286,94 @@ mod tests {
         assert!(ask(&helper, &json!({"task":"x".repeat(1001)})).is_err());
     }
 }
+
+/// Settings UI view of the per-role models: current values, installed
+/// Ollama tags and warnings for missing tags.
+pub fn role_view(root: &Path) -> Value {
+    let settings = load(root);
+    let installed = crate::connections::ollama_models(&settings.helper.endpoint);
+    let m = &settings.models;
+    let mut warnings = Vec::new();
+    for (label, model) in [
+        ("planner", &m.planner),
+        ("worker", &m.worker),
+        ("reviewer", &m.reviewer),
+        ("voice", &m.voice),
+    ] {
+        if let (Some(model), Some(tags)) =
+            (model.as_deref().filter(|m| *m != "current"), &installed)
+            && !tags
+                .iter()
+                .any(|t| t == model || t.strip_suffix(":latest") == Some(model))
+        {
+            warnings.push(format!(
+                "The {label} model {model} is not installed in Ollama."
+            ));
+        }
+    }
+    json!({"models":{"planner":m.planner,"worker":m.worker,"reviewer":m.reviewer,"voice":m.voice},
+        "installed":installed,"warnings":warnings,"voice_wired":false})
+}
+
+/// Merge role models into quality/config.json, keeping every other key.
+pub fn merge_models(current: &Value, body: &Value) -> io::Result<Value> {
+    let mut config = if current.is_object() {
+        current.clone()
+    } else {
+        json!({})
+    };
+    let mut models = serde_json::Map::new();
+    for role in ["planner", "worker", "reviewer", "voice"] {
+        match &body[role] {
+            Value::Null => {}
+            Value::String(tag) if tag.trim().is_empty() || tag == "current" => {}
+            Value::String(tag)
+                if tag.len() <= 200
+                    && tag
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._:/-".contains(c)) =>
+            {
+                models.insert(role.into(), json!(tag));
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid model tag for {role}"),
+                ));
+            }
+        }
+    }
+    config["models"] = Value::Object(models);
+    Ok(config)
+}
+
+pub fn save_models(root: &Path, body: &Value) -> io::Result<Value> {
+    let path = root.join("quality/config.json");
+    let current = fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .unwrap_or(Value::Null);
+    let config = merge_models(&current, body)?;
+    fs::create_dir_all(root.join("quality"))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&config)?)?;
+    fs::rename(&tmp, &path)?;
+    Ok(role_view(root))
+}
+
+#[cfg(test)]
+mod role_ui_tests {
+    use super::*;
+    #[test]
+    fn merge_keeps_other_keys_and_drops_same_as_main() {
+        let current = json!({"evidence":true,"models":{"worker":"old"}});
+        let merged = merge_models(
+            &current,
+            &json!({"planner":"qwen3.5:9b","worker":"current","reviewer":""}),
+        )
+        .unwrap();
+        assert_eq!(merged["evidence"], true);
+        assert_eq!(merged["models"], json!({"planner":"qwen3.5:9b"}));
+        assert!(merge_models(&current, &json!({"voice":"bad tag;rm"})).is_err());
+    }
+}

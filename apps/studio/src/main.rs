@@ -361,6 +361,9 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
                 json!({"pid":std::process::id(),"serving":true,"root":fs::canonicalize(&studio.root).unwrap_or_else(|_| studio.root.clone()),"executable":std::env::current_exe().ok(),"ready":studio.chats.active_count()==0 && studio.active.lock().unwrap().is_empty()}),
             );
         }
+        if method == "GET" && path == "/api/quality/models" {
+            return Ok(quality::role_view(&studio.root));
+        }
         if method == "GET" && path == "/api/runtime/load" {
             return Ok(telemetry::read());
         }
@@ -460,6 +463,9 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
             return Err(err("unsupported request"));
         }
         let body: Value = serde_json::from_slice(&body).map_err(err)?;
+        if path == "/api/quality/models" {
+            return quality::save_models(&studio.root, &body);
+        }
         if path == "/api/voice/cancel" {
             return voice::cancel(&body);
         }

@@ -405,6 +405,70 @@ fn normalize_line(line: &str) -> String {
         .to_lowercase()
 }
 
+/// Strip `cmd /c`, `powershell [-flags] -Command` and `&` wrappers from a
+/// normalized command line, repeatedly.
+pub fn strip_wrappers(line: &str) -> String {
+    let mut words: Vec<&str> = line.split_whitespace().collect();
+    while let Some(first) = words.first() {
+        let base = first
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(".exe");
+        if base == "cmd" && words.get(1).is_some_and(|w| *w == "/c" || *w == "/k") {
+            words.drain(..2);
+        } else if matches!(base, "powershell" | "pwsh") {
+            match words.iter().position(|w| *w == "-command" || *w == "-c") {
+                Some(i) => {
+                    words.drain(..=i);
+                }
+                None => {
+                    let rest = words.iter().skip(1).position(|w| !w.starts_with('-'));
+                    match rest {
+                        Some(i) => {
+                            words.drain(..=i);
+                        }
+                        None => break,
+                    }
+                }
+            }
+        } else if *first == "&" {
+            words.remove(0);
+        } else {
+            break;
+        }
+    }
+    words.join(" ")
+}
+
+/// Whether the request asks to run, test or execute something (negated
+/// phrases such as "do not test or run it" do not count).
+pub fn asks_to_run(text: &str) -> bool {
+    let mut t = format!(
+        " {} ",
+        text.to_lowercase().replace(['.', ',', ';', '!', '?'], " ")
+    );
+    for neg in ["do not", "don't", "dont", "without", "no need to", "never"] {
+        while let Some(i) = t.find(neg) {
+            let end = t[i..]
+                .find(" it ")
+                .map(|j| i + j + 3)
+                .unwrap_or_else(|| (i + neg.len() + 20).min(t.len()));
+            t.replace_range(i..end.min(t.len()), " ");
+        }
+    }
+    [
+        " run ",
+        " test ",
+        " execute ",
+        " try it ",
+        " running ",
+        " testing ",
+    ]
+    .iter()
+    .any(|w| t.contains(w))
+}
+
 /// A native tool covering a run_shell request, so no shell approval is
 /// needed: version checks → runtime_status, a saved tool's own command →
 /// tool_run, dir/ls → list_dir, type/cat/Get-Content → read_file,
@@ -415,6 +479,7 @@ pub fn native_for_shell(action: &Value, saved: &[Value]) -> Option<Value> {
         return None;
     }
     let line = normalize_line(&shell_line(action));
+    let bare = strip_wrappers(&line);
     for tool in saved {
         let own = normalize_line(&shell_line(
             &json!({"program":tool["program"],"args":tool["args"]}),
@@ -433,10 +498,16 @@ pub fn native_for_shell(action: &Value, saved: &[Value]) -> Option<Value> {
         );
         let stripped = line.split('|').next().unwrap_or("").trim().to_owned();
         let code = normalize_line(tool["code"].as_str().unwrap_or(""));
-        if (!code.is_empty() && (line == code || stripped == code))
+        let bare_stripped = strip_wrappers(&stripped);
+        let forms = [strip_wrappers(&own), strip_wrappers(&full)];
+        if (!code.is_empty() && (line == code || stripped == code || bare == strip_wrappers(&code)))
             || (tool["program"].is_string()
                 && !own.is_empty()
-                && (stripped == own || stripped == full))
+                && (stripped == own
+                    || stripped == full
+                    || forms
+                        .iter()
+                        .any(|f| !f.is_empty() && (*f == bare || *f == bare_stripped))))
         {
             return Some(json!({"tool":"tool_run","name":tool["name"]}));
         }
@@ -885,5 +956,42 @@ mod read_only_tests {
         assert!(super::read_only_shell_check(&a));
         let b = serde_json::json!({"tool":"run_shell","program":"powershell","args":["-Command","Remove-Item x; Get-Content y"]});
         assert!(!super::read_only_shell_check(&b));
+    }
+}
+
+#[cfg(test)]
+mod wrapper_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn cmd_wrapped_saved_command_maps_to_tool_run() {
+        let saved = vec![json!({"name":"t_echo","program":"cmd","args":["/c","echo hi"]})];
+        let action = json!({"tool":"run_shell","program":"powershell","args":["-NoProfile","-NonInteractive","-Command","cmd /c echo hi"]});
+        assert_eq!(
+            native_for_shell(&action, &saved).unwrap()["tool"],
+            "tool_run"
+        );
+        let saved = vec![json!({"name":"t_echo","program":"cmd","args":"/c echo hi"})];
+        let saved_code = vec![json!({"name":"t_echo","code":"echo hi"})];
+        assert_eq!(
+            native_for_shell(&action, &saved_code).unwrap()["tool"],
+            "tool_run"
+        );
+        let _ = saved;
+    }
+    #[test]
+    fn strip_wrappers_unwraps_nested() {
+        assert_eq!(
+            strip_wrappers("powershell -noprofile -command cmd /c echo hi"),
+            "echo hi"
+        );
+        assert_eq!(strip_wrappers("cmd.exe /c & echo hi"), "echo hi");
+        assert_eq!(strip_wrappers("echo hi"), "echo hi");
+    }
+    #[test]
+    fn asks_to_run_ignores_negation() {
+        assert!(!asks_to_run("Save a tool named x. Do not test or run it."));
+        assert!(asks_to_run("Save a tool and run it."));
+        assert!(!asks_to_run("Save a tool named t74_echo"));
     }
 }
