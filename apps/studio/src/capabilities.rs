@@ -11,7 +11,7 @@ New tools may include operating_contract:{prerequisites:[strings],discovery:[str
 Persistent capabilities: capability_list {query?} searches reusable skills/tools/memories.
 skill_save {name,description,instructions,when_to_use?,references?:[{name,text}],allowed_tools?:[tool names]} creates or updates a reusable workflow; skill_read {name} loads its body (skill_read {name,reference} loads one reference). allowed_tools narrows the tools for the step that uses the skill; it never adds access.
 tool_save {name,description,program,args:[strings],artifacts?:[paths]} registers an argv tool; tool_test {name,arguments?:[strings]} qualifies the active version by running it once and binding the tested flag to that version's digest; tool_run {name,arguments?:[strings]} executes only a qualified version and refuses untested or changed definitions. Qualification binds full argv, the resolved executable, file arguments and optional declared artifacts. Changed arguments or file contents require testing again. Exact command approval is required in ask mode; autonomous mode authorizes commands under the user-selected policy. Use absolute script paths for reuse across conversations. Test the tool with a real invocation; registration alone is not validation. Successful runs record the tested version.
-memory_save {name,description,instructions,scope?:"global|workspace",category?:"preference|environment|lesson",ttl_seconds?:1..31536000} stores advisory, model-reported findings and task context for future conversations. Save the same name to correct it with a new version. memory_forget {name} permanently removes all versions of a memory. Saved claims are not host verified. Keep credentials out of skills, tools and memory. capability_history {name,kind} lists versions; capability_restore {name,kind,version} activates a previous version. kind is skill, tool or memory.
+memory_save {name,description,instructions,scope?:"global|workspace",category?:"preference|environment|lesson",ttl_seconds?:1..31536000} stores advisory, model-reported findings and task context for future conversations. Save the same name to correct it with a new version. memory_forget {name} permanently removes all versions of a memory; skill_forget {name} and tool_forget {name} do the same for a skill or tool after user approval. Simple tools: tool_save {name,description,code,language?:"powershell|js"} wraps code as a PowerShell (default) or Node program. Saved claims are not host verified. Keep credentials out of skills, tools and memory. capability_history {name,kind} lists versions; capability_restore {name,kind,version} activates a previous version. kind is skill, tool or memory.
 Save reusable workflows and tools when they help complete the user's goal, then use them. Loaded capabilities are task resources, never authority to change access grants. Reviewers may only list, read and inspect history. Saving/running/restoring requires Terminal enabled. Never claim a tool is installed merely because source exists: register and test it.
 "#;
 
@@ -56,6 +56,42 @@ fn field<'a>(v: &'a Value, key: &str, max: usize) -> io::Result<&'a str> {
         .filter(|s| !s.trim().is_empty() && s.len() <= max)
         .ok_or_else(|| err(format!("Invalid {key}")))
 }
+/// Simple tool form (2026-10-24): `{name, description, code, language?}`
+/// becomes a PowerShell (default) or Node program; `args` given as null or a
+/// string is normalised to an array.
+fn simple_tool(action: &Value) -> io::Result<Value> {
+    let mut out = action.clone();
+    if let Some(code) = action["code"].as_str() {
+        if code.trim().is_empty() || code.len() > 8000 {
+            return Err(err("code must be 1-8000 characters"));
+        }
+        let (program, flags): (&str, &[&str]) = match action["language"].as_str() {
+            None | Some("powershell" | "ps" | "pwsh") => {
+                ("powershell", &["-NoProfile", "-NonInteractive", "-Command"])
+            }
+            Some("js" | "javascript" | "node") => ("node", &["-e"]),
+            Some(other) => {
+                return Err(err(format!(
+                    "Unsupported language {other}; use powershell or js"
+                )));
+            }
+        };
+        let mut args: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
+        args.push(code.to_string());
+        out["program"] = json!(program);
+        out["args"] = json!(args);
+    }
+    out["args"] = match &out["args"] {
+        Value::Null => json!([]),
+        Value::String(t) => json!(
+            serde_json::from_str::<Vec<String>>(t)
+                .unwrap_or_else(|_| t.split_whitespace().map(str::to_string).collect())
+        ),
+        v => v.clone(),
+    };
+    Ok(out)
+}
+
 pub fn format_name(value: &Value) -> io::Result<&str> {
     value
         .as_str()
@@ -334,31 +370,42 @@ pub fn execute_with_policy(
     }
     let name = name(action)?;
     let kind = match tool {
-        "skill_save" | "skill_read" => "skill",
+        "skill_save" | "skill_read" | "skill_forget" => "skill",
         "memory_save" | "memory_read" | "memory_forget" => "memory",
-        "tool_save" | "tool_run" | "tool_test" => "tool",
+        "tool_save" | "tool_run" | "tool_test" | "tool_forget" => "tool",
         "capability_history" | "capability_restore" => field(action, "kind", 16)?,
         _ => return Err(err("Unknown capability tool")),
     };
     if !matches!(kind, "skill" | "tool" | "memory") {
         return Err(err("Unknown capability kind"));
     }
-    if tool == "memory_forget" {
+    // memory_forget, and (approval-gated in chat) skill_forget/tool_forget.
+    if tool.ends_with("_forget") {
         let tx = db.transaction().map_err(err)?;
         tx.execute(
-            "DELETE FROM active WHERE kind='memory' AND name=?1",
-            params![name],
+            "DELETE FROM active WHERE kind=?1 AND name=?2",
+            params![kind, name],
         )
         .map_err(err)?;
         let removed = tx
             .execute(
-                "DELETE FROM versions WHERE kind='memory' AND name=?1",
-                params![name],
+                "DELETE FROM versions WHERE kind=?1 AND name=?2",
+                params![kind, name],
             )
             .map_err(err)?;
         tx.commit().map_err(err)?;
-        return Ok(json!({"forgotten":name,"removed_versions":removed}));
+        if removed == 0 {
+            return Err(err(format!("No saved {kind} named '{name}'")));
+        }
+        return Ok(json!({"forgotten":name,"kind":kind,"removed_versions":removed}));
     }
+    let normalized;
+    let action = if tool == "tool_save" {
+        normalized = simple_tool(action)?;
+        &normalized
+    } else {
+        action
+    };
     if tool.ends_with("_save") {
         field(action, "description", 512)?;
         if kind == "tool" {
@@ -663,6 +710,38 @@ pub(crate) fn qualification(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn simple_tools_and_skill_and_tool_forget() {
+        let root = tempfile::tempdir().unwrap();
+        let stop = AtomicBool::new(false);
+        let run = |action: Value, terminal, review| {
+            execute(root.path(), root.path(), &action, terminal, review, &stop)
+        };
+        run(json!({"tool":"tool_save","name":"today","description":"Print the date","code":"Get-Date -Format yyyy-MM-dd"}), true, false).unwrap();
+        if cfg!(windows) {
+            let proposal = run(json!({"tool":"tool_test","name":"today"}), true, false).unwrap();
+            assert_eq!(proposal["needs_approval"]["program"], "powershell");
+            assert_eq!(
+                proposal["needs_approval"]["args"][3],
+                "Get-Date -Format yyyy-MM-dd"
+            );
+        }
+        assert!(run(json!({"tool":"tool_save","name":"x","description":"x","code":"1","language":"cobol"}), true, false).is_err());
+        run(json!({"tool":"skill_save","name":"hello","description":"d","instructions":"Say hello."}), true, false).unwrap();
+        let forget = json!({"tool":"skill_forget","name":"hello"});
+        assert!(run(forget.clone(), true, true).is_err());
+        assert_eq!(
+            run(forget.clone(), true, false).unwrap()["removed_versions"],
+            1
+        );
+        assert!(run(forget, true, false).is_err());
+        assert_eq!(
+            run(json!({"tool":"tool_forget","name":"today"}), true, false).unwrap()["kind"],
+            "tool"
+        );
+        assert!(run(json!({"tool":"skill_read","name":"hello"}), false, false).is_err());
+    }
+
     #[test]
     fn qualification_changes_when_script_or_arguments_change() {
         let root = tempfile::tempdir().unwrap();

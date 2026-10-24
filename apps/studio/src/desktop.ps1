@@ -7,6 +7,7 @@ try {
     Add-Type -Path (Join-Path $PSScriptRoot 'desktop.cs') -ReferencedAssemblies UIAutomationClient, UIAutomationTypes, WindowsBase, System.Drawing, System.Windows.Forms
     [KlyneDesktop]::CheckEmergency()
     $action = $request.action
+    $launched = $null
     if ($action.tool -in @('desktop_click','desktop_scroll')) {
         $prior = $request.previous.windows | Where-Object { $_.window -eq $action.window } | Select-Object -First 1
         [KlyneDesktop]::CheckLayout([string]$action.window,[int]$prior.left,[int]$prior.top,[int]$prior.width,[int]$prior.height)
@@ -19,15 +20,43 @@ try {
             exit 0
         }
         'desktop_launch' {
-            [KlyneDesktop]::InputStarted = $true
+            # 2026-10-24: names match loosely, and the new window comes back
+            # as launched {window,pid} already focused, ready for typing.
             $appId = [string]$action.app_id
-            if ($appId -in @('notepad.exe','calc.exe')) { Start-Process -FilePath (Join-Path $env:WINDIR "System32\$appId") }
-            else {
-                $installed = Get-StartApps | Where-Object { $_.AppID -ceq $appId } | Select-Object -First 1
-                if (!$installed) { throw 'App ID is not installed. Use desktop_apps first.' }
-                Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList @("shell:AppsFolder\$appId")
+            $before = @{}
+            foreach ($p in Get-Process) { if ($p.MainWindowHandle -ne 0) { $before[[string]$p.MainWindowHandle.ToInt64()] = $true } }
+            $builtin = @{ 'notepad'='notepad.exe'; 'notepad.exe'='notepad.exe'; 'calc'='calc.exe'; 'calc.exe'='calc.exe'; 'calculator'='calc.exe' }
+            $exe = $builtin[$appId.ToLowerInvariant()]
+            if ($exe) {
+                [KlyneDesktop]::InputStarted = $true
+                Start-Process -FilePath (Join-Path $env:WINDIR "System32\$exe")
+                $want = @($exe -replace '\.exe$','')
+                if ($exe -eq 'calc.exe') { $want += 'CalculatorApp' }
+            } else {
+                $apps = @(Get-StartApps)
+                $installed = $apps | Where-Object { $_.AppID -ceq $appId } | Select-Object -First 1
+                $bare = $appId -replace '\.exe$',''
+                if (!$installed) {
+                    $close = @($apps | Where-Object { $_.AppID -ieq $appId -or $_.Name -ieq $appId -or $_.Name -ieq $bare })
+                    if ($close.Count -eq 1) { $installed = $close[0] }
+                }
+                if (!$installed) {
+                    $hint = @($apps | Where-Object { $_.Name -like "*$bare*" -or $_.AppID -like "*$bare*" } | Select-Object -First 5 | ForEach-Object { "$($_.Name) => $($_.AppID)" })
+                    if ($hint.Count) { throw ("App ID '$appId' is not installed. Did you mean: " + ($hint -join '; ') + '? Pass the AppID after =>.') }
+                    throw "App ID '$appId' is not installed. Use desktop_apps to list installed IDs."
+                }
+                [KlyneDesktop]::InputStarted = $true
+                Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList @("shell:AppsFolder\$($installed.AppID)")
+                $want = @()
             }
-            Start-Sleep -Milliseconds 600
+            for ($i = 0; $i -lt 25 -and !$launched; $i++) {
+                Start-Sleep -Milliseconds 200
+                $fresh = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and !$before.ContainsKey([string]$_.MainWindowHandle.ToInt64()) })
+                $pick = @($fresh | Where-Object { $want -contains $_.ProcessName }) + @($fresh) | Select-Object -First 1
+                if ($pick) { $launched = @{ window = [string]$pick.MainWindowHandle.ToInt64(); pid = $pick.Id; process_name = $pick.ProcessName; title = $pick.MainWindowTitle } }
+            }
+            if ($launched) { try { [KlyneDesktop]::Focus($launched.window) } catch { $launched['focus_error'] = $_.Exception.Message } }
+            else { Start-Sleep -Milliseconds 400 }
         }
         'desktop_focus' { [KlyneDesktop]::Focus([string]$action.window) }
         'desktop_click' {
@@ -57,6 +86,7 @@ try {
     $observation = [KlyneDesktop]::Observe([string]$request.image_path)
     $result = @{ok=$true; observation=$observation}
     if ($action.tool -eq 'desktop_clipboard_get') { $result['clipboard'] = $clipboard }
+    if ($launched) { $result['launched'] = $launched }
     $result | ConvertTo-Json -Depth 12 -Compress
 } catch {
     $failure = $_.Exception.Message + ' [' + $_.FullyQualifiedErrorId + ']'

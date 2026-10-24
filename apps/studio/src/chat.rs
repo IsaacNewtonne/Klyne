@@ -1580,6 +1580,10 @@ impl Chats {
     fn drive(&self, chat: &mut Chat, stop: &AtomicBool) -> io::Result<()> {
         let elapsed = Instant::now();
         let result = self.drive_inner(chat, stop);
+        // A finished task leaves no isolated browser running (2026-10-24).
+        if chat.status == "Completed" && self.browsers.close(&chat.id) {
+            chat.evidence.push(json!({"agent":"Klyne","action":"browser_close:auto","ok":true,"summary":"Closed the isolated browser at task end","data":"{\"closed\":true}"}));
+        }
         chat.execution.elapsed_ms = chat
             .execution
             .elapsed_ms
@@ -4089,6 +4093,7 @@ fn destructive_gate(
         "move_file" | "copy_file" => json!({"tool":tool,"from":path("from"),"to":path("to")}),
         "run_shell" => json!({"tool":tool,"program":raw["program"],"args":raw["args"]}),
         "runtime_stage" => json!({"tool":tool,"binary":raw["binary"],"sha256":raw["sha256"]}),
+        "skill_forget" | "tool_forget" => json!({"tool":tool,"name":raw["name"]}),
         t if t.starts_with("desktop_") => {
             let mut canonical = json!({"tool":tool});
             for key in [

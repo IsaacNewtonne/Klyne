@@ -31,6 +31,13 @@ pub struct BrowserCall<'a> {
 }
 
 impl Browsers {
+    /// Drop a conversation's browser session; true when one was open.
+    pub fn close(&self, id: &str) -> bool {
+        self.0
+            .lock()
+            .map(|mut sessions| sessions.remove(id).is_some())
+            .unwrap_or(false)
+    }
     pub fn execute(&self, call: BrowserCall<'_>) -> io::Result<Value> {
         let BrowserCall {
             id,

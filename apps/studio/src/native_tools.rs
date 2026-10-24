@@ -32,6 +32,11 @@ const CORE_META: &[&str] = &[
     "memory_read",
     "memory_save",
     "memory_forget",
+    "tool_save",
+    "tool_test",
+    "tool_run",
+    "skill_forget",
+    "tool_forget",
     "app_list",
 ];
 const CORE_TERMINAL: &[&str] = &["run_shell", "ask_model"];
@@ -181,7 +186,7 @@ fn schema(tool: &str) -> (String, Value) {
         ),
         "desktop_apps" => object("List installed Start-menu app IDs.", json!({}), &[]),
         "desktop_launch" => object(
-            "Launch an installed app by ID (notepad.exe and calc.exe also work).",
+            "Launch an app by ID or name (notepad, calc, or a desktop_apps ID). The result's launched.window is the new, focused window: pass it as window to desktop_type/key/click right away; do not launch again.",
             json!({"app_id":s("App ID from desktop_apps")}),
             &["app_id"],
         ),
@@ -291,10 +296,16 @@ fn schema(tool: &str) -> (String, Value) {
             &["name", "description", "instructions"],
         ),
         "tool_save" => object(
-            "Save a reusable command tool: a program with fixed arguments.",
+            "Save a reusable script tool (call this tool directly, never through run_shell). Example: {\"name\":\"today\",\"description\":\"Print today's date\",\"language\":\"powershell\",\"code\":\"Get-Date -Format yyyy-MM-dd\"}. Then tool_test {name}, then tool_run {name}.",
             json!({"name":s("Short id: letters, digits, - or _"),"description":s("One line"),
-                "program":s("Executable"),"args":{"type":"array","items":{"type":"string"},"description":"Arguments"}}),
-            &["name", "description", "program", "args"],
+                "language":{"type":"string","enum":["powershell","js"],"description":"Default powershell"},
+                "code":s("Script source")}),
+            &["name", "description", "code"],
+        ),
+        "skill_forget" | "tool_forget" => object(
+            "Permanently remove a saved skill (skill_forget) or tool (tool_forget). The user approves first.",
+            json!({"name":s("Saved name")}),
+            &["name"],
         ),
         "tool_test" | "tool_run" => object(
             "Test (tool_test) or run (tool_run, after a passing test) a saved tool.",
@@ -579,6 +590,8 @@ pub fn call_to_decision(name: &str, raw_arguments: &Value) -> Option<Value> {
                         | "tool_run"
                         | "memory_save"
                         | "memory_forget"
+                        | "skill_forget"
+                        | "tool_forget"
                 )
                 && let Some(fields) = action
                     .get("args")
@@ -588,6 +601,21 @@ pub fn call_to_decision(name: &str, raw_arguments: &Value) -> Option<Value> {
                 let mut call = fields;
                 call.insert("tool".into(), json!(program));
                 return Some(json!({"decision":"act","action":Value::Object(call)}));
+            }
+            // `tool_test today`, `tool_forget today`: one bare name.
+            if tool == "run_shell"
+                && let Some(program) = action.get("program").and_then(Value::as_str)
+                && matches!(
+                    program,
+                    "tool_test" | "tool_run" | "skill_forget" | "tool_forget"
+                )
+                && let Some([name]) = action
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                && let Some(name) = name.as_str().filter(|n| !n.contains('='))
+            {
+                return Some(json!({"decision":"act","action":{"tool":program,"name":name}}));
             }
             // Same for memory: `memory_save <name> <fact...>` and
             // `memory_forget <name>` as shell programs.

@@ -305,6 +305,18 @@ pub fn classify(action: &Value, workspace: &Path, observation: Option<&Value>) -
                 action["binary"].as_str().unwrap_or("?")
             ),
         ),
+        "skill_forget" | "tool_forget" => finding(
+            "capability_forget",
+            format!(
+                "Permanently removes the saved {} '{}' and all its versions",
+                if tool == "skill_forget" {
+                    "skill"
+                } else {
+                    "tool"
+                },
+                action["name"].as_str().unwrap_or("?")
+            ),
+        ),
         t if t.starts_with("desktop_") => desktop(action, observation),
         _ => None,
     }
@@ -346,6 +358,23 @@ mod tests {
         let program = parts.next().unwrap();
         shell(&program, &parts.collect::<Vec<_>>())
     }
+    #[test]
+    fn forgetting_a_skill_or_tool_needs_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        for tool in ["skill_forget", "tool_forget"] {
+            let f = classify(&json!({"tool":tool,"name":"t"}), dir.path(), None).unwrap();
+            assert_eq!(f.category, "capability_forget");
+        }
+        assert!(
+            classify(
+                &json!({"tool":"memory_forget","name":"t"}),
+                dir.path(),
+                None
+            )
+            .is_none()
+        );
+    }
+
     #[test]
     fn destructive_shell_patterns_are_detected() {
         for line in [
