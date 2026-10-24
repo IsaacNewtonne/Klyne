@@ -381,6 +381,9 @@ pub fn execute_with_policy(
             // A missing or null `args` means no arguments (small models send null).
             let args: Vec<String> = match &action["args"] {
                 Value::Null => Vec::new(),
+                // ...or the array as a string: "[]", "[\"-a\"]" or "-a -b".
+                Value::String(t) => serde_json::from_str(t)
+                    .unwrap_or_else(|_| t.split_whitespace().map(str::to_string).collect()),
                 v => serde_json::from_value(v.clone()).map_err(err)?,
             };
             if args.len() > 128 {
