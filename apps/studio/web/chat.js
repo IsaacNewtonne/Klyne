@@ -191,15 +191,15 @@ function render() {
     const panel=$('pending-action');
     panel.querySelector('summary').textContent=approval?'Review requested action':'Resolve an uncertain action';
     const request=snapshot.pending.proposal;
-    panel.querySelector('p').textContent=!approval?'Inspect the affected app or file, then record what happened before continuing.':request.kind==='shell'?`Run ${request.program} with arguments ${(request.args||[]).map(arg=>JSON.stringify(arg)).join(' ')}. This command has not run.`:request.kind==='delete'?`Allow DELETE ${request.origin?.replace(/\/$/,'')||''}${request.path}. Review the request body in Exact request.`:request.kind==='secret'?`Allow credential ${request.name} for ${(request.origins||[]).join(', ')||'the command environment'}.`:'This action has not run. Review the exact request below.';
+    panel.querySelector('p').textContent=!approval?'Inspect the affected app or file, then record what happened before continuing.':request.kind==='shell'?`Run ${request.program} with arguments ${(request.args||[]).map(arg=>JSON.stringify(arg)).join(' ')}. This command has not run.`:request.kind==='delete'?`Allow DELETE ${request.origin?.replace(/\/$/,'')||''}${request.path}. Review the request body in Exact request.`:request.kind==='secret'?`Allow credential ${request.name} for ${(request.origins||[]).join(', ')||'the command environment'}.`:request.kind==='destructive'?`${request.reason||'Destructive action'}. This has not run yet.`:'This action has not run. Review the exact request below.';
     let proposal=$('pending-proposal');
     if(!proposal) {proposal=document.createElement('pre');proposal.id='pending-proposal';const exact=document.createElement('details'),label=document.createElement('summary');label.textContent='Exact request';exact.append(label,proposal);panel.querySelector('p').after(exact);}
     let expiry=$('pending-expiry');if(!expiry){expiry=document.createElement('p');expiry.id='pending-expiry';proposal.parentElement.after(expiry);}expiry.textContent=approval && snapshot.pending.expires_at_ms ? `Approval expires ${new Date(snapshot.pending.expires_at_ms).toLocaleTimeString()} | ${(snapshot.execution?.approval_queue?.length||0)+1} request(s) awaiting review` : '';
     proposal.textContent=JSON.stringify(snapshot.pending.proposal || snapshot.pending.action || snapshot.pending,null,2);
-    const choices=approval?[['approved','Approve this action'],['abandon','Decline this action']]:[['completed','Already completed'],['not_applied','Did not happen'],['abandon','Abandon this action']];
+    const choices=approval?(request.kind==='destructive'?[['approved','Approve once'],['approved_conversation','Approve for this conversation'],['abandon','Decline this action']]:[['approved','Approve this action'],['abandon','Decline this action']]):[['completed','Already completed'],['not_applied','Did not happen'],['abandon','Abandon this action']];
     setMarkup($('pending-disposition'),choices.map(([value,label])=>`<option value="${value}">${label}</option>`).join(''));
     panel.querySelector('label').textContent=approval?'Note (optional)':'What did you verify?';
-    $('resolve-action').textContent=approval && $('pending-disposition').value==='approved'?'Approve and continue':'Record decision';
+    $('resolve-action').textContent=approval && $('pending-disposition').value.startsWith('approved')?'Approve and continue':'Record decision';
   }
   $('instruction').placeholder=snapshot?.status==='Needs input'||snapshot?.pending?.proposal?'Klyne needs your input…':active?'Ask about progress, chat, or add a task while Klyne works…':selected?'Add an instruction or ask a follow-up…':'Describe what you’d like to do…';
   $('composer-hint').textContent=active?'Chat while work continues · New tasks are logged and queued':'Enter to send · Shift + Enter for a new line';
@@ -312,7 +312,7 @@ $('export').onclick=()=>{
   if(!snapshot)return;const url=URL.createObjectURL(new Blob([JSON.stringify(snapshot,null,2)],{type:'application/json'}));
   const a=document.createElement('a');a.href=url;a.download=`klyne-chat-${snapshot.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 };
-function providerConfig(){return {kind:$('provider-kind').value,endpoint:$('provider-endpoint').value.trim(),model:$('provider-model').value.trim()};}
+function providerConfig(){const config={kind:$('provider-kind').value,endpoint:$('provider-endpoint').value.trim(),model:$('provider-model').value.trim()};const mode=$('tool-mode')?.value||'';if(mode)config.tool_mode=mode;return config;}
 function reviewerConfig(){return $('reviewer-kind').value?{kind:$('reviewer-kind').value,endpoint:$('reviewer-endpoint').value.trim(),model:$('reviewer-model').value.trim()}:null;}
 function configureReviewer(config){
   ++reviewerRevision;
@@ -468,19 +468,23 @@ let saved={};try{saved=JSON.parse(localStorage.getItem('klyne-provider')||'{}')|
 if(Object.hasOwn(names,saved.kind))$('provider-kind').value=saved.kind;else saved={};
 configureProvider(savedProviderFor($('provider-kind').value));resetNewChatSettings();render();refresh();setInterval(()=>{if(!document.hidden)refresh();},1500);
 
-function executionConfig(){return {max_steps:Number($('max-steps').value)||0,timeout_seconds:Number($('max-seconds').value)||0,max_review_rounds:Number($('max-reviews').value)||0,command_policy:$('command-policy').value,max_tokens:Number($('max-tokens').value)||0,max_cost_usd:Number($('max-cost').value)||0};}
+function executionConfig(){return {max_steps:Number($('max-steps').value)||0,timeout_seconds:Number($('max-seconds').value)||0,max_review_rounds:Number($('max-reviews').value)||0,command_policy:$('command-policy').value,max_tokens:Number($('max-tokens').value)||0,max_cost_usd:Number($('max-cost').value)||0,real_browser:!!$('real-browser')?.checked};}
+// 2026-10-24: tool mode and real-Chrome opt-in persist in this browser.
+try{$('tool-mode').value=localStorage.getItem('klyne-tool-mode')||'';$('real-browser').checked=localStorage.getItem('klyne-real-browser')==='true';}catch(_){}
+$('tool-mode').onchange=()=>{try{localStorage.setItem('klyne-tool-mode',$('tool-mode').value);}catch(_){}};
+$('real-browser').onchange=()=>{try{localStorage.setItem('klyne-real-browser',String($('real-browser').checked));}catch(_){}};
 $('resume-chat').onclick=async()=>{
   if(!snapshot||submitting)return; submitting=true;
   try {await api('/api/chats',{id:selected,message:'Continue the saved goal from its current task state.',resume:true,...intelligenceConfig(),reviewer:reviewerConfig(),execution:executionConfig(),provider:providerConfig(),access:snapshot.access});await refresh();}
   catch(e){toast(e.message);}finally{submitting=false;render();}
 };
-$('pending-disposition').onchange=()=>{$('resolve-action').textContent=snapshot?.pending?.proposal && $('pending-disposition').value==='approved'?'Approve and continue':'Record decision';};
+$('pending-disposition').onchange=()=>{$('resolve-action').textContent=snapshot?.pending?.proposal && $('pending-disposition').value.startsWith('approved')?'Approve and continue':'Record decision';};
 $('resolve-action').onclick=async()=>{
   if(submitting || !snapshot?.pending)return;
-  const id=selected,approval=!!snapshot.pending.proposal,disposition=$('pending-disposition').value;
+  const id=selected,approval=!!snapshot.pending.proposal,choice=$('pending-disposition').value,disposition=choice==='approved_conversation'?'approved':choice,scope=choice==='approved_conversation'?'conversation':'once';
   const continuation={id,message:'Continue the saved goal after approval.',resume:true,...intelligenceConfig(),reviewer:reviewerConfig(),execution:executionConfig(),provider:providerConfig(),access:snapshot.access};
   submitting=true;$('resolve-action').disabled=true;
-  try {const resolution=await api(`/api/chats/${id}/resolve`,{request_id:snapshot.pending.request_id,disposition,note:$('pending-note').value.trim() || (approval?`User selected ${disposition} for the displayed proposal.`:'')});if(selected===id)$('pending-note').value='';if(approval && disposition==='approved') {if(resolution.renewal_required)toast('This request expired or changed. Klyne will prepare a fresh proposal.');await api('/api/chats',continuation);}await refresh();}
+  try {const resolution=await api(`/api/chats/${id}/resolve`,{request_id:snapshot.pending.request_id,disposition,scope,note:$('pending-note').value.trim() || (approval?`User selected ${disposition} for the displayed proposal.`:'')});if(selected===id)$('pending-note').value='';if(approval && disposition==='approved') {if(resolution.renewal_required)toast('This request expired or changed. Klyne will prepare a fresh proposal.');await api('/api/chats',continuation);}await refresh();}
   catch(e){toast(e.message);}finally{submitting=false;$('resolve-action').disabled=false;render();}
 };
 

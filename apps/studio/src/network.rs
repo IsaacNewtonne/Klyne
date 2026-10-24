@@ -99,6 +99,91 @@ pub fn send(
     })
 }
 
+/// Like `send`, but hands each complete newline-delimited line to
+/// `on_line` as it arrives (Ollama streaming NDJSON). A body without
+/// newlines is delivered as one final line, so non-streaming servers work.
+/// The returned body is empty; callers consume the lines.
+pub fn send_lines(
+    build: impl FnOnce(reqwest::Client) -> reqwest::RequestBuilder,
+    seconds: u64,
+    cap: usize,
+    stop: &AtomicBool,
+    on_line: &mut dyn FnMut(&str),
+) -> io::Result<Response> {
+    if stop.load(Ordering::SeqCst) {
+        return Err(io::Error::other("Request cancelled before dispatch"));
+    }
+    let (runtime, client) = shared();
+    runtime.block_on(async {
+        let mut response = {
+            let mut sending = Box::pin(build(client).timeout(Duration::from_secs(seconds)).send());
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return Err(io::Error::other(
+                        "Request cancelled; external outcome may be uncertain",
+                    ));
+                }
+                if let Ok(result) =
+                    tokio::time::timeout(Duration::from_millis(25), &mut sending).await
+                {
+                    break result.map_err(|e| {
+                        if e.is_connect() {
+                            io::Error::new(
+                                io::ErrorKind::ConnectionRefused,
+                                "Connection failed before request dispatch",
+                            )
+                        } else {
+                            io::Error::other("Request failed; external outcome may be uncertain")
+                        }
+                    })?;
+                }
+            }
+        };
+        let status = response.status().as_u16();
+        let mut total = 0usize;
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return Err(io::Error::other(
+                    "Request cancelled; external outcome may be uncertain",
+                ));
+            }
+            let next = match tokio::time::timeout(Duration::from_millis(25), response.chunk()).await
+            {
+                Ok(result) => result.map_err(|_| {
+                    io::Error::other("Response interrupted; external outcome may be uncertain")
+                })?,
+                Err(_) => continue,
+            };
+            let Some(chunk) = next else { break };
+            total = total.saturating_add(chunk.len());
+            if total > cap {
+                return Err(io::Error::other(
+                    "Response exceeded limit; external outcome may be uncertain",
+                ));
+            }
+            pending.extend_from_slice(&chunk);
+            while let Some(index) = pending.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = pending.drain(..=index).collect();
+                let text = String::from_utf8_lossy(&line);
+                let text = text.trim();
+                if !text.is_empty() {
+                    on_line(text);
+                }
+            }
+        }
+        let text = String::from_utf8_lossy(&pending);
+        let text = text.trim();
+        if !text.is_empty() {
+            on_line(text);
+        }
+        Ok(Response {
+            status,
+            body: String::new(),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +231,39 @@ mod tests {
         let result = send(|http| http.get(url), 20, 1024, &stop);
         assert!(result.err().unwrap().to_string().contains("cancelled"));
         assert!(start.elapsed() < Duration::from_millis(450));
+        server.join().unwrap();
+    }
+    #[test]
+    fn streamed_lines_arrive_in_order_and_unterminated_bodies_still_parse() {
+        use std::{io::Read, io::Write, net::TcpListener, sync::Arc};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = std::thread::spawn(move || {
+            for body in ["{\"a\":1}\n{\"a\":2}\n{\"a\":3}", "{\"single\":true}"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0; 512];
+                let _ = stream.read(&mut buf);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let mut lines = Vec::new();
+        let response = send_lines(|http| http.get(url.clone()), 20, 1024, &stop, &mut |l| {
+            lines.push(l.to_owned())
+        })
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(lines, ["{\"a\":1}", "{\"a\":2}", "{\"a\":3}"]);
+        let mut single = Vec::new();
+        send_lines(|http| http.get(url.clone()), 20, 1024, &stop, &mut |l| {
+            single.push(l.to_owned())
+        })
+        .unwrap();
+        assert_eq!(single, ["{\"single\":true}"]);
         server.join().unwrap();
     }
 }

@@ -51,7 +51,14 @@ pub fn project_directory(message: &str) -> Option<PathBuf> {
             .collect();
         ends.push(tail.len());
         for end in ends.into_iter().rev() {
-            let path = Path::new(tail[..end].trim_end());
+            let mut path = Path::new(tail[..end].trim_end().trim_end_matches(['.', '?', '!']));
+            // A named file selects its containing folder (2026-10-24), so
+            // "read C:\\Users\\me\\Desktop\\notes.txt" works on the Desktop.
+            if path.is_file()
+                && let Some(parent) = path.parent()
+            {
+                path = parent;
+            }
             if crate::safe_dir(path).is_ok()
                 && let Ok(path) = std::fs::canonicalize(path)
             {
@@ -122,6 +129,21 @@ mod tests {
         assert_eq!(
             relative_path(&canonical, &other.to_string_lossy()),
             other.to_string_lossy()
+        );
+    }
+    #[test]
+    fn a_named_file_selects_its_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("notes.txt");
+        std::fs::write(&file, "x").unwrap();
+        let canonical = std::fs::canonicalize(temp.path()).unwrap();
+        assert_eq!(
+            project_directory(&format!("read {} and summarize it.", file.display())),
+            Some(canonical.clone())
+        );
+        assert_eq!(
+            project_directory(&format!("delete {}.", file.display())),
+            Some(canonical)
         );
     }
 }

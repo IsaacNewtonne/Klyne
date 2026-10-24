@@ -62,6 +62,8 @@ The Windows installer adds `klyne.cmd` beside Cargo in its existing PATH directo
 
 Select your provider in Settings and check the connection. Enable only the tools needed for your task. Terminal and desktop access can act on your real computer; the public demo has neither capability.
 
+Small local models (2026-10-24): Ollama models of 14B or fewer use native tool calls and a compact tool mode automatically, and deletes, overwrites, destructive commands and send/buy/post clicks pause for **Approve once / Approve for this conversation / Decline**. `scripts/start-klyne.ps1` preloads the model (`-WarmModel`, `-NoWarmup`). Using your real Chrome is opt-in. See [native tools and approvals](docs/native-tools-2026-10-24.md).
+
 With Terminal access enabled, you can include an existing project folder directly in your chat request. If the conversation still uses its default workspace and the request identifies one folder, Klyne selects it automatically. Absolute file paths inside that project are accepted, and reading a folder lists its contents. An explicitly selected project is preserved; ambiguous folder references are not automatically selected.
 
 The runtime stores local conversations and generated artifacts under `workspace/`, which is excluded from Git. No model weights are bundled. Chrome or Edge is needed for browser workflows; Node/npm is needed for the curated browser MCP adapter. See [provider setup](docs/studio-providers.md) and [app connections](docs/app-connections.md).

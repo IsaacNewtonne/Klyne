@@ -310,9 +310,87 @@ pub fn execution_request(message: &str) -> bool {
         .filter(|w| !w.is_empty())
         .collect();
     let verbs = [
-        "open", "write", "create", "save", "edit", "convert", "find", "search", "browse",
-        "research", "inspect", "run", "install", "download", "upload", "delete", "send", "build",
-        "remember", "launch",
+        "open",
+        "write",
+        "create",
+        "save",
+        "edit",
+        "convert",
+        "find",
+        "search",
+        "browse",
+        "research",
+        "inspect",
+        "run",
+        "install",
+        "download",
+        "upload",
+        "delete",
+        "send",
+        "build",
+        "remember",
+        "launch",
+        "list",
+        "show",
+        "read",
+        "check",
+        "remove",
+        "move",
+        "copy",
+        "rename",
+        "make",
+        "play",
+        "close",
+        "type",
+        "click",
+        "email",
+        "message",
+        "post",
+        "fetch",
+        "get",
+        "look",
+        "scan",
+        "update",
+        "fix",
+        "start",
+        "stop",
+        "kill",
+        "organize",
+        "clean",
+        "summarize",
+        "summarise",
+        "translate",
+        "schedule",
+        "navigate",
+        "visit",
+        "buy",
+        "order",
+        "compose",
+        "draft",
+        "generate",
+        "set",
+        "change",
+        "turn",
+        "enable",
+        "disable",
+        "restart",
+        "shutdown",
+        "count",
+        "compare",
+        "sort",
+        "extract",
+        "unzip",
+        "zip",
+        "print",
+        "display",
+        "screenshot",
+        "watch",
+        "monitor",
+        "test",
+        "debug",
+        "deploy",
+        "reply",
+        "tweet",
     ];
     let directive = [
         "i want you to",
@@ -326,6 +404,96 @@ pub fn execution_request(message: &str) -> bool {
     .any(|p| lower.contains(p));
     words.first().is_some_and(|w| verbs.contains(w))
         || (directive && words.iter().any(|w| verbs.contains(w)))
+}
+/// Clearly conversational input (greetings, thanks, general questions with
+/// no files, paths, URLs or action verbs). Anything else goes to the
+/// planner/worker, which has tools; when unsure, this returns false.
+pub fn conversational(message: &str) -> bool {
+    let lower = message.trim().to_lowercase();
+    if lower.is_empty() || execution_request(&lower) {
+        return false;
+    }
+    if crate::performance::greeting(&lower) {
+        return true;
+    }
+    let looks_like_target = lower.contains(":\\")
+        || lower.contains("http")
+        || lower.contains("www.")
+        || lower.contains('/')
+        || lower.contains('\\')
+        || lower.split_whitespace().any(|w| {
+            let w = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '.');
+            w.contains('.')
+                && w.rsplit('.').next().is_some_and(|e| {
+                    (2..=4).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphabetic())
+                })
+        });
+    if looks_like_target {
+        return false;
+    }
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .collect();
+    // Requests about the user's machine or live state need tools.
+    let tool_nouns = [
+        "file",
+        "files",
+        "folder",
+        "folders",
+        "desktop",
+        "screen",
+        "window",
+        "app",
+        "apps",
+        "browser",
+        "chrome",
+        "email",
+        "inbox",
+        "computer",
+        "pc",
+        "disk",
+        "drive",
+        "process",
+        "weather",
+        "news",
+        "price",
+        "today",
+        "latest",
+        "current",
+        "download",
+        "downloads",
+        "documents",
+        "spotify",
+        "youtube",
+        "discord",
+    ];
+    if words.iter().any(|w| tool_nouns.contains(w)) {
+        return false;
+    }
+    let social = [
+        "thanks",
+        "thank",
+        "ok",
+        "okay",
+        "cool",
+        "nice",
+        "great",
+        "lol",
+        "bye",
+        "goodnight",
+        "yes",
+        "no",
+        "sure",
+    ];
+    let question = [
+        "what", "why", "how", "who", "when", "where", "which", "is", "are", "do", "does",
+        "explain", "tell", "define",
+    ];
+    words
+        .first()
+        .is_some_and(|w| social.contains(w) || question.contains(w))
+        || lower.ends_with('?')
 }
 fn answer(
     studio: &Studio,

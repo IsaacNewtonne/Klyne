@@ -4185,3 +4185,246 @@ fn voice_actions_bypass_conversation_and_use_the_existing_task_engine() {
     );
     assert_eq!(fixture.join().unwrap().len(), 4);
 }
+
+// ---- 2026-10-24 fix plan: native tools, text fallback, destructive gate, routing ----
+fn tool_reply(name: &str, arguments: Value) -> Value {
+    json!({"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":name,"arguments":arguments}}]}})
+}
+fn content_reply(content: &str) -> Value {
+    json!({"message":{"role":"assistant","content":content}})
+}
+
+/// The worker thread may still be releasing the conversation for a moment
+/// after the paused state is saved; retry only that specific refusal.
+fn resolve_when_idle(s: &Server, id: &str, body: Value) -> Value {
+    for _ in 0..100 {
+        let r = s.api(&format!("/api/chats/{id}/resolve"), Some(body.clone()));
+        if r["error"] != "Stop the conversation before resolving an action" {
+            return r;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("conversation never became idle");
+}
+
+#[test]
+fn ollama_native_tool_calls_drive_the_worker_with_keep_alive_and_context() {
+    let s = Server::new();
+    let (endpoint, fixture) = fixture_service(
+        vec![
+            content_reply(&plan().to_string()),
+            tool_reply(
+                "write_file",
+                json!({"path":"greeting.txt","contents":"Hello there"}),
+            ),
+            tool_reply("finish", json!({"summary":"Saved greeting.txt"})),
+            // Arguments may arrive as a JSON string.
+            tool_reply(
+                "finish",
+                json!("{\"summary\":\"greeting.txt says Hello there\"}"),
+            ),
+        ],
+        true,
+    );
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let saved = fs::read_to_string(
+        std::path::Path::new(chat["workspace"].as_str().unwrap()).join("greeting.txt"),
+    )
+    .unwrap();
+    assert_eq!(saved, "Hello there");
+    let calls = fixture.join().unwrap();
+    assert_eq!(calls.len(), 4);
+    for call in &calls {
+        assert_eq!(call["keep_alive"], "30m", "{call}");
+        assert_eq!(call["options"]["num_ctx"], 16384, "{call}");
+        assert_eq!(call["stream"], true);
+    }
+    // Planner keeps JSON mode; worker and reviewer get native tools.
+    assert_eq!(calls[0]["format"], "json");
+    assert!(calls[0].get("tools").is_none());
+    for call in &calls[1..] {
+        assert!(call.get("format").is_none(), "{call}");
+        let names: Vec<&str> = call["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"finish") && names.contains(&"list_dir"),
+            "{names:?}"
+        );
+    }
+    let reviewer_tools = calls[3]["tools"].to_string();
+    assert!(!reviewer_tools.contains("\"write_file\""));
+    assert!(reviewer_tools.contains("request_repair"));
+}
+
+#[test]
+fn strict_text_tool_call_fallback_works_and_prose_is_not_executed() {
+    let s = Server::new();
+    let (endpoint, fixture) = fixture_service(
+        vec![
+            content_reply(&plan().to_string()),
+            // Prose that merely mentions a tool call is wrapped as a summary;
+            // the worker refusal check does not apply to it.
+            content_reply(
+                "<think>plan it</think><tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"greeting.txt\",\"contents\":\"Hi\"}}</tool_call>",
+            ),
+            content_reply(
+                "<tool_call>{\"name\":\"finish\",\"arguments\":{\"summary\":\"Saved greeting.txt\"}}</tool_call>",
+            ),
+            content_reply(
+                "Done. I wrote <tool_call>{\"name\":\"delete_path\",\"arguments\":{\"path\":\"greeting.txt\"}}</tool_call> as an example.",
+            ),
+        ],
+        true,
+    );
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let workspace = std::path::Path::new(chat["workspace"].as_str().unwrap()).to_path_buf();
+    // The narrated delete inside prose never executed.
+    assert_eq!(
+        fs::read_to_string(workspace.join("greeting.txt")).unwrap(),
+        "Hi"
+    );
+    assert!(chat.to_string().contains("as an example"));
+    assert_eq!(fixture.join().unwrap().len(), 4);
+}
+
+#[test]
+fn delete_pauses_for_approval_and_runs_only_after_approve_once() {
+    let s = Server::new();
+    let project = s.root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("old.txt"), "keep me until approved").unwrap();
+    let delete = tool_reply("delete_path", json!({"path":"old.txt"}));
+    let (endpoint, fixture) = fixture_service(
+        vec![
+            content_reply(&json!({"summary":"Delete the file","tasks":[{"agent":"Assistant","instruction":"Delete old.txt"}]}).to_string()),
+            delete.clone(),
+            // After approval the worker retries the identical proposal.
+            delete,
+            tool_reply("finish", json!({"summary":"Deleted old.txt"})),
+            tool_reply("list_dir", json!({"path":"."})),
+            tool_reply("finish", json!({"summary":"old.txt is no longer in the folder"})),
+        ],
+        true,
+    );
+    let mut body = request(&endpoint);
+    body["message"] = json!("delete old.txt");
+    body["access"] = json!({"web":false,"terminal":true,"apps":false,"desktop":false});
+    body["workspace"] = json!(project);
+    let created = s.api("/api/chats", Some(body.clone()));
+    let id = created["id"].as_str().unwrap().to_string();
+    let paused = s.wait(&id);
+    assert_eq!(paused["status"], "Interrupted", "{paused}");
+    assert_eq!(
+        paused["pending"]["proposal"]["kind"], "destructive",
+        "{paused}"
+    );
+    assert_eq!(paused["pending"]["proposal"]["category"], "delete_path");
+    assert!(project.join("old.txt").exists(), "deleted without approval");
+    let resolved = resolve_when_idle(
+        &s,
+        &id,
+        json!({"request_id":paused["pending"]["request_id"],"disposition":"approved","scope":"once","note":"ok"}),
+    );
+    assert_eq!(resolved["resolved"], true, "{resolved}");
+    let after = s.api(&format!("/api/chats/{id}"), None);
+    assert_eq!(
+        after["execution"]["destructive_grants"][0]["scope"], "once",
+        "{after}"
+    );
+    assert!(project.join("old.txt").exists());
+    body["id"] = json!(id);
+    body["resume"] = json!(true);
+    body["message"] = json!("Continue the saved goal after approval.");
+    body.as_object_mut().unwrap().remove("workspace");
+    s.api("/api/chats", Some(body));
+    let done = s.wait(&id);
+    assert_eq!(done["status"], "Completed", "{done}");
+    assert!(!project.join("old.txt").exists());
+    // The once-grant was consumed.
+    assert_eq!(done["execution"]["destructive_grants"], json!([]), "{done}");
+    assert_eq!(fixture.join().unwrap().len(), 6);
+}
+
+#[test]
+fn declined_delete_never_runs() {
+    let s = Server::new();
+    let project = s.root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("old.txt"), "x").unwrap();
+    let (endpoint, fixture) = fixture_service(
+        vec![
+            content_reply(&json!({"summary":"Delete","tasks":[{"agent":"Assistant","instruction":"Delete old.txt"}]}).to_string()),
+            tool_reply("delete_path", json!({"path":"old.txt"})),
+        ],
+        true,
+    );
+    let mut body = request(&endpoint);
+    body["message"] = json!("delete old.txt");
+    body["access"] = json!({"web":false,"terminal":true,"apps":false,"desktop":false});
+    body["workspace"] = json!(project);
+    let created = s.api("/api/chats", Some(body));
+    let id = created["id"].as_str().unwrap().to_string();
+    let paused = s.wait(&id);
+    assert_eq!(
+        paused["pending"]["proposal"]["kind"], "destructive",
+        "{paused}"
+    );
+    let declined = resolve_when_idle(
+        &s,
+        &id,
+        json!({"request_id":paused["pending"]["request_id"],"disposition":"abandon","note":"no"}),
+    );
+    assert_eq!(declined["resolved"], true, "{declined}");
+    let after = s.api(&format!("/api/chats/{id}"), None);
+    assert!(after["pending"].is_null(), "{after}");
+    assert_eq!(after["execution"]["destructive_grants"], json!([]));
+    assert!(project.join("old.txt").exists());
+    assert_eq!(fixture.join().unwrap().len(), 2);
+}
+
+#[test]
+fn voice_action_requests_skip_the_voice_route_and_refusals_fall_through() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        json!({"decision":"act","action":{"tool":"list_dir","path":"."}}),
+        complete("The workspace is empty."),
+        complete("The workspace is empty."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("list the files on my desktop");
+    body["voice_turn"] = json!(true);
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let calls = fixture.join().unwrap();
+    let first: Value =
+        serde_json::from_str(calls[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(first["role"], "planner", "{first}");
+
+    // A conversational voice question whose answer is a refusal is retried,
+    // then handed to the planner instead of ending with "I can't".
+    let (endpoint, fixture) = model(vec![
+        complete("I don't have access to your computer."),
+        complete("As an AI, I can't do that."),
+        plan(),
+        json!({"decision":"act","action":{"tool":"list_dir","path":"."}}),
+        complete("Done."),
+        complete("Done."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("what is in here?");
+    body["voice_turn"] = json!(true);
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(fixture.join().unwrap().len(), 6);
+}

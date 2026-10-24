@@ -1,4 +1,4 @@
-param([switch]$NoBrowser)
+param([switch]$NoBrowser, [string]$WarmModel = $(if ($env:KLYNE_WARM_MODEL) { $env:KLYNE_WARM_MODEL } else { 'qwen3.5:9b' }), [switch]$NoWarmup)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $root = Join-Path $repo 'workspace\studio'
@@ -47,6 +47,26 @@ function Get-KlyneProcess {
         return $process
     } catch { return $null }
 }
+
+# Warm the local model (2026-10-24) so the first request does not pay the
+# 10-60 s load. Best effort, in its own hidden process so it overlaps the
+# build check below; keep_alive/num_ctx match what Klyne sends.
+function Start-KlyneModelWarmup {
+    if ($NoWarmup -or [string]::IsNullOrWhiteSpace($WarmModel)) { return }
+    try {
+        $null = Invoke-RestMethod 'http://127.0.0.1:11434/api/version' -TimeoutSec 2
+    } catch {
+        Write-Host 'Ollama is not running; skipping model warm-up.'
+        return
+    }
+    $body = (@{ model = $WarmModel; prompt = ''; keep_alive = '30m'; options = @{ num_ctx = 16384 } } | ConvertTo-Json -Compress).Replace("'", "''")
+    $command = "try { Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:11434/api/generate' -ContentType 'application/json' -Body '$body' -TimeoutSec 180 | Out-Null } catch {}"
+    # -EncodedCommand keeps the JSON quotes intact across the process boundary.
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-EncodedCommand', $encoded) -WindowStyle Hidden | Out-Null
+    Write-Host "Warming $WarmModel in Ollama..."
+}
+Start-KlyneModelWarmup
 
 $running = Get-KlyneProcess
 $alreadyRunning = [bool]$running

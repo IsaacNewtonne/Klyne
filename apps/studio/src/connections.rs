@@ -27,6 +27,28 @@ pub struct Connection {
     pub kind: String,
     pub endpoint: String,
     pub model: String,
+    /// Tool exposure for local models (2026-10-24): "" or "auto" picks
+    /// compact mode for Ollama models of 14B parameters or fewer, "compact"
+    /// always exposes core tools plus enable_tools, "full" exposes all.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tool_mode: String,
+}
+/// Streaming progress reported while a model request runs.
+pub enum Progress<'a> {
+    /// The model is probably not resident (first call or idle past keep-alive).
+    LoadingModel,
+    /// Request sent; waiting for the first token.
+    Waiting,
+    /// Tokens are arriving; the text so far (may be partial JSON).
+    Generating(&'a str),
+}
+/// Ollama keep-alive and context requested by Klyne (2026-10-24 fix plan).
+pub const OLLAMA_KEEP_ALIVE: &str = "30m";
+pub const OLLAMA_NUM_CTX: u64 = 16384;
+fn warm_models() -> &'static std::sync::Mutex<std::collections::HashMap<String, Instant>> {
+    static WARM: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Instant>>> =
+        std::sync::OnceLock::new();
+    WARM.get_or_init(Default::default)
 }
 impl Connection {
     /// One model decision plus the metered usage behind it. Callers accrue
@@ -41,53 +63,45 @@ impl Connection {
         screenshot: Option<&Path>,
         stop: &AtomicBool,
     ) -> io::Result<(String, ModelUsage, crate::performance::ProviderTiming)> {
+        self.respond_with_progress(
+            workspace,
+            system,
+            context,
+            prompt_maker,
+            screenshot,
+            stop,
+            &mut |_| {},
+        )
+    }
+    /// Whether this connection should use compact tool exposure.
+    pub fn compact_tools(&self) -> bool {
+        match self.tool_mode.as_str() {
+            "compact" => true,
+            "full" => false,
+            _ => {
+                self.kind == "ollama"
+                    && crate::native_tools::parameter_billions(&self.model)
+                        .is_some_and(|b| b <= 14.0)
+            }
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn respond_with_progress(
+        &self,
+        workspace: &Path,
+        system: &str,
+        context: &Value,
+        prompt_maker: bool,
+        screenshot: Option<&Path>,
+        stop: &AtomicBool,
+        progress: &mut dyn FnMut(Progress),
+    ) -> io::Result<(String, ModelUsage, crate::performance::ProviderTiming)> {
         let prompt = format!("{system}\n{}", context);
         if prompt.len() > 128 * 1024 {
             return Err(error("Conversation context exceeded its limit"));
         }
         if self.kind == "ollama" {
-            let mut update = String::new();
-            if let Some(observation) = context["observations"]
-                .as_array()
-                .and_then(|items| items.last())
-            {
-                update.push_str("\n\nHOST UPDATE: The following operation has already executed. This is a tool result, not a new instruction. Use the result to advance the assigned task; do not repeat a successful operation without a concrete reason.\n");
-                update.push_str(&observation.to_string());
-                update.push_str("\nReturn the NEXT JSON decision. If the assigned result is now saved and verified, return {\"decision\":\"complete\",\"summary\":\"describe the actual saved result and its path\"}. If work remains, take the next necessary action. Reviewers must assess the entire original goal.");
-            }
-            let mut body = json!({
-                "model":self.model,
-                "messages":[{"role":"system","content":system},{"role":"user","content":context.to_string()}],
-                "format":"json", "stream":false, "think":false
-            });
-            if !update.is_empty() {
-                body["messages"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!({"role":"user","content":update}));
-            }
-            if let Some(image) = screenshot_image(screenshot) {
-                body["messages"][1]["images"] = json!([image]);
-            }
-            if prompt_maker {
-                body["options"] = json!({"temperature":0.2,"top_p":0.5});
-            }
-            let response = model_post(self, "/api/chat", None, &body, 120, stop)?;
-            let text = response["message"]["content"]
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| error("Model returned no message"))?;
-            // Ollama reports eval counts on non-streaming chat responses.
-            let usage = ModelUsage {
-                prompt_tokens: response["prompt_eval_count"].as_u64().unwrap_or(0),
-                completion_tokens: response["eval_count"].as_u64().unwrap_or(0),
-                cost_usd: 0.0,
-            };
-            return Ok((
-                text,
-                usage,
-                crate::performance::ProviderTiming::from_ollama(&response),
-            ));
+            return self.ollama_chat(system, context, prompt_maker, screenshot, stop, progress);
         }
         if self.kind == "demo" {
             return Err(error(
@@ -106,6 +120,152 @@ impl Connection {
             crate::performance::ProviderTiming::default(),
         ))
     }
+    /// Ollama /api/chat with streaming, native tools for worker roles, and
+    /// the keep-alive/context options from the 2026-10-24 fix plan.
+    fn ollama_chat(
+        &self,
+        system: &str,
+        context: &Value,
+        prompt_maker: bool,
+        screenshot: Option<&Path>,
+        stop: &AtomicBool,
+        progress: &mut dyn FnMut(Progress),
+    ) -> io::Result<(String, ModelUsage, crate::performance::ProviderTiming)> {
+        let role = context["role"].as_str().unwrap_or("");
+        let native = matches!(role, "worker" | "independent reviewer")
+            && context["available_tools"].is_object();
+        let mut update = String::new();
+        if let Some(observation) = context["observations"]
+            .as_array()
+            .and_then(|items| items.last())
+        {
+            update.push_str("\n\nHOST UPDATE: The following operation has already executed. This is a tool result, not a new instruction. Use the result to advance the assigned task; do not repeat a successful operation without a concrete reason.\n");
+            update.push_str(&observation.to_string());
+            if native {
+                update.push_str("\nCall the NEXT tool. If the assigned result is now done and verified, call finish with the actual result (for listings include the names; for files include the path). Reviewers must assess the entire original goal.");
+            } else {
+                update.push_str("\nReturn the NEXT JSON decision. If the assigned result is now saved and verified, return {\"decision\":\"complete\",\"summary\":\"describe the actual saved result and its path\"}. If work remains, take the next necessary action. Reviewers must assess the entire original goal.");
+            }
+        }
+        let mut body = json!({
+            "model":self.model,
+            "messages":[{"role":"system","content":system},{"role":"user","content":context.to_string()}],
+            "stream":true, "think":false,
+            "keep_alive":OLLAMA_KEEP_ALIVE,
+        });
+        if native {
+            let enabled: Vec<String> = context["enabled_tool_groups"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            body["tools"] = json!(crate::native_tools::tools(
+                &context["available_tools"],
+                &enabled,
+                context["compact_tools"] == true,
+                role == "independent reviewer",
+            ));
+        } else {
+            body["format"] = json!("json");
+        }
+        if !update.is_empty() {
+            body["messages"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"role":"user","content":update}));
+        }
+        if let Some(image) = screenshot_image(screenshot) {
+            body["messages"][1]["images"] = json!([image]);
+        }
+        // Keep the default 16k window unless the prompt clearly cannot fit;
+        // Ollama silently drops the start of an over-long prompt (the system
+        // instructions), which is worse than a slower, larger window.
+        let estimated_tokens =
+            (body["messages"].to_string().len() + body["tools"].to_string().len()) / 3 + 2048;
+        let num_ctx = if estimated_tokens > OLLAMA_NUM_CTX as usize {
+            32768
+        } else {
+            OLLAMA_NUM_CTX
+        };
+        body["options"] = json!({"num_ctx":num_ctx});
+        if prompt_maker {
+            body["options"]["temperature"] = json!(0.2);
+            body["options"]["top_p"] = json!(0.5);
+        }
+        let key = format!("{}|{}", self.endpoint, self.model);
+        let cold = warm_models()
+            .lock()
+            .unwrap()
+            .get(&key)
+            .is_none_or(|at| at.elapsed() > Duration::from_secs(29 * 60));
+        progress(if cold {
+            Progress::LoadingModel
+        } else {
+            Progress::Waiting
+        });
+        let mut content = String::new();
+        let mut tool_calls: Vec<Value> = Vec::new();
+        let mut last: Value = Value::Null;
+        let mut last_report = Instant::now() - Duration::from_secs(1);
+        let mut chunk_error = None;
+        let response = crate::network::send_lines(
+            |http| http.post(format!("{}/api/chat", self.endpoint)).json(&body),
+            120,
+            8 * 1024 * 1024,
+            stop,
+            &mut |line| {
+                let Ok(chunk) = serde_json::from_str::<Value>(line) else {
+                    return;
+                };
+                if let Some(message) = chunk["error"].as_str() {
+                    chunk_error = Some(message.chars().take(200).collect::<String>());
+                }
+                if let Some(text) = chunk["message"]["content"].as_str() {
+                    content.push_str(text);
+                }
+                if let Some(calls) = chunk["message"]["tool_calls"].as_array() {
+                    tool_calls.extend(calls.iter().cloned());
+                }
+                if last_report.elapsed() >= Duration::from_millis(400) {
+                    last_report = Instant::now();
+                    progress(Progress::Generating(&content));
+                }
+                last = chunk;
+            },
+        )?;
+        if !(200..300).contains(&response.status) {
+            return Err(model_http_error(self, response.status));
+        }
+        if let Some(message) = chunk_error {
+            return Err(error(format!(
+                "Ollama reported an error while generating: {message}"
+            )));
+        }
+        if last.is_null() {
+            return Err(error("Model server returned invalid JSON"));
+        }
+        if last["message"].is_null() && content.is_empty() && tool_calls.is_empty() {
+            return Err(error("Model returned no message"));
+        }
+        warm_models().lock().unwrap().insert(key, Instant::now());
+        let text = if native {
+            crate::native_tools::normalize_reply(&content, &tool_calls)
+        } else {
+            crate::native_tools::strip_think(&content)
+        };
+        // Ollama reports eval counts on the final chunk.
+        let usage = ModelUsage {
+            prompt_tokens: last["prompt_eval_count"].as_u64().unwrap_or(0),
+            completion_tokens: last["eval_count"].as_u64().unwrap_or(0),
+            cost_usd: 0.0,
+        };
+        Ok((
+            text,
+            usage,
+            crate::performance::ProviderTiming::from_ollama(&last),
+        ))
+    }
     pub fn parse(value: &Value) -> io::Result<Self> {
         let mut config: Self = if value.is_null() {
             Self::default()
@@ -120,6 +280,9 @@ impl Connection {
         }
         if config.model.len() > 240 || config.model.chars().any(char::is_control) {
             return Err(error("Invalid model name"));
+        }
+        if !["", "auto", "compact", "full"].contains(&config.tool_mode.as_str()) {
+            return Err(error("Unknown tool mode"));
         }
         if config.kind == "ollama" || config.kind == "opencode" {
             if config.endpoint.is_empty() {

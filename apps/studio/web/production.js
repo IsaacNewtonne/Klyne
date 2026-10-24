@@ -403,7 +403,9 @@
     setText($('prod-title'),headline);
     root.querySelector('.prod-pipeline').setAttribute('aria-label','Workflow stage: '+status);
     const operationText=activity.operations.map(o=>o.operation).join(' · ');
-    const live=online?(waiting?(operationText || `Awaiting ${chat?.activity?.agent || chat?.activity?.role || 'model'} response`):inTool?operationText:status):'Connection lost · showing last known state';
+    const phase=chat?.activity?.phase,since=chat?.activity?.started_at?Math.max(0,Math.round((Date.now()-Number(chat.activity.started_at))/1000)):0,who=chat?.activity?.agent || chat?.activity?.role || 'model';
+    const phaseText=phase==='loading_model'?`Loading the model into memory for the ${who} (${since}s; the first request can take up to a minute)`:phase==='thinking'?`The ${who} model is thinking (${since}s)`:phase==='generating'?`The ${who} model is writing a reply (${chat.activity.generated_chars||0} characters, ${since}s)`:'';
+    const live=online?(waiting?(operationText || phaseText || `Awaiting ${who} response`):inTool?operationText:status):'Connection lost · showing last known state';
     if($('prod-live').textContent!==live) $('prod-live').textContent=live;
     const doneSteps=tasks.filter(t=>t.status==='Done').length;
     $('prod-metrics').textContent=tasks.length?`${doneSteps} of ${tasks.length} action steps${status!=='Completed' && doneSteps===tasks.length?' · final review pending':''}`: 'Preparing';
