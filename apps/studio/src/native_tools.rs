@@ -30,6 +30,8 @@ const CORE_META: &[&str] = &[
     "capability_list",
     "skill_read",
     "memory_read",
+    "memory_save",
+    "memory_forget",
     "app_list",
 ];
 const CORE_TERMINAL: &[&str] = &["run_shell", "ask_model"];
@@ -565,6 +567,26 @@ pub fn call_to_decision(name: &str, raw_arguments: &Value) -> Option<Value> {
             {
                 return Some(json!({"decision":"act","action":{"tool":program}}));
             }
+            // Same for memory: `memory_save <name> <fact...>` and
+            // `memory_forget <name>` as shell programs.
+            if tool == "run_shell"
+                && let Some(program) = action.get("program").and_then(Value::as_str)
+                && matches!(program, "memory_save" | "memory_forget")
+                && let Some(args) = action.get("args").and_then(Value::as_array)
+                && let Some(name) = args.first().and_then(Value::as_str)
+            {
+                let rest: Vec<&str> = args[1..].iter().filter_map(Value::as_str).collect();
+                if program == "memory_forget" && rest.is_empty() {
+                    return Some(json!({"decision":"act","action":{"tool":program,"name":name}}));
+                }
+                if program == "memory_save" && !rest.is_empty() {
+                    let fact = rest.join(" ");
+                    return Some(
+                        json!({"decision":"act","action":{"tool":program,"name":name,
+                        "description":name.replace(['_', '-'], " "),"instructions":fact}}),
+                    );
+                }
+            }
             Some(json!({"decision":"act","action":Value::Object(action)}))
         }
     }
@@ -738,6 +760,21 @@ mod tests {
         assert_eq!(
             call_to_decision("run_shell", &json!({"program":"cmd","args":[]})).unwrap()["action"]["tool"],
             "run_shell"
+        );
+        let saved = call_to_decision(
+            "run_shell",
+            &json!({"program":"memory_save","args":["favorite_color_test","teal"]}),
+        )
+        .unwrap();
+        assert_eq!(saved["action"]["tool"], "memory_save");
+        assert_eq!(saved["action"]["name"], "favorite_color_test");
+        assert_eq!(saved["action"]["instructions"], "teal");
+        assert_eq!(
+            call_to_decision(
+                "run_shell",
+                &json!({"program":"memory_forget","args":["x"]})
+            ),
+            Some(json!({"decision":"act","action":{"tool":"memory_forget","name":"x"}}))
         );
     }
 
