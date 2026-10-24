@@ -378,7 +378,11 @@ pub fn execute_with_policy(
                 crate::autonomy::validate_tool_contract(contract).map_err(err)?;
             }
             field(action, "program", 4096)?;
-            let args: Vec<String> = serde_json::from_value(action["args"].clone()).map_err(err)?;
+            // A missing or null `args` means no arguments (small models send null).
+            let args: Vec<String> = match &action["args"] {
+                Value::Null => Vec::new(),
+                v => serde_json::from_value(v.clone()).map_err(err)?,
+            };
             if args.len() > 128 {
                 return Err(err("Too many tool arguments"));
             }
