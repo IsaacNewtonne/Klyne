@@ -1973,6 +1973,32 @@ impl Chats {
                             &chat.execution.original_request
                         };
                         required(&review, "summary")?;
+                        if crate::quality::load(self.studio_root()).evidence {
+                            let latest_user = chat
+                                .messages
+                                .iter()
+                                .rev()
+                                .find(|m| m.role == "user")
+                                .map(|m| m.text.clone())
+                                .unwrap_or_default();
+                            let window = chat
+                                .evidence
+                                .get(chat.execution.evidence_start..)
+                                .unwrap_or(&[]);
+                            if crate::verify::unsatisfied(window).is_empty()
+                                && let Some(done) = crate::verify::already_removed_answer(
+                                    &latest_user,
+                                    &chat.evidence,
+                                )
+                            {
+                                chat.evidence.push(json!({"agent":"Host verifier","action":"already_removed","ok":true,"summary":done.clone()}));
+                                push(chat, "assistant", "Klyne", &done);
+                                chat.status = "Completed".into();
+                                chat.execution.failure = None;
+                                self.save(chat)?;
+                                return Ok(());
+                            }
+                        }
                         let verify_started = Instant::now();
                         let evidence = chat
                             .evidence
