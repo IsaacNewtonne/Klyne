@@ -23,8 +23,11 @@ try {
             # 2026-10-24: names match loosely, and the new window comes back
             # as launched {window,pid} already focused, ready for typing.
             $appId = [string]$action.app_id
+            # Only a process started by this launch counts: apps such as
+            # Windows 11 Notepad may open a tab in the user's existing window,
+            # and that window must never be handed back as "launched".
             $before = @{}
-            foreach ($p in Get-Process) { if ($p.MainWindowHandle -ne 0) { $before[[string]$p.MainWindowHandle.ToInt64()] = $true } }
+            foreach ($p in Get-Process) { $before[$p.Id] = $true }
             $builtin = @{ 'notepad'='notepad.exe'; 'notepad.exe'='notepad.exe'; 'calc'='calc.exe'; 'calc.exe'='calc.exe'; 'calculator'='calc.exe' }
             $exe = $builtin[$appId.ToLowerInvariant()]
             if ($exe) {
@@ -51,12 +54,12 @@ try {
             }
             for ($i = 0; $i -lt 25 -and !$launched; $i++) {
                 Start-Sleep -Milliseconds 200
-                $fresh = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and !$before.ContainsKey([string]$_.MainWindowHandle.ToInt64()) })
+                $fresh = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and !$before.ContainsKey($_.Id) })
                 $pick = @($fresh | Where-Object { $want -contains $_.ProcessName }) + @($fresh) | Select-Object -First 1
                 if ($pick) { $launched = @{ window = [string]$pick.MainWindowHandle.ToInt64(); pid = $pick.Id; process_name = $pick.ProcessName; title = $pick.MainWindowTitle } }
             }
             if ($launched) { try { [KlyneDesktop]::Focus($launched.window) } catch { $launched['focus_error'] = $_.Exception.Message } }
-            else { Start-Sleep -Milliseconds 400 }
+            else { $launched = @{ window = $null; note = 'No new window appeared. The app may have opened inside an existing window (for example a new Notepad tab in the user''s window). Do not type into existing windows; stop and report this.' } }
         }
         'desktop_focus' { [KlyneDesktop]::Focus([string]$action.window) }
         'desktop_click' {

@@ -3205,6 +3205,27 @@ impl Chats {
         review: bool,
     ) -> io::Result<()> {
         guard(chat, stop, start)?;
+        // One launch per app per task (2026-10-24): repeated launches opened
+        // a pile of windows/tabs. Use the first result's launched.window.
+        if decision["action"]["tool"] == "desktop_launch" {
+            let app = decision["action"]["app_id"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase();
+            let app = app.trim_end_matches(".exe");
+            let again = chat.evidence.iter().any(|e| {
+                e["action"] == "desktop_launch"
+                    && e["ok"] == true
+                    && e["app_id"]
+                        .as_str()
+                        .is_some_and(|a| a.to_lowercase().trim_end_matches(".exe") == app)
+            });
+            if again {
+                return Err(err(format!(
+                    "'{app}' was already launched in this task. Use launched.window from that result (or desktop_observe); if it reported no new window, stop and report."
+                )));
+            }
+        }
         // Parse rejects disabled access, stale/unknown targets and
         // reviewer writes before anything touches the desktop.
         let action = match desktop::DesktopAction::parse(
@@ -3345,7 +3366,7 @@ impl Chats {
             data.push_str("\n[truncated]");
         }
         chat.evidence.push(
-            json!({"agent":agent,"action":tool,"ok":result["ok"]!=false,"summary":if result["known_not_applied"]==true {"Desktop recovery: input not applied"} else {"Desktop observation"},"data":data}),
+            json!({"agent":agent,"action":tool,"app_id":decision["action"]["app_id"],"ok":result["ok"]!=false,"summary":if result["known_not_applied"]==true {"Desktop recovery: input not applied"} else {"Desktop observation"},"data":data}),
         );
         if result["known_not_applied"] != true
             && let Some(check) = &postcondition

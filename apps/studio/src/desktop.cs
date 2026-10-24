@@ -29,6 +29,9 @@ public static class KlyneDesktop {
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window,uint flags);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint attach,uint to,bool on);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr window);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr window,int show);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
     [DllImport("user32.dll",SetLastError=true)] static extern bool GetCursorPos(out Point point);
@@ -87,6 +90,12 @@ public static class KlyneDesktop {
     public static void Focus(string id) {
         var window=Window(id,false);InputStarted=true;if(IsIconic(window))ShowWindow(window,9);
         SetForegroundWindow(window);Thread.Sleep(180);
+        if(GetForegroundWindow()!=window){
+            // 2026-10-24: a background helper may not take focus directly;
+            // share the foreground thread's input state for one attempt.
+            uint ignored;var fg=GetWindowThreadProcessId(GetForegroundWindow(),out ignored);var me=GetCurrentThreadId();
+            if(fg!=0&&fg!=me&&AttachThreadInput(me,fg,true)){try{BringWindowToTop(window);SetForegroundWindow(window);}finally{AttachThreadInput(me,fg,false);}Thread.Sleep(180);}
+        }
         if(GetForegroundWindow()!=window)throw new Exception("Windows refused foreground focus. Select the target app and retry.");
     }
     public static void CheckLayout(string id,int left,int top,int width,int height) {
