@@ -173,6 +173,139 @@
   prodCore.addEventListener('pointercancel',releaseSun);
   prodCore.addEventListener('pointerup',event=>{if(event.pointerType==='touch')releaseSun();});
   window.addEventListener('blur',releaseSun);
+  // Signal flow (2026-10-24): comets travel along each orb↔tool route, driven
+  // only by real activity events (tool:start/result/complete/error) and the
+  // pending approval. Canvas + requestAnimationFrame; the loop stops when idle.
+  const flow=(()=>{
+    const graphEl=$('prod-graph'),edgesEl=$('prod-edges');
+    const canvas=document.createElement('canvas');canvas.id='prod-flow';canvas.setAttribute('aria-hidden','true');
+    edgesEl.after(canvas);graphEl.classList.add('flow-on');
+    const ctx=canvas.getContext('2d');
+    let geo={routes:[],cx:0,cy:0,r:0,w:0,h:0},frame=0,frames=0,ops=[],approvalKey=null,failed=new Set(),uiColor='',showLines=true;
+    const comets=[],glows=new Map(),badges=new Map(),seenFlash=new Set(),opSeen=new Map();
+    const css=name=>getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const capColor=key=>css('--cap-'+(String(key).startsWith('app:')?'apps':key))||css('--brand')||'#ff8a3d';
+    const stColor=name=>css('--st-'+name)||'#ffffff';
+    function rgba(hex,a){const h=hex.replace('#','');const n=parseInt(h.length===3?h.split('').map(c=>c+c).join(''):h.slice(0,6),16);return `rgba(${n>>16&255},${n>>8&255},${n&255},${a})`;}
+    function point(R,t){const u=1-t;return[u*u*u*R.x1+3*u*u*t*R.c1x+3*u*t*t*R.c2x+t*t*t*R.x2,u*u*u*R.y1+3*u*u*t*R.c1y+3*u*t*t*R.c2y+t*t*t*R.y2];}
+    function resize(g){
+      geo=g;const dpr=Math.min(devicePixelRatio||1,2);
+      const W=Math.max(1,Math.round(g.w*dpr)),H=Math.max(1,Math.round(g.h*dpr));
+      if(canvas.width!==W||canvas.height!==H){canvas.width=W;canvas.height=H;}
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+      const es=getComputedStyle(edgesEl);showLines=es.display!=='none';
+      kick();
+    }
+    const fmt=ms=>ms==null||!isFinite(ms)||ms<0?'':ms<1000?Math.round(ms)+' ms':(ms/1000).toFixed(ms<10000?1:0)+' s';
+    function spawn(key,dir,color,speed,big){comets.push({key,dir,color,born:performance.now(),dur:speed,big:!!big});}
+    function sync(state,chat){
+      const now=performance.now(),connected=state.connected;
+      ops=connected?state.operations:[];
+      failed=new Set((state.failures||[]).map(f=>f.tool));
+      const p=chat?.pending?.proposal;
+      approvalKey=null;
+      if(p){const cat=window.klyneActivity.category;approvalKey=p.kind==='shell'||p.kind==='secret'?'terminal':p.kind==='delete'?(geo.routes.some(r=>r.key==='app:'+p.connection)?'app:'+p.connection:'apps'):(cat(p.action)||'files');}
+      for(const o of ops){
+        if(!opSeen.has(o.id)){opSeen.set(o.id,{at:now});if(!state.replaying)spawn(o.tool,1,capColor(o.tool),900,true);}
+        badges.set(o.tool,{text:o.operation||'Working',start:o.started_ms,status:o.status,live:true,until:Infinity});
+      }
+      for(const [id] of opSeen)if(!ops.some(o=>o.id===id))opSeen.delete(id);
+      for(const f of state.flashes||[]){
+        if(seenFlash.has(f.id))continue;seenFlash.add(f.id);
+        const ok=f.status!=='failed',color=stColor(ok?'done':'error');
+        spawn(f.tool,-1,color,750,true);
+        glows.set(f.tool,{color,at:now,ok});
+        const took=f.at_ms&&f.started_ms?f.at_ms-f.started_ms:null;
+        badges.set(f.tool,{text:(ok?'✓ ':'✕ ')+(f.operation||'Done'),ms:took,status:ok?'done':'failed',live:false,until:now+3500});
+      }
+      if(seenFlash.size>200)seenFlash.clear();
+      for(const [k,b] of badges)if(b.live&&!ops.some(o=>o.tool===k))badges.delete(k);
+      uiColor=css('--ui-state')||stColor('idle');
+      kick();
+    }
+    function animating(now){
+      if(comets.length)return true;
+      for(const g of glows.values())if(now-g.at<6000)return true;
+      for(const b of badges.values())if((b.live&&!motion.matches)||(!b.live&&b.until>now))return true;
+      if(!motion.matches&&(ops.length||approvalKey))return true;
+      return false;
+    }
+    function kick(){if(!frame)frame=requestAnimationFrame(draw);}
+    function badge(R,text,color,alpha){
+      const [x,y]=point(R,.5);ctx.font='600 11px "Segoe UI",system-ui,sans-serif';
+      const w=ctx.measureText(text).width+16,h=20;
+      ctx.globalAlpha=alpha;ctx.fillStyle='rgba(14,12,11,.92)';ctx.strokeStyle=color;ctx.lineWidth=1;
+      ctx.beginPath();ctx.roundRect(x-w/2,y-h/2,w,h,10);ctx.fill();ctx.stroke();
+      ctx.fillStyle=color;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(text,x,y+.5);ctx.globalAlpha=1;
+    }
+    function draw(now){
+      frame=0;frames++;ctx.clearRect(0,0,geo.w,geo.h);
+      if(document.hidden||root.hidden||conversation){return;}
+      {const es=getComputedStyle(edgesEl);showLines=es.display!=='none'&&parseFloat(es.opacity)>0;}
+      const still=motion.matches,breathe=still?1:.65+.35*Math.sin(now/380);
+      // State ring around the orb (fix #8): colour = current UI state.
+      if(geo.r>0){
+        const ring=uiColor||stColor('idle'),ap=approvalKey&&!still;
+        ctx.save();ctx.strokeStyle=rgba(ring,ap?.5+.35*Math.sin(now/380):.7);ctx.lineWidth=2;ctx.shadowColor=ring;ctx.shadowBlur=12;
+        ctx.beginPath();ctx.arc(geo.cx,geo.cy,geo.r*.98,0,Math.PI*2);ctx.stroke();ctx.restore();
+      }
+      if(showLines)for(const R of geo.routes){
+        const k=R.key,cap=capColor(k),active=ops.filter(o=>o.tool===k),g=glows.get(k);
+        let color=cap,alpha=.2,width=1,blur=0;
+        if(failed.has(k)){color=stColor('error');alpha=.35;}
+        if(g){const age=(now-g.at)/6000;if(age<1){color=age<.4?g.color:cap;alpha=Math.max(alpha,.85*(1-age)+.2*age);width=1+2*(1-age);blur=10*(1-age);}else glows.delete(k);}
+        if(active.length){const waiting=active.every(o=>o.status==='waiting');color=cap;alpha=waiting?.6:.95;width=waiting?2:3;blur=12;}
+        if(k===approvalKey){color=stColor('approval');alpha=.55+.4*(breathe-.65)/.35*(still?0:1)+(still?.35:0);width=3;blur=16;}
+        ctx.save();ctx.strokeStyle=rgba(color,Math.min(1,alpha));ctx.lineWidth=width;ctx.lineCap='round';
+        if(blur){ctx.shadowColor=color;ctx.shadowBlur=blur;}
+        if(failed.has(k)&&!active.length&&!g&&k!==approvalKey)ctx.setLineDash([4,5]);
+        ctx.beginPath();ctx.moveTo(R.x1,R.y1);ctx.bezierCurveTo(R.c1x,R.c1y,R.c2x,R.c2y,R.x2,R.y2);ctx.stroke();ctx.restore();
+        // Reduced motion: a static chevron shows direction instead of comets.
+        if(still&&(active.length||g)){const dir=active.length?(active[0].direction==='inbound'?-1:1):-1;const [ax,ay]=point(R,.62),[bx,by]=point(R,dir>0?.66:.58);const an=Math.atan2(by-ay,bx-ax);
+          ctx.save();ctx.fillStyle=color;ctx.translate(ax,ay);ctx.rotate(an);ctx.beginPath();ctx.moveTo(6,0);ctx.lineTo(-5,-5);ctx.lineTo(-5,5);ctx.closePath();ctx.fill();ctx.restore();}
+        if(k===approvalKey){const [hx,hy]=point(R,1);ctx.save();ctx.fillStyle=stColor('approval');ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=still?8:8+8*breathe;ctx.beginPath();ctx.arc(hx,hy,4.5,0,Math.PI*2);ctx.fill();ctx.restore();}
+      }
+      // Comets with glowing trails. Outbound = orb→tool, inbound = tool→orb.
+      if(showLines&&!still){
+        ctx.save();ctx.globalCompositeOperation='lighter';
+        for(let i=comets.length-1;i>=0;i--){
+          const c=comets[i],R=geo.routes.find(r=>r.key===c.key),t=(now-c.born)/c.dur;
+          if(!R||t>=1){comets.splice(i,1);continue;}
+          const e=t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+          const N=24,head=c.big?5:4;
+          for(let j=N;j>=1;j--){
+            const tt=Math.max(0,Math.min(1,e-j*.014));const pos=c.dir>0?tt:1-tt;const [x,y]=point(R,pos);
+            ctx.fillStyle=rgba(c.color,.6*(1-j/(N+1)));ctx.beginPath();ctx.arc(x,y,Math.max(.8,head*(1-j/(N+4))),0,Math.PI*2);ctx.fill();
+          }
+          {const pos=c.dir>0?e:1-e;const [x,y]=point(R,pos);
+            const halo=ctx.createRadialGradient(x,y,0,x,y,head*4);halo.addColorStop(0,rgba(c.color,.55));halo.addColorStop(1,rgba(c.color,0));
+            ctx.fillStyle=halo;ctx.beginPath();ctx.arc(x,y,head*4,0,Math.PI*2);ctx.fill();
+            ctx.fillStyle=rgba(c.color,1);ctx.shadowColor=c.color;ctx.shadowBlur=16;ctx.beginPath();ctx.arc(x,y,head,0,Math.PI*2);ctx.fill();
+            ctx.shadowBlur=0;ctx.fillStyle='rgba(255,255,255,.9)';ctx.beginPath();ctx.arc(x,y,head*.45,0,Math.PI*2);ctx.fill();}
+        }
+        ctx.restore();
+        // Active calls keep emitting: steady stream while running, slower while waiting.
+        for(const o of ops){const last=comets.findLast?.(c=>c.key===o.tool);const gap=o.status==='waiting'?1500:650;
+          if(!last||now-last.born>gap)spawn(o.tool,o.direction==='inbound'?-1:1,capColor(o.tool),o.status==='waiting'?1700:950,false);}
+      }else comets.length=0;
+      if(showLines)for(const R of geo.routes){
+        const b=badges.get(R.key);
+        if(R.key===approvalKey){badge(R,'⚠ Needs your approval',stColor('approval'),1);continue;}
+        if(!b)continue;
+        if(!b.live&&b.until<=now){badges.delete(R.key);continue;}
+        const took=b.live?(b.start?Date.now()-b.start:null):b.ms;
+        const color=b.status==='done'?stColor('done'):b.status==='failed'?stColor('error'):capColor(R.key);
+        badge(R,b.text+(took!=null&&fmt(took)?' · '+fmt(took):''),color,b.live?1:Math.min(1,(b.until-now)/600));
+      }
+      canvas.dataset.comets=String(comets.length);canvas.dataset.approval=approvalKey||'';
+      if(animating(now))frame=requestAnimationFrame(draw);
+      else if(still&&(glows.size||[...badges.values()].some(b=>b.live)))setTimeout(kick,500);
+    }
+    motion.addEventListener('change',kick);
+    document.addEventListener('visibilitychange',()=>{if(!document.hidden)kick();});
+    return {resize,sync,kick,state:()=>({frames,comets:comets.length,approval:approvalKey,ops:ops.map(o=>o.tool),glows:[...glows.keys()],badges:[...badges.entries()].map(([k,b])=>k+':'+b.text)})};
+  })();
+  window.klyneFlow=flow;
   function measureReactor(){
     if(root.hidden || conversation)return;
     const box=reactor.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,1.5);
@@ -187,8 +320,9 @@
       const x1=cx+Math.cos(angle)*r,y1=cy+Math.sin(angle)*r;
       const right=tx>cx,x2=(right?b.left:b.right)-graph.left,y2=ty;
       const path=`M${x1},${y1} C${(x1+x2)/2},${y1} ${(x1+x2)/2},${y2} ${x2},${y2}`;
-      routes.push({key,path,angle});
+      routes.push({key,path,angle,x1,y1,c1x:(x1+x2)/2,c1y:y1,c2x:(x1+x2)/2,c2y:y2,x2,y2});
     }
+    flow.resize({routes,cx,cy,r,w:graph.width,h:graph.height});
     updateRoutes();
   }
   function updateRoutes(){
@@ -207,6 +341,7 @@
       for(const flash of flashes)pathNode('result:'+flash.id,path,'energy-packet inbound result');
     });
     for(const node of [...svg.children])if(!keep.has(node.dataset.key))node.remove();
+    flow.sync(a,current?.snapshot);
   }
   function drawReactor(now) {
     reactorFrame=0;

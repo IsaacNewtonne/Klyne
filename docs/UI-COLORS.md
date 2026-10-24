@@ -38,3 +38,20 @@ A capability card uses its hue for the icon, a faint border when available, and 
 - Text minimum 12px (11px only for monospace metadata such as chips and step numbers).
 - All state/capability colours above pass WCAG AA (4.5:1) as text on the dark surfaces they are used on.
 - Do not add new colours ad hoc: add a role or capability variable here first.
+
+## Tool connection lines (orb to tool)
+
+Drawn on a canvas (#prod-flow) from real activity events only; the loop stops when idle.
+
+| Line state | Colour | Look |
+|---|---|---|
+| Idle | the capability's --cap-* colour | 1px, 20% opacity |
+| Call in flight (orb to tool) | --cap-* | 3px with glow; comets travel orb to tool; live badge "operation - elapsed" |
+| Waiting on a tool | --cap-* | 2px, slower comets |
+| Result returning (tool to orb) | --st-done (success) or --st-error (failure) | comet travels tool to orb; badge "check/cross operation - duration" for 3.5 s |
+| Afterglow | status colour, then --cap-* | fades over 6 s |
+| Needs approval | --st-approval | 3px amber, breathing, amber dot held at the tool end |
+| Last call failed | --st-error | dashed |
+| Orb ring | --ui-state | 2px ring, breathes only while approval is pending |
+
+Reduced motion: no comets or breathing; a static chevron shows direction.

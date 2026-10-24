@@ -42,7 +42,7 @@ setTimeout(()=>document.documentElement.classList.add('ui-ready'),1500);
     const id=data.id, named=category(data.action), tool=data.connection?'app:'+data.connection:(!data.tool || data.tool==='apps')?(named||data.tool):data.tool;
     if(type==='system:gpu_updated')gpuPercent=Number.isFinite(data.gpu_percent)?Math.max(0,Math.min(100,data.gpu_percent)):null;
     if(type==='system:cpu_updated')cpuPercent=Number.isFinite(data.cpu_percent)?Math.max(0,Math.min(100,data.cpu_percent)):null;
-    if(type==='tool:start' && id && tool) {failures.delete(tool);operations.set(id,{...data,tool,operation:data.operation||label(data.action),direction:data.direction||'outbound',status:'active'});}
+    if(type==='tool:start' && id && tool) {failures.delete(tool);operations.set(id,{...data,started_ms:data.at_ms,tool,operation:data.operation||label(data.action),direction:data.direction||'outbound',status:'active'});}
     if(type==='tool:waiting' && operations.has(id)) operations.set(id,{...operations.get(id),status:'waiting',operation:data.operation||'Awaiting response'});
     if(['tool:complete','tool:error'].includes(type)) {
       const old=operations.get(id);operations.delete(id);
@@ -63,7 +63,7 @@ setTimeout(()=>document.documentElement.classList.add('ui-ready'),1500);
     const records=chat?.activity_events||[];
     const gap=cursor>0 && records.length && records[0].seq>cursor+1;
     if(gap){operations.clear();flashes.clear();initialized=false;replaying=true;}
-    for(const event of records)if(event.seq>cursor){emit(event.type,event.data,!initialized);cursor=event.seq;}
+    for(const event of records)if(event.seq>cursor){emit(event.type,{...event.data,at_ms:event.at},!initialized);cursor=event.seq;}
     // Legacy snapshots can report a currently dispatched operation, but history
     // never becomes live activity. Approval/uncertainty is not execution.
     const running=['Planning','Working','Reviewing','Upgrading','Stopping'].includes(chat?.status);

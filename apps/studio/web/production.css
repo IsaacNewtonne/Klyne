@@ -749,7 +749,6 @@ html[data-ui=blocked]{--ui-state:var(--st-blocked)}html[data-ui=error]{--ui-stat
 /* Status line + orb */
 #prod-core-state{color:var(--ui-state)!important;font-size:13px!important;letter-spacing:.08em}
 #prod-core-state::before{content:attr(data-icon) ' ';}
-#prod-core::after{content:'';position:absolute;inset:14%;border-radius:50%;border:2px solid color-mix(in srgb,var(--ui-state) 70%,transparent);box-shadow:0 0 24px color-mix(in srgb,var(--ui-state) 30%,transparent);pointer-events:none}
 #prod-core{position:relative}
 html[data-ui=thinking] #prod-reactor{filter:hue-rotate(185deg) saturate(.9)}
 html[data-ui=approval] #prod-reactor{filter:hue-rotate(22deg) brightness(1.15)}
@@ -834,3 +833,7 @@ h1,h2,#prod-title,#ui-callout h3,.welcome h1{font-family:Bahnschrift,"DIN Altern
 @media (scripting:enabled){html:not(.ui-ready) .app{visibility:hidden}}
 @media (max-width:600px){.production-on #send,.production-on #stop-chat,#send,#stop-chat{min-height:44px}.settings-panel summary,#settings summary,aside details>summary,details>summary{min-height:44px;display:flex;align-items:center}input[type=checkbox]{min-width:20px;min-height:20px}label:has(>input[type=checkbox]){min-height:44px;display:flex;align-items:center;gap:8px}}
 @media (max-width:600px){.production-on #production #chat-form #send,.production-on #production #chat-form #stop-chat,#chat-form #send,#chat-form #stop-chat{min-height:44px;height:44px}}
+/* Signal flow canvas (orb↔tool comets, state ring). The SVG keeps route geometry for tests. */
+#production #prod-flow{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0}
+#production #prod-graph.flow-on #prod-edges path{stroke:transparent!important;filter:none!important;animation:none!important}
+#ui-callout .ui-warn{color:var(--st-error,#ff6b6b)}
