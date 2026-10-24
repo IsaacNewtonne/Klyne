@@ -248,8 +248,69 @@ pub fn summary(path: &Path) -> io::Result<Value> {
     let payload: String = db
         .query_row("SELECT payload FROM chat WHERE id=1", [], |r| r.get(0))
         .map_err(err)?;
-    let data: Value = serde_json::from_str(&payload).map_err(err)?;
-    Ok(serde_json::json!({"id":data["id"],"title":data["title"],"status":data["status"]}))
+    let mut data: Value = serde_json::from_str(&payload).map_err(err)?;
+    // Messages live in the history table; the last few are enough to tell
+    // an unreachable model apart from other stops.
+    if data["messages"].as_array().is_none_or(|m| m.is_empty()) {
+        let mut stmt = db
+            .prepare("SELECT payload FROM history WHERE kind='messages' ORDER BY seq DESC LIMIT 4")
+            .map_err(err)?;
+        let mut recent: Vec<Value> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(err)?
+            .filter_map(Result::ok)
+            .filter_map(|p| serde_json::from_str(&p).ok())
+            .collect();
+        recent.reverse();
+        data["messages"] = Value::Array(recent);
+    }
+    Ok(
+        serde_json::json!({"id":data["id"],"title":data["title"],"status":data["status"],"attention":attention(&data)}),
+    )
+}
+/// Display-only sub-kind for a stopped conversation, so the sidebar can tell
+/// "needs your approval" from "needs your answer", "couldn't finish" and
+/// "error" without loading the full snapshot. Never used for decisions.
+pub fn attention(data: &Value) -> &'static str {
+    let status = data["status"].as_str().unwrap_or("");
+    if matches!(
+        status,
+        "Planning" | "Working" | "Reviewing" | "Stopping" | "Upgrading"
+    ) {
+        return "";
+    }
+    if data["pending"]["proposal"].is_object() {
+        return "approval";
+    }
+    if status == "Needs input" || data["execution"]["failure"]["kind"] == "missing_input" {
+        return "input";
+    }
+    if data["pending"].is_object() {
+        return "uncertain";
+    }
+    if status == "Completed" {
+        return "";
+    }
+    let last = data["messages"]
+        .as_array()
+        .and_then(|m| m.iter().rev().find(|m| m["agent"] == "Klyne"))
+        .and_then(|m| m["text"].as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let unreachable = [
+        "connection failed",
+        "could not connect",
+        "connection refused",
+        "not reachable",
+        "error sending request",
+    ];
+    if unreachable.iter().any(|n| last.contains(n)) {
+        return "error";
+    }
+    if matches!(status, "Blocked" | "Interrupted" | "Stopped") {
+        return "blocked";
+    }
+    ""
 }
 /// Sequenced activity pulse: status, last event sequence, events after
 /// `since`, and the content-free latency breakdown. Lets the UI skip full
@@ -287,4 +348,39 @@ pub fn pulse(path: &Path, since: u64) -> io::Result<Value> {
             data["completion_tokens"].as_u64().unwrap_or(0),
         ),
     }))
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::attention;
+    use serde_json::json;
+    #[test]
+    fn sub_kinds() {
+        assert_eq!(
+            attention(&json!({"status":"Interrupted","pending":{"proposal":{"kind":"shell"}}})),
+            "approval"
+        );
+        assert_eq!(
+            attention(&json!({"status":"Interrupted","pending":{"action":{}}})),
+            "uncertain"
+        );
+        assert_eq!(attention(&json!({"status":"Needs input"})), "input");
+        assert_eq!(
+            attention(
+                &json!({"status":"Blocked","messages":[{"agent":"Klyne","text":"Connection failed before request dispatch"}]})
+            ),
+            "error"
+        );
+        assert_eq!(
+            attention(
+                &json!({"status":"Blocked","messages":[{"agent":"Klyne","text":"I ran out of checks."}]})
+            ),
+            "blocked"
+        );
+        assert_eq!(
+            attention(&json!({"status":"Working","pending":{"proposal":{}}})),
+            ""
+        );
+        assert_eq!(attention(&json!({"status":"Completed"})), "");
+    }
 }

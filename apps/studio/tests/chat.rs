@@ -3487,7 +3487,7 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
         .unwrap();
     browser_wait(
         &mut b,
-        "document.querySelector('#connection').textContent==='Connected'",
+        "document.querySelector('#connection').dataset.state==='connected'",
     );
     b.eval("window.__errors=[];addEventListener('error',e=>__errors.push(e.message));addEventListener('unhandledrejection',e=>__errors.push(String(e.reason)))").unwrap();
     b.eval(&format!(
@@ -3503,7 +3503,7 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     b.click("#send").unwrap();
     browser_wait(
         &mut b,
-        "snapshot?.activity?.kind==='model' && document.querySelector('#prod-core-state').textContent==='WAITING - Model response'",
+        "snapshot?.activity?.kind==='model' && document.querySelector('#prod-core-state').textContent==='THINKING · MODEL IS THINKING'",
     );
     assert_eq!(
         b.eval("document.querySelector('#production').dataset.view==='production'")
@@ -3631,7 +3631,7 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
         b.screenshot().unwrap(),
     )
     .unwrap();
-    assert_eq!(b.eval("document.querySelector('#task-indicator').textContent==='Finished' && document.title==='Finished - Klyne'").unwrap(),true);
+    assert_eq!(b.eval("document.querySelector('#task-indicator').textContent==='Done' && document.title==='Done - Klyne'").unwrap(),true);
     // Presentation fixtures exercise a pending tool and a blocked result without executing it.
     assert_eq!(b.eval("document.querySelector('#prod-progress').value===document.querySelector('#prod-progress').max").unwrap(),true);
     b.click("#prod-open-steps").unwrap();
@@ -3639,13 +3639,13 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     b.click("#prod-inspector button").unwrap();
     b.set_reduced_motion(true).unwrap();
     b.eval("window.presentation=structuredClone(snapshot);presentation.activity_events=[];presentation.activity=null;presentation.status='Working';presentation.tasks[0].status='Working';presentation.pending={agent:'Writer',action:{tool:'skill_read',name:'project-check'}};productionView.update({snapshot:presentation,selected:presentation.id,submitting:false})").unwrap();
-    assert_eq!(b.eval("document.querySelector('#prod-cap-skills').dataset.state==='active' && document.querySelector('#prod-core-state').textContent==='WORKING'").unwrap(),true);
+    assert_eq!(b.eval("document.querySelector('#prod-cap-skills').dataset.state==='active' && document.querySelector('#prod-core-state').textContent.startsWith('WORKING')").unwrap(),true);
     assert_eq!(b.eval("[['files','read_file'],['terminal','run_shell'],['browser','browser_fill'],['desktop','desktop_observe'],['apps','app_invoke'],['skills','tool_run'],['memory','memory_read'],['runtime','runtime_stage']].every(([id,tool])=>{presentation.pending={agent:'Writer',action:{tool}};productionView.update({snapshot:presentation,selected:presentation.id,submitting:false});return document.querySelector('#prod-cap-'+id).dataset.state==='active'})").unwrap(),true);
     assert_eq!(b.eval("getComputedStyle(document.querySelector('.core-fire')).animationName==='none' && document.querySelectorAll('.prod-morph-vessel').length===0").unwrap(),true);
     assert_eq!(b.eval("[{RunShell:{program:'cargo',args:['test']}},'shell:cargo test'].every(action=>{presentation.pending={agent:'Writer',action};productionView.update({snapshot:presentation,selected:presentation.id,submitting:false});return document.querySelector('#prod-cap-terminal').dataset.state==='active'})").unwrap(),true);
     assert_eq!(b.eval("[{FetchUrl:{url:'https://example.com'}},'fetch:https://example.com'].every(action=>{presentation.pending={agent:'Writer',action};productionView.update({snapshot:presentation,selected:presentation.id,submitting:false});return document.querySelector('#prod-cap-browser').dataset.state==='active'})").unwrap(),true);
     b.eval("presentation.status='Blocked';productionView.update({snapshot:presentation,selected:presentation.id,submitting:false})").unwrap();
-    assert_eq!(b.eval("document.querySelector('#production').dataset.live==='false' && document.querySelector('#prod-core-state').textContent==='NEEDS ATTENTION'").unwrap(),true);
+    assert_eq!(b.eval("document.querySelector('#production').dataset.live==='false' && /^(COULDN’T FINISH|ERROR|NEEDS YOUR)/.test(document.querySelector('#prod-core-state').textContent)").unwrap(),true);
     b.eval("productionView.connection(false)").unwrap();
     assert_eq!(
         b.eval("document.querySelector('#prod-live').textContent.includes('Connection lost')")
@@ -3655,7 +3655,7 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     b.eval("productionView.connection(true);presentation.status='Needs input';presentation.tasks.forEach(t=>t.status='Done');productionView.update({snapshot:presentation,selected:presentation.id,submitting:false})").unwrap();
     // The meter counts action steps. Finished steps must still expose the
     // unfinished review and input state rather than claim overall completion.
-    assert_eq!(b.eval("document.querySelector('#prod-progress').value===document.querySelector('#prod-progress').max && document.querySelector('#prod-metrics').textContent.includes('final review pending') && document.querySelector('#prod-core-state').textContent==='NEEDS YOUR INPUT'").unwrap(), true);
+    assert_eq!(b.eval("document.querySelector('#prod-progress').value===document.querySelector('#prod-progress').max && document.querySelector('#prod-metrics').textContent.includes('final review pending') && document.querySelector('#prod-core-state').textContent.startsWith('NEEDS YOUR')").unwrap(), true);
     // Blocked work must expose its next action in the default workspace view.
     b.eval("polling=true;snapshot=structuredClone(presentation);snapshot.status='Interrupted';snapshot.pending={proposal:{kind:'shell',program:'cargo',args:['test']}};snapshot.execution.max_tokens=1234;snapshot.execution.max_cost_usd=0.25;configuredChat=null;render()").unwrap();
     assert_eq!(b.eval("document.querySelector('#prod-continue').checkVisibility() && document.querySelector('#prod-continue').textContent==='Review action'").unwrap(),true);
@@ -3687,7 +3687,7 @@ fn chat_browser_conversation_settings_controls_and_mobile() {
     b.navigate(&format!("http://{}", s.host)).unwrap();
     browser_wait(
         &mut b,
-        "document.querySelector('#connection').textContent==='Connected'",
+        "document.querySelector('#connection').dataset.state==='connected'",
     );
     for (width, height) in [(1536, 776), (1366, 768)] {
         b.set_viewport(width, height).unwrap();

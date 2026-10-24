@@ -1500,7 +1500,7 @@ impl Chats {
                             continue;
                         }
                         return Err(err(
-                            "The model could not justify its request for user input after recovery. The task remains unfinished; no unsupported question was forwarded.",
+                            "The model wanted to ask you something but couldn't say what it needed, so I didn't pass the question on. Your work is saved; press Resume work to try again, or add more detail.",
                         ));
                     }
                     if attempt > 0 && !failures.is_empty() {
@@ -2537,7 +2537,7 @@ impl Chats {
             }
         }
         Err(err(
-            "Progress review reached its read-only check limit. Unfinished work is saved; the task is not complete.",
+            "I ran out of review attempts before I could confirm the result. Your work is saved but not finished; press Resume work to continue.",
         ))
     }
 

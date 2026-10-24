@@ -4,6 +4,28 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const motion = matchMedia('(prefers-reduced-motion: reduce)');
   const busy = new Set(['Planning','Working','Reviewing','Stopping','Upgrading']);
+  // Semantic UI state (docs/UI-COLORS.md): every state = colour + label + icon.
+  const UI={idle:['Ready','○'],thinking:['Thinking','◌'],acting:['Working','▶'],approval:['Needs your approval','⚠'],input:['Needs your answer','?'],done:['Done','✓'],blocked:['Couldn’t finish','⏸'],error:['Error','✕'],off:['Access off','🔒']};
+  const UNREACHABLE=/connection failed|could not connect|connection refused|not reachable|error sending request/i;
+  function lastKlyne(chat){return chat?.messages?.filter(m=>m.agent==='Klyne').at(-1)?.text||'';}
+  function uiState(chat,activity,submitting){
+    if(submitting)return 'thinking';
+    if(!chat)return 'idle';
+    const st=chat.status;
+    if(['Planning','Working','Reviewing','Stopping','Upgrading'].includes(st)){
+      if(chat.pending?.proposal)return 'approval';
+      return activity?.operations?.length && activity.mode!=='waiting'?'acting':st==='Working'&&activity?.mode!=='waiting'?'acting':'thinking';
+    }
+    if(chat.pending?.proposal)return 'approval';
+    if(st==='Needs input')return 'input';
+    if(chat.pending)return 'blocked';
+    if(st==='Completed')return 'done';
+    if(UNREACHABLE.test(lastKlyne(chat)))return 'error';
+    if(['Blocked','Interrupted','Stopped'].includes(st))return 'blocked';
+    return 'idle';
+  }
+  function uiFromSummary(c){const a=c.attention;return a==='approval'?'approval':a==='input'?'input':a==='error'?'error':a==='blocked'||a==='uncertain'?'blocked':c.status==='Completed'?'done':['Planning','Reviewing'].includes(c.status)?'thinking':['Working','Stopping','Upgrading'].includes(c.status)?'acting':'idle';}
+  window.klyneUi={UI,uiState,uiFromSummary,lastKlyne,UNREACHABLE};
   const capabilities = [
     ['files','Files','⌗',null], ['terminal','Terminal','›_', 'terminal'],
     ['browser','Web & browser','◎','web'], ['desktop','Desktop','▣','desktop'],
@@ -72,7 +94,7 @@
   $('main').insertBefore(root,$('main').firstChild);
   root.dataset.theme='ember-console';
   $('prod-core').insertAdjacentHTML('afterbegin','<canvas id="prod-reactor" aria-hidden="true"></canvas><div class="reactor-wordmark">KLYNE<small>YOUR IDEAS, IN MOTION</small></div>');
-  root.querySelector('.prod-assignment-panel').insertAdjacentHTML('afterbegin','<section class="prod-health"><p class="prod-eyebrow">SYSTEM PULSE</p><div class="prod-gauge"><strong id="prod-cpu">—</strong><span>CPU</span></div><div class="prod-gauge" title="Whole NVIDIA GPU usage, including other apps"><strong id="prod-gpu">?</strong><span>GPU</span></div><dl><dt>Connection</dt><dd id="prod-health-connection">Connected</dd><dt>Tools in use</dt><dd id="prod-health-tools">0</dd><dt>Observations</dt><dd id="prod-health-evidence">0</dd></dl><p class="prod-health-note">Live process measurement</p></section>');
+  root.querySelector('.prod-assignment-panel').insertAdjacentHTML('afterbegin','<section class="prod-health"><p class="prod-eyebrow">SYSTEM PULSE</p><div class="prod-gauge"><strong id="prod-cpu">—</strong><span>CPU</span></div><div class="prod-gauge" title="Whole NVIDIA GPU usage, including other apps"><strong id="prod-gpu">?</strong><span>GPU</span></div><dl><dt>Connection</dt><dd id="prod-health-connection">Studio online</dd><dt>Tools in use</dt><dd id="prod-health-tools">0</dd><dt>Observations</dt><dd id="prod-health-evidence">0</dd></dl><p class="prod-health-note">Live process measurement</p></section>');
   root.querySelector('.prod-heading').insertAdjacentHTML('beforeend','<button id="prod-stop" type="button" hidden>■ Stop</button>');
   $('prod-stop').onclick=()=>($('stop-chat') || $('demo-stop'))?.click();
   window.addEventListener('klyne-telemetry',event=>{
@@ -112,7 +134,7 @@
     const answers=(chat?.messages||[]).filter(m=>m.role!=='user'&&m.agent==='Klyne');
     const output=$('prod-output-content'),nearEnd=output.scrollHeight-output.scrollTop-output.clientHeight<50;
     const live=(chat?.dialogue||[]).map(t=>'<article><small>'+esc(t.state.replaceAll('_',' '))+'</small><p>'+esc(t.reply||'Thinking…')+'</p>'+(['queued','responding'].includes(t.state)?'<button type="button" data-live-cancel="'+esc(t.id)+'">Cancel '+(t.state==='queued'?'queued task':'reply')+'</button>':'')+'</article>').join('');
-    markup(output,answers.length||live?answers.map(m=>'<article>'+esc(m.text)+'</article>').join('')+live:'<p class="prod-output-empty">Klyne’s response will appear here.</p>');
+    markup(output,answers.length||live?answers.map(m=>'<article>'+esc(m.text)+'</article>').join('')+live:'<p class="prod-output-empty">Klyne’s answer will appear here when the work is done. Watch the trail under the orb to see each step as it happens.</p>');
     if(nearEnd)output.scrollTop=output.scrollHeight;
   }
   $('prod-output-content').addEventListener('click',event=>{const button=event.target.closest('[data-live-cancel]');if(button)document.querySelector('#live-chat-log [data-cancel-turn="'+button.dataset.liveCancel+'"]')?.click();});
@@ -291,6 +313,8 @@
   $('prod-surface').insertBefore($('prod-result'),root.querySelector('.prod-pipeline'));
   root.dataset.details='true';
   root.querySelector('.prod-meta').insertBefore(root.querySelector('.prod-pipeline'),$('prod-metrics'));
+  root.querySelector('.prod-meta').insertAdjacentHTML('afterend','<section id="ui-callout" role="region" aria-live="polite" hidden></section>');
+  $('prod-core-state').insertAdjacentHTML('afterend','<ol id="ui-trail" aria-label="Recent tool calls"></ol>');
   const defaultConversation=false;
   let current = null, selectedKey = null, conversation = defaultConversation, online = true;
   let edgeFrame = 0, animations = [], previousSubmitting = false, inspect = null, viewTransition = null;
@@ -319,6 +343,56 @@
     const action=chat.pending.action || chat.pending;
     return {action, agent:chat.pending.agent || chat.tasks?.find(t=>t.status==='Working')?.agent || 'Worker', name:actionName(action), category:category(action)};
   }
+  function trailItems(chat,activity){
+    const ev=(chat?.evidence||[]).slice(-5).map(e=>({tool:category(e.action),text:(typeof e.action==='string'?e.action:actionName(e.action))+(e.summary?' · '+e.summary:''),ok:String(!!e.ok)}));
+    const live=(activity?.operations||[]).map(o=>({tool:o.tool,text:o.operation,ok:'live'}));
+    return [...ev,...live].slice(-6);
+  }
+  function renderTrail(chat,activity){
+    const items=trailItems(chat,activity);
+    markup($('ui-trail'),items.map(i=>`<li data-ok="${i.ok}" style="--cap:var(--cap-${esc(String(i.tool).replace(/^app:.*/,'apps'))},#888)"><i aria-hidden="true">${i.ok==='live'?'▶':i.ok==='true'?'✓':'✕'}</i><b title="${esc(i.text)}">${esc(i.text)}</b><span class="sr-only">${i.ok==='live'?'running':i.ok==='true'?'succeeded':'failed'}</span></li>`).join(''));
+  }
+  function describeProposal(p){
+    if(!p)return '';
+    if(p.kind==='shell')return [p.program,...(p.args||[])].join(' ');
+    if(p.kind==='delete')return 'DELETE '+(p.origin||'').replace(/\/$/,'')+(p.path||'');
+    if(p.kind==='secret')return 'Use credential '+p.name+' for '+((p.origins||[]).join(', ')||'the command environment');
+    if(p.kind==='destructive')return typeof p.action==='object'?JSON.stringify(p.action):String(p.reason||'Destructive action');
+    return JSON.stringify(p);
+  }
+  function renderCallout(chat,ui){
+    const box=$('ui-callout');if(!box)return;
+    const show=chat&&['approval','input','blocked','error','done'].includes(ui);
+    box.hidden=!show;box.dataset.ui=ui;if(!show){markup(box,'');return;}
+    const [label,icon]=UI[ui];const msg=lastKlyne(chat);let html='';
+    if(ui==='approval'){
+      const p=chat.pending.proposal,cmd=describeProposal(p),why=chat.pending.reason||p.reason||(chat.tasks?.find(t=>t.status==='Awaiting approval')?.instruction)||'Klyne needs this to continue the current step.';
+      const scope=p.kind==='destructive';
+      html=`<h3><span aria-hidden="true">${icon}</span>${label}</h3><p>Klyne wants to run this. Nothing has run yet.</p><code>${esc(cmd)}</code><p><strong>Why:</strong> ${esc(why)}</p>${chat.pending.expires_at_ms?`<p>Request expires at ${esc(new Date(chat.pending.expires_at_ms).toLocaleTimeString())}.</p>`:''}<div class="ui-actions"><button class="primary" data-ui-act="approve">✓ Approve once</button>${scope?'<button data-ui-act="approve-chat">Approve for this chat</button>':''}<button class="danger" data-ui-act="deny">✕ Deny</button><button data-ui-act="edit" title="Copy into the message box so you can change it">✎ Edit</button></div>`;
+    } else if(ui==='input'){
+      html=`<h3><span aria-hidden="true">${icon}</span>${label}</h3><p>${esc(msg||'Klyne needs more information to continue.')}</p><div class="ui-actions"><button class="primary" data-ui-act="answer">Type your answer</button></div>`;
+    } else if(ui==='error'){
+      const ep=chat.provider?.endpoint||'the local Ollama address';
+      html=`<h3><span aria-hidden="true">${icon}</span>Can’t reach ${esc(({ollama:'Ollama',codex:'Codex',opencode:'OpenCode'})[chat.provider?.kind]||'the AI model')}</h3><p>Klyne couldn’t connect to ${esc(ep)}. Start Ollama (open the Ollama app, or run <b>ollama serve</b>), then press Retry. Your work is saved.</p><div class="ui-actions"><button class="primary" data-ui-act="retry">⟳ Retry</button><button data-ui-act="settings">Connection settings</button></div>`;
+    } else if(ui==='blocked'){
+      html=`<h3><span aria-hidden="true">${icon}</span>${chat.pending?'Check what happened':label}</h3><p>${esc(chat.pending?'An action may or may not have finished. Check the app or file, then record what happened.':msg||'Work stopped before finishing. Your progress is saved.')}</p>${chat.execution?.failure?.guidance?`<p><strong>Next:</strong> ${esc(chat.execution.failure.guidance)}</p>`:''}<div class="ui-actions"><button class="primary" data-ui-act="${chat.pending?'review':'retry'}">${chat.pending?'Review action':'⟳ Try again'}</button></div>`;
+    } else {
+      const files=(chat.result?.artifacts||[]).map(a=>a.path||a).filter(Boolean).slice(0,6);
+      html=`<h3><span aria-hidden="true">${icon}</span>${label}${chat.result?.outcome==='verified'?' · verified':''}</h3><p>${esc(msg.slice(0,600)||'Finished.')}</p>${files.length?`<ul class="ui-files">${files.map(f=>`<li>${esc(f)}</li>`).join('')}</ul>`:''}<div class="ui-actions"><button data-ui-act="copy">Copy answer</button><button data-ui-act="result">View full result</button></div>`;
+    }
+    markup(box,html);
+  }
+  document.addEventListener('click',e=>{
+    const b=e.target.closest('[data-ui-act]');if(!b)return;const act=b.dataset.uiAct,chat=current?.snapshot;
+    if(act==='approve'||act==='approve-chat'||act==='deny')window.klyneResolve?.(act==='deny'?'abandon':act==='approve'?'approved':'approved_conversation');
+    else if(act==='edit'){const t=$('instruction');t.value='Instead, run: '+describeProposal(chat?.pending?.proposal);t.focus();}
+    else if(act==='answer'){$('instruction').focus();}
+    else if(act==='retry')$('resume-chat').click();
+    else if(act==='settings')$('settings-button').click();
+    else if(act==='review')continueButton.click();
+    else if(act==='copy'){navigator.clipboard?.writeText(lastKlyne(chat)).catch(()=>{});b.textContent='Copied ✓';}
+    else if(act==='result')showInspector('result:all');
+  });
   function cancelMotion() {
     cancelAnimationFrame(edgeFrame);
     viewTransition?.skipTransition(); viewTransition=null;
@@ -374,6 +448,7 @@
     const active=busy.has(status) || ['Receiving','Opening'].includes(status);
     const activity=window.klyneActivity.state();
     root.dataset.mode=activity.mode;
+    const ui=uiState(chat,activity,current.submitting);document.documentElement.dataset.ui=ui;renderCallout(chat,ui);renderTrail(chat,activity);
     document.documentElement.dataset.klyneMode=activity.mode;
 
     continueButton.hidden=conversation || active || !chat || status==='Completed' || !$('resume-chat');
@@ -397,7 +472,7 @@
     $('prod-surface').hidden=conversation;
     $('prod-view-toggle').textContent=conversation?'Activity ↗':'Conversation ↗';
     $('prod-view-toggle').setAttribute('aria-pressed',String(conversation));
-    const labels={Receiving:'Receiving your instruction',Opening:'Opening saved work',Planning:'Understanding your request',Working:inTool?'Putting tools to work':'Executing the plan',Reviewing:'Checking the result',Completed:'Ready for you','Needs input':'Your input is needed',Blocked:'Work needs attention',Interrupted:'Saved work · interrupted',Stopping:'Stopping current work',Stopped:'Work is stopped',Upgrading:'Handing off the runtime'};
+    const labels={Receiving:'Receiving your instruction',Opening:'Opening saved work',Planning:'Understanding your request',Working:inTool?'Putting tools to work':'Executing the plan',Reviewing:'Checking the result',Completed:'Ready for you','Needs input':'Your input is needed',Blocked:'Work needs attention',Interrupted:'Paused · waiting on you',Stopping:'Stopping current work',Stopped:'Work is stopped',Upgrading:'Handing off the runtime'};
     const tools=activity.operations.map(o=>o.tool);
     const headline=activity.mode==='input'?'Your input is needed':status==='Reviewing'?'Checking the result':activity.mode==='waiting'?'Awaiting response':inTool?(tools.length>1?'Using tools':({browser:'Browsing',files:'Working with files',terminal:'Executing command',desktop:'Controlling desktop',memory:'Using memory',apps:'Calling app API',skills:'Invoking tools',runtime:'Executing runtime'})[tools[0]] || 'Using '+tools[0].replace(/^app:/,'')):labels[status] || status;
     setText($('prod-title'),headline);
@@ -405,7 +480,7 @@
     const operationText=activity.operations.map(o=>o.operation).join(' · ');
     const phase=chat?.activity?.phase,since=chat?.activity?.started_at?Math.max(0,Math.round((Date.now()-Number(chat.activity.started_at))/1000)):0,who=chat?.activity?.agent || chat?.activity?.role || 'model';
     const phaseText=phase==='loading_model'?`Loading the model into memory for the ${who} (${since}s; the first request can take up to a minute)`:phase==='thinking'?`The ${who} model is thinking (${since}s)`:phase==='generating'?`The ${who} model is writing a reply (${chat.activity.generated_chars||0} characters, ${since}s)`:'';
-    const live=online?(waiting?(operationText || phaseText || `Awaiting ${who} response`):inTool?operationText:status):'Connection lost · showing last known state';
+    const live=online?(waiting?(operationText || phaseText || `Awaiting ${who} response`):inTool?operationText:active?status:UI[uiState(chat,activity,false)][0]):'Connection lost to Studio · showing last known state';
     if($('prod-live').textContent!==live) $('prod-live').textContent=live;
     const doneSteps=tasks.filter(t=>t.status==='Done').length;
     $('prod-metrics').textContent=tasks.length?`${doneSteps} of ${tasks.length} action steps${status!=='Completed' && doneSteps===tasks.length?' · final review pending':''}`: 'Preparing';
@@ -424,9 +499,10 @@
     $('prod-core-state').textContent=({working:'WORKING',waiting:'WAITING',input:'NEEDS YOUR INPUT',complete:'COMPLETE',error:'NEEDS ATTENTION',idle:'READY',disconnected:'DISCONNECTED'})[activity.mode];
     if(status==='Stopped')$('prod-core-state').textContent='STOPPED';
     if(waiting)$('prod-core-state').textContent=operationText?('WAITING - '+operationText):('WAITING - '+(chat?.activity?.role==='reviewer'?'Reviewer response':'Model response'));
+    {const u=uiState(chat,activity,current.submitting);const step=operationText||(waiting?(chat?.activity?.role==='reviewer'?'Reviewer is checking':'Model is thinking'):'');$('prod-core-state').dataset.icon=UI[u][1];$('prod-core-state').textContent=(UI[u][0]+(step&&['thinking','acting'].includes(u)?' · '+step:'')).toUpperCase();}
     $('prod-core').dataset.active=String(active && online);
     $('prod-stop').hidden=!active;
-    $('prod-health-connection').textContent=online?'Connected':'Disconnected';
+    $('prod-health-connection').textContent=online?'Studio online':'Studio offline';
     $('prod-health-connection').dataset.online=String(online);
     $('prod-health-tools').textContent=String(new Set(activity.operations.map(o=>o.tool)).size);
     $('prod-health-evidence').textContent=String(evidence.length);

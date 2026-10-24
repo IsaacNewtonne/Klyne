@@ -108,13 +108,40 @@ $('connection').after(taskIndicator);
 let online=false;
 function renderStatus(){
   const activeChats=chats.filter(c=>['Planning','Working','Reviewing','Stopping','Upgrading'].includes(c.status));
-  const state=!online?'offline':window.klyneActivity?.state().mode==='waiting'?'waiting':submitting?'waiting':running(snapshot)||snapshot?.status==='Upgrading'?'working':snapshot?.status==='Completed'?'finished':['Blocked','Interrupted','Needs input','Stopped'].includes(snapshot?.status)?'attention':activeChats.length?'working':'ready';
-  taskIndicator.dataset.state=state;
-  const label={offline:'Offline',waiting:'Waiting',working:'Working',finished:'Finished',attention:snapshot?.status==='Needs input'?'Needs your input':snapshot?.status==='Stopped'?'Stopped':'Needs attention',ready:'Ready'}[state];
+  const K=window.klyneUi;
+  // Status is scoped to the open conversation; other running chats are only mentioned.
+  const ui=!online?'error':K?K.uiState(selected?snapshot:null,window.klyneActivity?.state(),submitting):'idle';
+  const others=activeChats.filter(c=>c.id!==selected).length;
+  const [base,icon]=!online?['Studio offline','✕']:(K?.UI[ui]||['Ready','○']);
+  const label=base+(others&&!['acting','thinking'].includes(ui)?` · ${others} other running`:'');
+  taskIndicator.dataset.state=ui;taskIndicator.dataset.ui=ui;taskIndicator.dataset.icon=icon;
   taskIndicator.textContent=label;
-  taskIndicator.title=state==='working'?(snapshot?.activity?.agent||`${activeChats.length || 1} active task`):state==='finished'?'The selected task finished. Open its result for details.':label;
-  document.title=`${label} - Klyne`;
+  taskIndicator.title=others?`${others} other conversation(s) running`:label;
+  document.title=`${base} - Klyne`;
 }
+// Provider reachability (Ollama/OpenCode/Codex), separate from the Studio connection.
+let providerState='checking',providerTimer=0,providerBusy=false;
+async function checkProvider(){
+  if(providerBusy)return;providerBusy=true;
+  const config=providerConfig(),name=({ollama:'Ollama',codex:'Codex',opencode:'OpenCode'})[config.kind]||'Model';
+  try{const r=await api('/api/connections/check',config);providerState=(config.kind!=='ollama'||(r.models||[]).length)?'ok':'down';
+    $('connection').textContent=providerState==='ok'?`✓ ${name} ready`:`✕ ${name} has no models`;}
+  catch(e){providerState='down';$('connection').textContent=`✕ ${name} not reachable · Retry`;$('connection').dataset.reason=e.message||'';}
+  finally{providerBusy=false;$('connection').dataset.provider=providerState;$('connection').title=providerState==='ok'?`${name} answered at ${config.endpoint||'its default address'}`:`Klyne can't reach ${name}${config.endpoint?' at '+config.endpoint:''}. Start it, then click to retry.`;}
+}
+$('connection').setAttribute('role','button');$('connection').tabIndex=0;
+$('connection').addEventListener('click',()=>{if(online)checkProvider();});
+$('connection').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();if(online)checkProvider();}});
+window.klyneResolve=async(choice)=>{
+  if(submitting || !snapshot?.pending)return;
+  const id=selected,approval=!!snapshot.pending.proposal,disposition=choice==='approved_conversation'?'approved':choice,scope=choice==='approved_conversation'?'conversation':'once';
+  const continuation={id,message:'Continue the saved goal after approval.',resume:true,...intelligenceConfig(),reviewer:reviewerConfig(),execution:executionConfig(),provider:providerConfig(),access:snapshot.access};
+  submitting=true;
+  try{const resolution=await api(`/api/chats/${id}/resolve`,{request_id:snapshot.pending.request_id,disposition,scope,note:approval?`User selected ${disposition} (${scope}) on the inline approval card.`:''});
+    if(approval&&disposition==='approved'){if(resolution.renewal_required)toast('This request expired or changed. Klyne will prepare a fresh proposal.');await api('/api/chats',continuation);}
+    await refresh();}
+  catch(e){toast(e.message);}finally{submitting=false;render();}
+};
 const drafts = new Map();
 let configuredChat=null;
 function trustedLaptopDefault(){try{return localStorage.getItem('klyne-trusted-laptop')==='true';}catch(_){return false;}}
@@ -154,11 +181,12 @@ async function api(path, body) {
   const result=await response.json(); if(!response.ok) throw new Error(result.error || 'Could not complete the request.'); return result;
 }
 function setMarkup(element, markup) { if(element.dataset.markup!==markup) {element.innerHTML=markup; element.dataset.markup=markup;} }
+function chipFor(chat){const K=window.klyneUi;if(!K)return `<small>${escape(chat.status)}</small>`;const ui=K.uiFromSummary(chat);const [l,i]=ui==='idle'?[chat.status==='Stopped'?'Stopped':'Ready','○']:K.UI[ui];return `<small data-ui="${ui}" data-icon="${i}">${escape(l)}</small>`;}
 function renderList() {
   const query=$('chat-search').value.toLowerCase();
   const filtered=chats.filter(chat=>`${chat.title} ${chat.status}`.toLowerCase().includes(query));
   const focused=document.activeElement?.closest('[data-chat]')?.dataset.chat;
-  setMarkup($('chat-list'), filtered.map(chat=>`<div class="chat-row"><button class="chat-item" data-chat="${escape(chat.id)}" data-state="${escape(chat.status)}" aria-current="${selected===chat.id}"><strong>${escape(chat.title)}</strong><small>${escape(chat.status)}</small></button><button class="chat-options" data-options="${escape(chat.id)}" aria-label="Options for ${escape(chat.title)}" aria-haspopup="dialog">⋯</button></div>`).join('') || `<p>${chats.length?'No matching conversations.':'Your conversations will appear here.'}</p>`);
+  setMarkup($('chat-list'), filtered.map(chat=>`<div class="chat-row"><button class="chat-item" data-chat="${escape(chat.id)}" data-state="${escape(chat.status)}" aria-current="${selected===chat.id}"><strong>${escape(chat.title)}</strong>${chipFor(chat)}</button><button class="chat-options" data-options="${escape(chat.id)}" aria-label="Options for ${escape(chat.title)}" aria-haspopup="dialog">⋯</button></div>`).join('') || `<p>${chats.length?'No matching conversations.':'Your conversations will appear here.'}</p>`);
   const count = document.querySelector('.conversation-count');
   if(count) count.textContent = filtered.length;
   const currentRow=[...$('chat-list').querySelectorAll('[data-chat]')].find(row=>row.dataset.chat===selected);
@@ -255,8 +283,8 @@ async function refresh() {
         const fresh=await api(`/api/chats/${id}`); if(selected===id) {snapshot=fresh;render();}
       }
     }
-    online=true;renderStatus();$('connection').textContent='Connected';$('connection').dataset.state='connected';window.productionView?.connection(true);
-  } catch(e) { online=false;renderStatus();$('connection').textContent='Offline · retrying';$('connection').dataset.state='offline';window.productionView?.connection(false); }
+    const wasOnline=online;online=true;renderStatus();$('connection').dataset.state='connected';if(!wasOnline||!$('connection').dataset.provider){checkProvider();clearInterval(providerTimer);providerTimer=setInterval(checkProvider,60000);}if(window.klyneUi&&snapshot&&window.klyneUi.uiState(snapshot)==='error'&&providerState==='ok'&&!providerBusy)checkProvider();window.productionView?.connection(true);
+  } catch(e) { online=false;renderStatus();$('connection').textContent='Studio offline · retrying';$('connection').dataset.state='offline';delete $('connection').dataset.provider;window.productionView?.connection(false); }
   finally {polling=false;}
 }
 function closeSidebar() {$('sidebar').classList.remove('open');$('menu').setAttribute('aria-expanded','false');}
@@ -472,7 +500,7 @@ $('check-provider').onclick=async()=>{
 };
 let saved={};try{saved=JSON.parse(localStorage.getItem('klyne-provider')||'{}')||{};}catch(_){}
 if(Object.hasOwn(names,saved.kind))$('provider-kind').value=saved.kind;else saved={};
-configureProvider(savedProviderFor($('provider-kind').value));resetNewChatSettings();render();refresh();setInterval(()=>{if(!document.hidden)refresh();},1500);
+configureProvider(savedProviderFor($('provider-kind').value));resetNewChatSettings();render();{const ready=()=>requestAnimationFrame(()=>document.documentElement.classList.add('ui-ready'));Promise.race([refresh(),new Promise(r=>setTimeout(r,700))]).then(ready,ready);}setInterval(()=>{if(!document.hidden)refresh();},1500);
 
 function executionConfig(){return {max_steps:Number($('max-steps').value)||0,timeout_seconds:Number($('max-seconds').value)||0,max_review_rounds:Number($('max-reviews').value)||0,command_policy:$('command-policy').value,max_tokens:Number($('max-tokens').value)||0,max_cost_usd:Number($('max-cost').value)||0,real_browser:!!$('real-browser')?.checked};}
 // 2026-10-24: tool mode and real-Chrome opt-in persist in this browser.
