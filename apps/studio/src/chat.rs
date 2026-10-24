@@ -2127,6 +2127,7 @@ impl Chats {
     ) {
         match role {
             "planner" => {
+                context["think_setting"] = json!(crate::quality::load(self.studio_root()).think);
                 if crate::quality::load(self.studio_root()).checklist {
                     system.push_str(" Each task may add checklist:[3-7 short concrete checks its result must pass].");
                 }
@@ -2140,6 +2141,7 @@ impl Chats {
                 }
             }
             "independent reviewer" => {
+                context["think_setting"] = json!(crate::quality::load(self.studio_root()).think);
                 if self.findings_required(chat) {
                     system.push_str(" With finish, give findings: one {item, verdict pass|fail, evidence, severity low|medium|high} per requirement or checklist item, plus examined and not_examined lists. Never finish with a failed medium or high finding.");
                 } else {

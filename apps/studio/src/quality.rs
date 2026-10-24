@@ -25,6 +25,10 @@ pub struct Settings {
     pub critique: String,
     pub findings: String,
     pub checklist: bool,
+    /// Ollama thinking: "planning" sends think:true to planner/reviewer when
+    /// the model reports the thinking capability; workers always get
+    /// think:false. "off" (default) sends think:false everywhere.
+    pub think: String,
     pub helper: Helper,
 }
 
@@ -46,6 +50,11 @@ pub fn parse(value: &Value) -> Settings {
         }
         .to_owned(),
         checklist: value["checklist"].as_bool().unwrap_or(true),
+        think: match value["think"].as_str() {
+            Some("planning") => "planning",
+            _ => "off",
+        }
+        .to_owned(),
         helper: Helper {
             enabled: helper["enabled"]
                 .as_bool()
@@ -184,6 +193,8 @@ mod tests {
         let s = parse(&Value::Null);
         assert_eq!(s.critique, "auto");
         assert!(s.checklist);
+        assert_eq!(s.think, "off");
+        assert_eq!(parse(&json!({"think":"planning"})).think, "planning");
         assert_eq!(s.helper.model, DEFAULT_HELPER_MODEL);
         assert_eq!(s.helper.enabled, HELPER_DEFAULT_ENABLED);
         let s = parse(

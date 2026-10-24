@@ -45,6 +45,43 @@ pub enum Progress<'a> {
 /// Ollama keep-alive and context requested by Klyne (2026-10-24 fix plan).
 pub const OLLAMA_KEEP_ALIVE: &str = "30m";
 pub const OLLAMA_NUM_CTX: u64 = 16384;
+/// Whether this Ollama request should think. Workers never think (it costs
+/// time per tool step); planner and reviewer think only when the setting
+/// allows it and the model reports the "thinking" capability.
+pub fn ollama_think(role: &str, setting: &str, supports_thinking: bool) -> bool {
+    setting == "planning" && supports_thinking && matches!(role, "planner" | "independent reviewer")
+}
+fn thinking_support() -> &'static std::sync::Mutex<std::collections::HashMap<String, bool>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+/// Reads /api/show capabilities once per endpoint+model; false on any error.
+fn ollama_supports_thinking(endpoint: &str, model: &str) -> bool {
+    let key = format!("{endpoint}|{model}");
+    if let Some(known) = thinking_support().lock().unwrap().get(&key) {
+        return *known;
+    }
+    let supports = client(10)
+        .and_then(|http| {
+            request_json(
+                http.post(format!("{endpoint}/api/show")),
+                Some(&json!({"model":model})),
+            )
+        })
+        .map(|show| {
+            show["capabilities"]
+                .as_array()
+                .is_some_and(|caps| caps.iter().any(|c| c == "thinking"))
+        });
+    match supports {
+        Ok(value) => {
+            thinking_support().lock().unwrap().insert(key, value);
+            value
+        }
+        Err(_) => false,
+    }
+}
 fn warm_models() -> &'static std::sync::Mutex<std::collections::HashMap<String, Instant>> {
     static WARM: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Instant>>> =
         std::sync::OnceLock::new();
@@ -153,6 +190,17 @@ impl Connection {
             "stream":true, "think":false,
             "keep_alive":OLLAMA_KEEP_ALIVE,
         });
+        if let Some(setting) = context["think_setting"].as_str()
+            && setting != "off"
+            && matches!(role, "planner" | "independent reviewer")
+            && ollama_think(
+                role,
+                setting,
+                ollama_supports_thinking(&self.endpoint, &self.model),
+            )
+        {
+            body["think"] = json!(true);
+        }
         if native {
             let enabled: Vec<String> = context["enabled_tool_groups"]
                 .as_array()
@@ -834,6 +882,19 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thinking_is_only_for_planner_and_reviewer_when_supported() {
+        assert!(super::ollama_think("planner", "planning", true));
+        assert!(super::ollama_think(
+            "independent reviewer",
+            "planning",
+            true
+        ));
+        assert!(!super::ollama_think("worker", "planning", true));
+        assert!(!super::ollama_think("planner", "planning", false));
+        assert!(!super::ollama_think("planner", "off", true));
+    }
+
     use super::*;
     #[test]
     fn local_connections_reject_remote_hosts_credentials_and_unknown_fields() {
