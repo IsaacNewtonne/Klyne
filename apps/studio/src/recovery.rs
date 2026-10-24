@@ -51,7 +51,24 @@ pub fn model_warnings(root: &Path) -> Vec<String> {
             }
         }
     }
-    let helper = crate::quality::load(root).helper;
+    let quality = crate::quality::load(root);
+    let models = &quality.models;
+    for (label, model) in [
+        ("planner", &models.planner),
+        ("worker", &models.worker),
+        ("reviewer", &models.reviewer),
+        ("voice", &models.voice),
+    ] {
+        if let Some(model) = model.as_deref().filter(|m| *m != "current")
+            && crate::connections::ollama_model_installed(&quality.helper.endpoint, model)
+                == Some(false)
+        {
+            warnings.push(format!(
+                "The {label} model {model} in quality/config.json is not installed in Ollama; that role falls back to an error until you pull it or clear the setting."
+            ));
+        }
+    }
+    let helper = quality.helper;
     if helper.enabled
         && crate::connections::ollama_model_installed(&helper.endpoint, &helper.model)
             == Some(false)

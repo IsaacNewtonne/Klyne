@@ -59,6 +59,40 @@ fn result_data(entry: &Value) -> Value {
     }
 }
 
+/// The `launched` object of a desktop_launch result. Results carry a large
+/// observation and may be truncated, so fall back to extracting the object.
+fn launched_record(entry: &Value) -> Value {
+    let data = result_data(entry);
+    if data["launched"].is_object() {
+        return data["launched"].clone();
+    }
+    let text = entry["data"].as_str().unwrap_or("");
+    let Some(start) = text
+        .find("\"launched\":{")
+        .map(|i| i + "\"launched\":".len())
+    else {
+        return Value::Null;
+    };
+    let (mut depth, mut quoted, mut escaped) = (0, false, false);
+    for (i, c) in text[start..].char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '{' if !quoted => depth += 1,
+            '}' if !quoted => {
+                depth -= 1;
+                if depth == 0 {
+                    return serde_json::from_str(&text[start..start + i + 1])
+                        .unwrap_or(Value::Null);
+                }
+            }
+            _ => {}
+        }
+    }
+    Value::Null
+}
+
 /// Postcondition check for one evidence entry. `present(kind, name)` reports
 /// whether a memory/skill/tool currently exists in Klyne's capability store.
 pub fn check(entry: &Value, workspace: &Path, present: &dyn Fn(&str, &str) -> bool) -> Value {
@@ -69,7 +103,9 @@ pub fn check(entry: &Value, workspace: &Path, present: &dyn Fn(&str, &str) -> bo
     }
     if entry["ok"] != true {
         let text = format!("{} {}", entry["summary"], entry["data"]).to_lowercase();
-        if tool.ends_with("_forget") && text.contains("no saved") {
+        if (tool.ends_with("_forget") && text.contains("no saved"))
+            || text.contains("already removed")
+        {
             // Forgetting something already absent still meets the postcondition.
             return json!({"status":"satisfied","check":"already absent"});
         }
@@ -117,10 +153,26 @@ pub fn check(entry: &Value, workspace: &Path, present: &dyn Fn(&str, &str) -> bo
                 None => json!({"status":"unknown","check":"no forgotten name in result"}),
             }
         }
+        "delete_path" => {
+            let path = workspace.join(target);
+            fact(!path.exists(), format!("{target} absent"))
+        }
         "desktop_launch" => {
-            let data = result_data(entry);
-            let ok = data["launched"]["pid"].as_u64().is_some();
-            fact(ok, "launched process reported".into())
+            let launched = launched_record(entry);
+            let window = launched["window"]
+                .as_str()
+                .filter(|w| !w.is_empty() && *w != "0");
+            // A launch counts only with a window handle that appeared after
+            // it started (new_window); a pid alone or a pre-existing window
+            // does not.
+            let ok = window.is_some() && launched["new_window"] != false;
+            fact(
+                ok,
+                match window {
+                    Some(w) => format!("new window {w} appeared"),
+                    None => "no new window appeared".into(),
+                },
+            )
         }
         _ => json!({"status":"unknown","check":"no host check for this tool"}),
     }
@@ -212,6 +264,31 @@ mod tests {
     }
 
     #[test]
+    fn launch_needs_a_new_window_even_when_truncated_or_reused() {
+        let none = |_: &str, _: &str| false;
+        let check_data = |data: &str| {
+            check(
+                &json!({"agent":"A","action":"desktop_launch","ok":true,"data":data}),
+                Path::new("."),
+                &none,
+            )["status"]
+                .clone()
+        };
+        // Truncated observation after the launched object (UWP reuse).
+        let truncated = r#"{"observation":{"x":"{"},"launched":{"focus_error":"Windows refused \"focus\"","pid":37440,"window":"36111150","new_window":true,"reused_process":true},"more":[1,2"#;
+        assert_eq!(check_data(truncated), "satisfied");
+        assert_eq!(check_data(r#"{"launched":{"pid":5}}"#), "unsatisfied");
+        assert_eq!(
+            check_data(r#"{"launched":{"window":null,"note":"No new window"}}"#),
+            "unsatisfied"
+        );
+        assert_eq!(
+            check_data(r#"{"launched":{"pid":5,"window":"9","new_window":false}}"#),
+            "unsatisfied"
+        );
+    }
+
+    #[test]
     fn delivery_and_file_checks() {
         let dir = std::env::temp_dir().join(format!("klyne_verify_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -243,7 +320,7 @@ mod tests {
         assert_eq!(check(&gone, ws, &has_teal)["status"], "satisfied");
         let shell = json!({"agent":"Assistant","action":"shell:cmd /c echo","ok":true,"summary":"cmd exited with exit code: 0"});
         assert_eq!(check(&shell, ws, &has_teal)["status"], "satisfied");
-        let launch = json!({"agent":"Assistant","action":"desktop_launch","ok":true,"data":"{\"launched\":{\"pid\":5}}"});
+        let launch = json!({"agent":"Assistant","action":"desktop_launch","ok":true,"data":"{\"launched\":{\"pid\":5,\"window\":\"77\"}}"});
         assert_eq!(check(&launch, ws, &has_teal)["status"], "satisfied");
     }
 
@@ -263,5 +340,494 @@ mod tests {
         assert!(!all_satisfied(&[
             json!({"agent":"Assistant","action":"read_file:a","verify":{"status":"not_applicable"}})
         ]));
+    }
+}
+
+/// Full command line of a run_shell action, unwrapping `powershell -Command`
+/// and `cmd /c` wrappers.
+fn shell_line(action: &Value) -> String {
+    let program = action["program"].as_str().unwrap_or("");
+    let args: Vec<String> = action["args"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let base = program
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(".exe")
+        .to_lowercase();
+    if matches!(base.as_str(), "powershell" | "pwsh") {
+        if let Some(i) = args
+            .iter()
+            .position(|a| a.eq_ignore_ascii_case("-command") || a.eq_ignore_ascii_case("-c"))
+        {
+            return args[i + 1..].join(" ");
+        }
+        return args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    if base == "cmd" && args.first().is_some_and(|a| a.eq_ignore_ascii_case("/c")) {
+        return args[1..].join(" ");
+    }
+    std::iter::once(program.to_owned())
+        .chain(args)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_line(line: &str) -> String {
+    line.replace(['\'', '"'], "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_start_matches("& ")
+        .to_lowercase()
+}
+
+/// A native tool covering a run_shell request, so no shell approval is
+/// needed: version checks → runtime_status, a saved tool's own command →
+/// tool_run, dir/ls → list_dir, type/cat/Get-Content → read_file,
+/// mkdir → make_dir, Get-Item/Test-Path → stat_path. `saved` holds
+/// `{name, program, args}` of tools saved in this conversation.
+pub fn native_for_shell(action: &Value, saved: &[Value]) -> Option<Value> {
+    if action["tool"] != "run_shell" {
+        return None;
+    }
+    let line = normalize_line(&shell_line(action));
+    for tool in saved {
+        let own = normalize_line(&shell_line(
+            &json!({"program":tool["program"],"args":tool["args"]}),
+        ));
+        let full = normalize_line(
+            &std::iter::once(tool["program"].as_str().unwrap_or("").to_owned())
+                .chain(
+                    tool["args"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(str::to_owned)),
+                )
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        let stripped = line.split('|').next().unwrap_or("").trim().to_owned();
+        if !own.is_empty() && (stripped == own || stripped == full) {
+            return Some(json!({"tool":"tool_run","name":tool["name"]}));
+        }
+    }
+    if line.contains("--version") && (line.contains("klyne") || line.contains("runtime")) {
+        return Some(json!({"tool":"runtime_status"}));
+    }
+    if line.contains(['|', ';', '>', '&']) {
+        return None;
+    }
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let (verb, rest) = words.split_first()?;
+    let path_arg = rest
+        .iter()
+        .rfind(|w| {
+            !w.starts_with('-') && !w.starts_with('/') || w.contains('.') && !w.starts_with('-')
+        } && !matches!(**w, "directory" | "file"))
+        .map(|w| (*w).to_owned());
+    let path = path_arg.clone().unwrap_or_else(|| ".".into());
+    match *verb {
+        "dir" | "ls" | "get-childitem" | "gci" => Some(json!({"tool":"list_dir","path":path})),
+        "type" | "cat" | "get-content" | "gc" if path_arg.is_some() => {
+            Some(json!({"tool":"read_file","path":path}))
+        }
+        "mkdir" | "md" if path_arg.is_some() => Some(json!({"tool":"make_dir","path":path})),
+        "new-item" if line.contains("directory") && path_arg.is_some() => {
+            Some(json!({"tool":"make_dir","path":path}))
+        }
+        "get-item" | "test-path" | "gi" if path_arg.is_some() => {
+            Some(json!({"tool":"stat_path","path":path}))
+        }
+        _ => None,
+    }
+}
+
+/// True when a delete/forget of the same target already ran in this
+/// window and its postcondition held.
+pub fn already_removed(evidence: &[Value], canonical: &Value) -> bool {
+    let tool = canonical["tool"].as_str().unwrap_or("");
+    let target = match tool {
+        "skill_forget" | "tool_forget" => canonical["name"].as_str(),
+        "delete_path" => canonical["path"].as_str(),
+        _ => None,
+    };
+    let Some(target) = target.filter(|t| !t.is_empty()) else {
+        return false;
+    };
+    let leaf = |s: &str| s.rsplit(['\\', '/']).next().unwrap_or(s).to_lowercase();
+    evidence.iter().any(|e| {
+        let action = e["action"].as_str().unwrap_or("");
+        e["agent"] != "Reviewer"
+            && e["ok"] == true
+            && e["verify"]["status"] == "satisfied"
+            && tool_of(action) == tool
+            && match tool {
+                "delete_path" => action
+                    .split_once(':')
+                    .is_some_and(|(_, p)| leaf(p) == leaf(target)),
+                _ => result_data(e)["forgotten"].as_str() == Some(target),
+            }
+    })
+}
+
+const CLAIMS: &[(&[&str], &[&str])] = &[
+    (
+        &["removed", "deleted", "forgotten", "forgot", "erased"],
+        &[
+            "delete_path",
+            "memory_forget",
+            "skill_forget",
+            "tool_forget",
+        ],
+    ),
+    (
+        &["saved", "stored", "remembered"],
+        &[
+            "memory_save",
+            "skill_save",
+            "tool_save",
+            "write_file",
+            "document_create",
+            "artifact_write",
+        ],
+    ),
+    (
+        &["created", "wrote", "written"],
+        &[
+            "write_file",
+            "append_file",
+            "apply_patch",
+            "copy_file",
+            "make_dir",
+            "create_dir",
+            "memory_save",
+            "skill_save",
+            "tool_save",
+            "document_create",
+            "artifact_write",
+        ],
+    ),
+    (
+        &["ran", "executed"],
+        &["run_shell", "shell", "tool_run", "tool_test"],
+    ),
+    (
+        &["opened", "launched"],
+        &["browser_open", "desktop_launch", "open_url", "app_open"],
+    ),
+];
+const NEGATIONS: &[&str] = &[
+    " not ",
+    "n't",
+    " no ",
+    "nothing",
+    "none",
+    " never ",
+    "failed",
+    "unable",
+    "could not",
+    "skipped",
+    "would ",
+];
+
+fn claim_targets(sentence: &str) -> Vec<String> {
+    sentence
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '[' | ']'))
+        .map(|w| w.trim_matches(|c: char| matches!(c, '\'' | '"' | '`' | '.' | ':' | '!' | '?')))
+        .filter(|w| {
+            let leaf = w.rsplit(['\\', '/']).next().unwrap_or(w);
+            !w.contains("://")
+                && leaf.len() > 2
+                && (leaf.contains('_')
+                    || leaf.rsplit_once('.').is_some_and(|(stem, ext)| {
+                        !stem.is_empty()
+                            && (1..=5).contains(&ext.len())
+                            && ext.chars().all(|c| c.is_ascii_alphabetic())
+                    }))
+        })
+        .map(|w| w.rsplit(['\\', '/']).next().unwrap_or(w).to_lowercase())
+        .collect()
+}
+
+/// Claimed actions in a final answer with no matching successful evidence.
+/// Deterministic keyword check: each sentence claiming an effect (removed,
+/// saved, created, wrote, ran, opened …) needs a successful, verified tool
+/// result of that kind, and every named target (identifiers with `_` or a
+/// file extension) must appear in one. "All"/counted removals also need a
+/// successful listing after the last removal that no longer shows them.
+pub fn unsupported_claims(text: &str, evidence: &[Value]) -> Vec<String> {
+    let acted: Vec<&Value> = evidence
+        .iter()
+        .filter(|e| {
+            e["agent"] != "Reviewer" && e["ok"] == true && e["verify"]["status"] != "unsatisfied"
+        })
+        .collect();
+    let mut problems = Vec::new();
+    for raw in text
+        .split(['.', '!', '\n', ';'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let sentence = format!(" {} ", raw.to_lowercase());
+        if NEGATIONS.iter().any(|n| sentence.contains(n)) {
+            continue;
+        }
+        for (verbs, tools) in CLAIMS {
+            if !verbs.iter().any(|v| {
+                sentence
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| w == *v)
+            }) {
+                continue;
+            }
+            let matching: Vec<&&Value> = acted
+                .iter()
+                .filter(|e| tools.contains(&tool_of(e["action"].as_str().unwrap_or(""))))
+                .collect();
+            if matching.is_empty() {
+                problems.push(format!("\"{raw}\" has no successful {} result", tools[0]));
+                continue;
+            }
+            if tools.contains(&"browser_open") {
+                continue;
+            }
+            for target in claim_targets(&sentence) {
+                let seen = matching.iter().any(|e| {
+                    format!("{} {}", e["action"], e["data"])
+                        .to_lowercase()
+                        .contains(&target)
+                });
+                if !seen {
+                    problems.push(format!(
+                        "\"{raw}\" names {target}, which no successful result touched"
+                    ));
+                }
+            }
+            let listed = sentence.contains(" all ")
+                || sentence.contains(" every ")
+                || sentence
+                    .split_whitespace()
+                    .any(|w| w.chars().all(|c| c.is_ascii_digit()) && w.len() < 4 && w != "0")
+                || [
+                    "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+                ]
+                .iter()
+                .any(|n| sentence.contains(&format!(" {n} ")));
+            if listed && tools.contains(&"delete_path") {
+                let last = evidence.iter().rposition(|e| {
+                    tools.contains(&tool_of(e["action"].as_str().unwrap_or(""))) && e["ok"] == true
+                });
+                let listing = last.and_then(|i| {
+                    evidence[i + 1..].iter().rev().find(|e| {
+                        matches!(
+                            tool_of(e["action"].as_str().unwrap_or("")),
+                            "capability_list" | "list_dir"
+                        ) && e["ok"] == true
+                    })
+                });
+                match listing {
+                    None => problems.push(format!(
+                        "\"{raw}\" needs a final listing after the removals"
+                    )),
+                    Some(list) => {
+                        let shown = list["data"].as_str().unwrap_or("").to_lowercase();
+                        for target in claim_targets(&sentence) {
+                            if shown.contains(&format!("\"{target}\"")) {
+                                problems.push(format!("\"{raw}\": {target} is still listed"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    problems
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+
+    fn ok(action: &str, data: &str) -> Value {
+        json!({"agent":"Assistant","action":action,"ok":true,"data":data,"verify":{"status":"satisfied"}})
+    }
+
+    #[test]
+    fn claims_need_matching_evidence_and_listing() {
+        let forget = ok(
+            "tool_forget",
+            r#"{"forgotten":"t70_qwen_date","kind":"tool"}"#,
+        );
+        let list = json!({"agent":"Assistant","action":"capability_list","ok":true,"data":"{\"items\":[]}","verify":{"status":"not_applicable"}});
+        // Supported.
+        assert!(
+            unsupported_claims("Removed t70_qwen_date.", std::slice::from_ref(&forget)).is_empty()
+        );
+        // Named target never attempted.
+        assert_eq!(
+            unsupported_claims(
+                "Removed t70_qwen_date and t72_q_echo.",
+                std::slice::from_ref(&forget)
+            )
+            .len(),
+            1
+        );
+        // Nothing attempted at all.
+        assert_eq!(
+            unsupported_claims("All test tools were removed.", &[]).len(),
+            1
+        );
+        // Negated answers are fine.
+        assert!(
+            unsupported_claims("No test tools were found, so nothing was removed.", &[]).is_empty()
+        );
+        // "All" needs a listing after the last removal.
+        assert_eq!(
+            unsupported_claims("Removed all 2 tools.", std::slice::from_ref(&forget)).len(),
+            1
+        );
+        assert!(unsupported_claims("Removed all 2 tools.", &[forget, list]).is_empty());
+        // File claims match by file name.
+        let write = ok("write_file:t72_q.txt", "{}");
+        assert!(
+            unsupported_claims("I created C:\\x\\files\\t72_q.txt with the text.", &[write])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn shell_requests_map_to_native_tools() {
+        let shell = |program: &str, args: &[&str]| json!({"tool":"run_shell","program":program,"args":args});
+        let saved = [json!({"name":"t72_echo","program":"cmd","args":["/c","echo","hello"]})];
+        assert_eq!(
+            native_for_shell(
+                &shell(
+                    "powershell",
+                    &["-NoProfile", "-Command", "cmd /c echo hello | Out-String"]
+                ),
+                &saved
+            )
+            .unwrap()["tool"],
+            "tool_run"
+        );
+        assert_eq!(
+            native_for_shell(&shell("klyne", &["--version"]), &[]).unwrap()["tool"],
+            "runtime_status"
+        );
+        assert_eq!(
+            native_for_shell(
+                &shell(
+                    "powershell",
+                    &["-Command", "& 'C:\\k\\runtime\\versions\\a.exe' --version"]
+                ),
+                &[]
+            )
+            .unwrap()["tool"],
+            "runtime_status"
+        );
+        assert_eq!(
+            native_for_shell(&shell("cmd", &["/c", "dir", "tools"]), &[]).unwrap(),
+            json!({"tool":"list_dir","path":"tools"})
+        );
+        assert_eq!(
+            native_for_shell(
+                &shell("powershell", &["-Command", "Get-Content -Raw t72.txt"]),
+                &[]
+            )
+            .unwrap(),
+            json!({"tool":"read_file","path":"t72.txt"})
+        );
+        assert_eq!(
+            native_for_shell(&shell("cmd", &["/c", "mkdir", "out"]), &[]).unwrap(),
+            json!({"tool":"make_dir","path":"out"})
+        );
+        assert!(native_for_shell(&shell("cargo", &["build"]), &[]).is_none());
+        assert!(
+            native_for_shell(&shell("powershell", &["-Command", "Remove-Item x"]), &[]).is_none()
+        );
+    }
+
+    #[test]
+    fn repeated_delete_of_verified_target_is_recognized() {
+        let gone = ok("tool_forget", r#"{"forgotten":"x_tool","kind":"tool"}"#);
+        assert!(already_removed(
+            std::slice::from_ref(&gone),
+            &json!({"tool":"tool_forget","name":"x_tool"})
+        ));
+        assert!(!already_removed(
+            &[gone],
+            &json!({"tool":"tool_forget","name":"y_tool"})
+        ));
+        let deleted = ok("delete_path:C:\\w\\old.txt", "{}");
+        assert!(already_removed(
+            &[deleted],
+            &json!({"tool":"delete_path","path":"old.txt"})
+        ));
+    }
+}
+
+/// Read-only shell checks (content, size, hash, existence) that add nothing
+/// once Klyne's own postcondition checks hold.
+pub fn read_only_shell_check(action: &Value) -> bool {
+    if action["tool"] != "run_shell" {
+        return false;
+    }
+    let line = normalize_line(&shell_line(action));
+    let mutating = [
+        "remove-",
+        "set-",
+        "new-",
+        "out-file",
+        "add-content",
+        "move-",
+        "copy-",
+        "del ",
+        "rm ",
+        ">",
+        "start-",
+        "stop-",
+        "invoke-",
+    ];
+    let reading = [
+        "get-content",
+        "measure-object",
+        "get-filehash",
+        "get-item",
+        "test-path",
+        "type ",
+        "findstr",
+        "select-string",
+        "certutil -hashfile",
+    ];
+    !mutating.iter().any(|m| line.contains(m))
+        && reading.iter().any(|r| {
+            line.starts_with(r)
+                || line.contains(&format!("({r}"))
+                || line.contains(&format!("; {r}"))
+                || line.contains(&format!("| {r}"))
+        })
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    #[test]
+    fn verification_shells_are_recognized() {
+        let a = serde_json::json!({"tool":"run_shell","program":"powershell","args":["-NoProfile","-Command","(Get-Content -Raw -Path t72_o.txt) | Measure-Object -Character"]});
+        assert!(super::read_only_shell_check(&a));
+        let b = serde_json::json!({"tool":"run_shell","program":"powershell","args":["-Command","Remove-Item x; Get-Content y"]});
+        assert!(!super::read_only_shell_check(&b));
     }
 }

@@ -20,6 +20,51 @@ pub struct Helper {
     pub internal_jobs: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoleModels {
+    pub planner: Option<String>,
+    pub worker: Option<String>,
+    pub reviewer: Option<String>,
+    pub voice: Option<String>,
+}
+
+fn role_model(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_owned)
+}
+
+impl RoleModels {
+    /// Model override for a chat role; None keeps the current model.
+    pub fn for_role(&self, role: &str) -> Option<&str> {
+        match role {
+            "planner" => self.planner.as_deref(),
+            "worker" => self.worker.as_deref(),
+            "independent reviewer" => self.reviewer.as_deref(),
+            "voice" => self.voice.as_deref(),
+            _ => None,
+        }
+        .filter(|m| *m != "current")
+    }
+    /// Configured tags missing from the installed Ollama tag list.
+    #[cfg(test)]
+    pub fn missing(&self, installed: &[String]) -> Vec<String> {
+        [&self.planner, &self.worker, &self.reviewer, &self.voice]
+            .into_iter()
+            .flatten()
+            .filter(|m| *m != "current")
+            .filter(|m| {
+                !installed
+                    .iter()
+                    .any(|t| t == *m || t.strip_suffix(":latest") == Some(m.as_str()))
+            })
+            .cloned()
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub critique: String,
@@ -32,6 +77,9 @@ pub struct Settings {
     /// Evidence-based completion: host postcondition gate, reviewer loop
     /// guard and host replay of approved actions. Off by default.
     pub evidence: bool,
+    /// Per-role Ollama model tags (planner/worker/reviewer/voice). Empty
+    /// means the conversation's current model.
+    pub models: RoleModels,
     pub helper: Helper,
 }
 
@@ -59,6 +107,12 @@ pub fn parse(value: &Value) -> Settings {
         }
         .to_owned(),
         evidence: value["evidence"].as_bool().unwrap_or(false),
+        models: RoleModels {
+            planner: role_model(&value["models"]["planner"]),
+            worker: role_model(&value["models"]["worker"]),
+            reviewer: role_model(&value["models"]["reviewer"]),
+            voice: role_model(&value["models"]["voice"]),
+        },
         helper: Helper {
             enabled: helper["enabled"]
                 .as_bool()
@@ -198,6 +252,14 @@ mod tests {
         assert_eq!(s.critique, "auto");
         assert!(s.checklist);
         assert_eq!(s.think, "off");
+        assert_eq!(s.models, RoleModels::default());
+        let m =
+            parse(&json!({"models":{"worker":"ornith","reviewer":" ","planner":"current"}})).models;
+        assert_eq!(m.for_role("worker"), Some("ornith"));
+        assert_eq!(m.for_role("independent reviewer"), None);
+        assert_eq!(m.for_role("planner"), None);
+        assert_eq!(m.missing(&["qwen3.5:9b".into()]), vec!["ornith".to_owned()]);
+        assert!(m.missing(&["ornith:latest".into()]).is_empty());
         assert_eq!(parse(&json!({"think":"planning"})).think, "planning");
         assert_eq!(s.helper.model, DEFAULT_HELPER_MODEL);
         assert_eq!(s.helper.enabled, HELPER_DEFAULT_ENABLED);

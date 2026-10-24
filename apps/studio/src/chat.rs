@@ -97,6 +97,8 @@ pub struct Execution {
     pub evidence_start: usize,
     /// An approved destructive action Klyne runs itself on resume.
     pub replay_action: Option<Value>,
+    /// `{name, program, args}` of tools saved here (shell → tool_run mapping).
+    pub saved_tools: Vec<Value>,
     pub desktop_fallbacks: Vec<String>,
     pub failure: Option<crate::failure_policy::FailureDecision>,
     pub previous_plans: Vec<Vec<Task>>,
@@ -1245,6 +1247,14 @@ impl Chats {
                 chat.provider.clone()
             }
         };
+        if provider.kind == "ollama"
+            && !dedicated_review
+            && let Some(model) = crate::quality::load(self.studio_root())
+                .models
+                .for_role(role)
+        {
+            provider.model = model.to_owned();
+        }
         let mut failures = Vec::new();
         let mut responses = Vec::new();
         let mut clarification_reconsidered = false;
@@ -1952,7 +1962,12 @@ impl Chats {
                             .get(chat.execution.evidence_start..)
                             .unwrap_or(&[]);
                         let unmet = if crate::quality::load(self.studio_root()).evidence {
-                            crate::verify::unsatisfied(evidence)
+                            let mut unmet = crate::verify::unsatisfied(evidence);
+                            unmet.extend(crate::verify::unsupported_claims(
+                                review["summary"].as_str().unwrap_or(""),
+                                evidence,
+                            ));
+                            unmet
                         } else {
                             Vec::new()
                         };
@@ -2463,6 +2478,24 @@ impl Chats {
         review: bool,
     ) -> io::Result<()> {
         let before = chat.evidence.len();
+        let mut decision = decision.clone();
+        if !review
+            && crate::quality::load(self.studio_root()).evidence
+            && let Some(skip) = self.host_shortcut(chat, agent, &mut decision)
+        {
+            {
+                chat.evidence.push(skip);
+                let names = crate::capabilities::context(&self.root).unwrap_or(json!([]));
+                let present = |kind: &str, name: &str| capability_present(&names, kind, name);
+                let workspace = chat.workspace.clone();
+                if let Some(added) = chat.evidence.get_mut(before..) {
+                    crate::verify::annotate(added, &workspace, &present);
+                }
+                self.save(chat)?;
+                return guard(chat, stop, start);
+            }
+        }
+        let decision = &decision;
         let result = self.action_inner(chat, stop, start, agent, decision, review);
         let names = crate::capabilities::context(&self.root).unwrap_or(json!([]));
         let present = |kind: &str, name: &str| capability_present(&names, kind, name);
@@ -2475,6 +2508,70 @@ impl Chats {
         }
         result
     }
+    /// Evidence-gate shortcuts before dispatch: map shell requests to native
+    /// tools, answer repeated deletes of verified targets, and skip extra
+    /// read-only shell checks once postconditions hold. Returns an evidence
+    /// entry when the request is answered without dispatch.
+    fn host_shortcut(&self, chat: &mut Chat, agent: &str, decision: &mut Value) -> Option<Value> {
+        let action = decision["action"].clone();
+        let tool = action["tool"].as_str().unwrap_or("").to_owned();
+        let window = chat
+            .evidence
+            .get(chat.execution.evidence_start..)
+            .unwrap_or(&[]);
+        if tool == "tool_save" && action["program"].is_string() {
+            let name = action["name"].clone();
+            chat.execution.saved_tools.retain(|t| t["name"] != name);
+            chat.execution
+                .saved_tools
+                .push(json!({"name":name,"program":action["program"],"args":action["args"]}));
+        }
+        if matches!(
+            tool.as_str(),
+            "skill_forget" | "tool_forget" | "delete_path"
+        ) && crate::verify::already_removed(window, &action)
+        {
+            let target = action["name"]
+                .as_str()
+                .or(action["path"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            let data = if tool == "delete_path" {
+                json!({"already_removed":true})
+            } else {
+                json!({"forgotten":target,"kind":tool.trim_end_matches("_forget"),"already_removed":true})
+            };
+            let action_key = if tool == "delete_path" {
+                format!("delete_path:{target}")
+            } else {
+                tool.clone()
+            };
+            return Some(json!({"agent":agent,"action":action_key,"ok":true,
+                "summary":format!("Already removed: {target} was deleted and verified earlier in this task. Nothing to do; do not request it again."),
+                "data":data.to_string()}));
+        }
+        if tool == "run_shell" {
+            if let Some(native) =
+                crate::verify::native_for_shell(&action, &chat.execution.saved_tools)
+            {
+                chat.evidence.push(json!({"agent":"Host verifier","action":"shell_mapped","ok":true,
+                    "summary":format!("run_shell mapped to native {} (no shell approval needed)", native["tool"].as_str().unwrap_or("")),
+                    "data":native.to_string()}));
+                decision["action"] = native;
+                return None;
+            }
+            if crate::verify::read_only_shell_check(&action) && crate::verify::all_satisfied(window)
+            {
+                return Some(
+                    json!({"agent":"Host verifier","action":"verify_satisfied","ok":true,
+                    "summary":"Klyne's postcondition checks already hold for this task; extra shell verification was skipped. Report completion now.",
+                    "data":"{}"}),
+                );
+            }
+        }
+        None
+    }
+
     fn action_inner(
         &self,
         chat: &mut Chat,

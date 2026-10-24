@@ -27,7 +27,8 @@ try {
             # Windows 11 Notepad may open a tab in the user's existing window,
             # and that window must never be handed back as "launched".
             $before = @{}
-            foreach ($p in Get-Process) { $before[$p.Id] = $true }
+            $beforeWin = @{}
+            foreach ($p in Get-Process) { $before[$p.Id] = $true; if ($p.MainWindowHandle -ne 0) { $beforeWin[[string]$p.MainWindowHandle.ToInt64()] = $true } }
             $builtin = @{ 'notepad'='notepad.exe'; 'notepad.exe'='notepad.exe'; 'calc'='calc.exe'; 'calc.exe'='calc.exe'; 'calculator'='calc.exe' }
             $exe = $builtin[$appId.ToLowerInvariant()]
             if ($exe) {
@@ -56,7 +57,12 @@ try {
                 Start-Sleep -Milliseconds 200
                 $fresh = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and !$before.ContainsKey($_.Id) })
                 $pick = @($fresh | Where-Object { $want -contains $_.ProcessName }) + @($fresh) | Select-Object -First 1
-                if ($pick) { $launched = @{ window = [string]$pick.MainWindowHandle.ToInt64(); pid = $pick.Id; process_name = $pick.ProcessName; title = $pick.MainWindowTitle } }
+                if (!$pick -and $want.Count) {
+                    # Reused process (UWP/single-instance apps): accept only a
+                    # window handle that did not exist before this launch.
+                    $pick = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $want -contains $_.ProcessName -and !$beforeWin.ContainsKey([string]$_.MainWindowHandle.ToInt64()) }) | Select-Object -First 1
+                }
+                if ($pick) { $launched = @{ window = [string]$pick.MainWindowHandle.ToInt64(); pid = $pick.Id; process_name = $pick.ProcessName; title = $pick.MainWindowTitle; new_window = $true; reused_process = [bool]$before.ContainsKey($pick.Id) } }
             }
             if ($launched) { try { [KlyneDesktop]::Focus($launched.window) } catch { $launched['focus_error'] = $_.Exception.Message } }
             else { $launched = @{ window = $null; note = 'No new window appeared. The app may have opened inside an existing window (for example a new Notepad tab in the user''s window). Do not type into existing windows; stop and report this.' } }
