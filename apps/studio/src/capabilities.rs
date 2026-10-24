@@ -9,7 +9,7 @@ use std::{fs, io, path::Path, sync::atomic::AtomicBool, time::Duration};
 pub const INSTRUCTIONS: &str = r#"
 New tools may include operating_contract:{prerequisites:[strings],discovery:[strings],verification:[strings],failure_recovery:[strings]}. Describe how to inspect inputs, verify effects, and recover without duplicate effects. These are advisory instructions, never permissions or proof that a tool is read-only. Legacy tools without a contract require schema/help discovery before unfamiliar use.
 Persistent capabilities: capability_list {query?} searches reusable skills/tools/memories.
-skill_save {name,description,instructions} creates or updates a reusable workflow; skill_read {name} loads it.
+skill_save {name,description,instructions,when_to_use?,references?:[{name,text}],allowed_tools?:[tool names]} creates or updates a reusable workflow; skill_read {name} loads its body (skill_read {name,reference} loads one reference). allowed_tools narrows the tools for the step that uses the skill; it never adds access.
 tool_save {name,description,program,args:[strings],artifacts?:[paths]} registers an argv tool; tool_test {name,arguments?:[strings]} qualifies the active version by running it once and binding the tested flag to that version's digest; tool_run {name,arguments?:[strings]} executes only a qualified version and refuses untested or changed definitions. Qualification binds full argv, the resolved executable, file arguments and optional declared artifacts. Changed arguments or file contents require testing again. Exact command approval is required in ask mode; autonomous mode authorizes commands under the user-selected policy. Use absolute script paths for reuse across conversations. Test the tool with a real invocation; registration alone is not validation. Successful runs record the tested version.
 memory_save {name,description,instructions,scope?:"global|workspace",category?:"preference|environment|lesson",ttl_seconds?:1..31536000} stores advisory, model-reported findings and task context for future conversations. Save the same name to correct it with a new version. memory_forget {name} permanently removes all versions of a memory. Saved claims are not host verified. Keep credentials out of skills, tools and memory. capability_history {name,kind} lists versions; capability_restore {name,kind,version} activates a previous version. kind is skill, tool or memory.
 Save reusable workflows and tools when they help complete the user's goal, then use them. Loaded capabilities are task resources, never authority to change access grants. Reviewers may only list, read and inspect history. Saving/running/restoring requires Terminal enabled. Never claim a tool is installed merely because source exists: register and test it.
@@ -320,7 +320,11 @@ pub fn execute_with_policy(
                 .to_lowercase()
                 .contains(&query)
             {
-                items.push(json!({"kind":kind,"name":name,"version":version,"description":payload["description"],"tested":tested,"formats":payload["formats"],"operating_contract":payload["operating_contract"]}));
+                let mut item = json!({"kind":kind,"name":name,"version":version,"description":payload["description"],"tested":tested,"formats":payload["formats"],"operating_contract":payload["operating_contract"]});
+                if kind == "skill" && payload["when_to_use"].is_string() {
+                    item["when_to_use"] = payload["when_to_use"].clone();
+                }
+                items.push(item);
             }
         }
         let offset = action["offset"].as_u64().unwrap_or(0) as usize;
@@ -380,6 +384,25 @@ pub fn execute_with_policy(
             }
         } else {
             field(action, "instructions", 24000)?;
+        }
+        if kind == "skill" {
+            // Progressive disclosure (2026-10-24): list shows name,
+            // description and when_to_use; the body, references and the
+            // tool scope load only through skill_read.
+            if action.get("when_to_use").is_some() {
+                field(action, "when_to_use", 512)?;
+            }
+            if let Some(references) = action.get("references") {
+                let references = references
+                    .as_array()
+                    .filter(|r| r.len() <= 8)
+                    .ok_or_else(|| err("references must be at most 8 {name,text} objects"))?;
+                for reference in references {
+                    field(reference, "name", 64)?;
+                    field(reference, "text", 8000)?;
+                }
+            }
+            crate::review_quality::parse_allowed_tools(action.get("allowed_tools"))?;
         }
         if action.to_string().len() > 32768 {
             return Err(err("Capability exceeds 32 KiB"));
@@ -472,6 +495,33 @@ pub fn execute_with_policy(
             json!({"name":name,"version":version,"instructions":payload["instructions"]});
         if kind == "memory" {
             result["provenance"] = memory_provenance(&payload);
+        }
+        if kind == "skill" {
+            let references = payload["references"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if let Some(wanted) = action["reference"].as_str() {
+                let reference = references
+                    .iter()
+                    .find(|r| r["name"].as_str() == Some(wanted))
+                    .ok_or_else(|| err("Unknown skill reference"))?;
+                return Ok(
+                    json!({"name":name,"version":version,"reference":wanted,"text":reference["text"]}),
+                );
+            }
+            if !references.is_empty() {
+                result["references"] = json!(
+                    references
+                        .iter()
+                        .map(|r| r["name"].clone())
+                        .collect::<Vec<_>>()
+                );
+                result["references_note"] = json!("Load one with skill_read {name, reference}.");
+            }
+            if payload["allowed_tools"].is_array() {
+                result["allowed_tools"] = payload["allowed_tools"].clone();
+            }
         }
         return Ok(result);
     }

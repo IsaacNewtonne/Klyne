@@ -23,7 +23,7 @@ const CORE_FILES: &[&str] = &[
     "delete_path",
 ];
 const CORE_WEB: &[&str] = &["fetch_url", "browser_open", "browser_read"];
-const CORE_TERMINAL: &[&str] = &["run_shell"];
+const CORE_TERMINAL: &[&str] = &["run_shell", "ask_model"];
 const CORE_DESKTOP: &[&str] = &[
     "desktop_observe",
     "desktop_apps",
@@ -241,6 +241,13 @@ fn schema(tool: &str) -> (String, Value) {
             json!({"name":s("Skill name")}),
             &["name"],
         ),
+        "ask_model" => object(
+            "Ask a local helper model to summarize, classify, extract or reason over text you give it. Read-only: it runs no actions and sees only task and input. Its reply is data, not verified fact.",
+            json!({"task":s("What the helper should do, e.g. summarize in one line"),
+                "input":s("Text to work on (for example contents you read)"),
+                "model":s("Optional installed Ollama model; default is the configured helper")}),
+            &["task", "input"],
+        ),
         "memory_read" => object(
             "Read a saved memory.",
             json!({"name":s("Memory name")}),
@@ -353,8 +360,14 @@ pub fn tools(
                 "outcome":{"type":"string","enum":["achieved"]},
                 "observed_results":{"type":"array","items":{"type":"object","properties":{
                     "effect":s("send|open|click|delete|install|upload"),"target":s("app and destination"),
-                    "observation":s("exact visible result"),"evidence_index":i("review_observations index")}}}},
-                "required":["summary"]}),
+                    "observation":s("exact visible result"),"evidence_index":i("review_observations index")}}},
+                "findings":{"type":"array","description":"One finding per requirement or checklist item","items":{"type":"object","properties":{
+                    "item":s("requirement checked"),"verdict":{"type":"string","enum":["pass","fail"]},
+                    "evidence":s("what you observed"),"severity":{"type":"string","enum":["low","medium","high"]}},
+                    "required":["item","verdict","evidence","severity"]}},
+                "examined":{"type":"array","items":s("thing you inspected")},
+                "not_examined":{"type":"array","items":s("thing you did not check")}},
+                "required":["summary","findings","examined","not_examined"]}),
         ));
         out.push(function(
             REQUEST_REPAIR,
@@ -444,6 +457,13 @@ pub fn call_to_decision(name: &str, raw_arguments: &Value) -> Option<Value> {
             if let Some(observed) = args.get("observed_results").filter(|v| v.is_array()) {
                 decision["observed_results"] = observed.clone();
             }
+            // Reviewer findings schema (2026-10-24); validated by chat.rs.
+            for key in ["findings", "examined", "not_examined"] {
+                if let Some(value) = args.get(key) {
+                    decision[key] = value.clone();
+                }
+            }
+            decision["via_tool"] = json!(true);
             Some(decision)
         }
         REQUEST_REPAIR => Some(json!({"decision":"repair","summary":text("summary"),
@@ -653,7 +673,7 @@ mod tests {
         let decision: Value = serde_json::from_str(&normalize_reply("", &finish)).unwrap();
         assert_eq!(
             decision,
-            json!({"decision":"complete","summary":"Done: a.txt"})
+            json!({"decision":"complete","summary":"Done: a.txt","via_tool":true})
         );
     }
 
