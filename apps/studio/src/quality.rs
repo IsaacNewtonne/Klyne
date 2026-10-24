@@ -43,7 +43,7 @@ impl RoleModels {
             "planner" => self.planner.as_deref(),
             "worker" => self.worker.as_deref(),
             "independent reviewer" => self.reviewer.as_deref(),
-            "voice" => self.voice.as_deref(),
+            "voice" | "voice conversation" => self.voice.as_deref(),
             _ => None,
         }
         .filter(|m| *m != "current")
@@ -312,7 +312,11 @@ pub fn role_view(root: &Path) -> Value {
         }
     }
     json!({"models":{"planner":m.planner,"worker":m.worker,"reviewer":m.reviewer,"voice":m.voice},
-        "installed":installed,"warnings":warnings,"voice_wired":false})
+        "installed":installed,"warnings":warnings,"voice_wired":true,
+        "resolved":{"planner":m.for_role("planner").unwrap_or("same as main"),
+            "worker":m.for_role("worker").unwrap_or("same as main"),
+            "reviewer":m.for_role("independent reviewer").unwrap_or("same as main"),
+            "voice":m.for_role("voice conversation").unwrap_or("same as main")}})
 }
 
 /// Merge role models into quality/config.json, keeping every other key.
@@ -375,5 +379,15 @@ mod role_ui_tests {
         assert_eq!(merged["evidence"], true);
         assert_eq!(merged["models"], json!({"planner":"qwen3.5:9b"}));
         assert!(merge_models(&current, &json!({"voice":"bad tag;rm"})).is_err());
+    }
+    #[test]
+    fn voice_role_applies_to_the_voice_route() {
+        let s = parse(&json!({"models":{"voice":"small:1b"}}));
+        assert_eq!(s.models.for_role("voice conversation"), Some("small:1b"));
+        assert_eq!(s.models.for_role("worker"), None);
+        assert_eq!(
+            parse(&json!({})).models.for_role("voice conversation"),
+            None
+        );
     }
 }

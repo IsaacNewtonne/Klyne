@@ -588,7 +588,100 @@ pub fn execute(
         fs::rename(image, directory.join("screen.png"))?;
         result["observation"]["captured_at"] = json!(now_ms());
     }
+    if let Some(probe) = result
+        .as_object_mut()
+        .and_then(|o| o.remove("launch_probe"))
+        && let Some(pick) = pick_hosted_launch(&probe)
+    {
+        // Hosted app (UWP under ApplicationFrameHost): a window that did not
+        // exist before the launch and whose title matches the app.
+        let window = pick["window"].as_str().unwrap_or("").to_owned();
+        result["launched"] = pick;
+        let focus = DesktopAction::Focus {
+            window: window.clone(),
+        };
+        match execute(&directory, &focus, Some(&result.clone()), stop) {
+            Ok(focused) => {
+                result["observation"] = focused["observation"].clone();
+            }
+            Err(e) => result["launched"]["focus_error"] = json!(e.to_string()),
+        }
+    }
     Ok(result)
+}
+
+/// Pick a hosted app's launched window from a launch probe
+/// `{before:[handles], after:[{window,title,process_id,process_name}], titles:[..]}`:
+/// only a handle absent from the pre-launch snapshot whose title equals or
+/// starts with an expected title (case-insensitive). Never a pre-existing
+/// window; ambiguous (several new matches) picks none.
+pub fn pick_hosted_launch(probe: &Value) -> Option<Value> {
+    let before: Vec<&str> = probe["before"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let titles: Vec<String> = probe["titles"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| t.len() >= 3)
+        .collect();
+    if titles.is_empty() {
+        return None;
+    }
+    let matches: Vec<&Value> = probe["after"]
+        .as_array()?
+        .iter()
+        .filter(|w| {
+            let handle = w["window"].as_str().unwrap_or("");
+            let title = w["title"].as_str().unwrap_or("").trim().to_lowercase();
+            !handle.is_empty()
+                && handle != "0"
+                && !before.contains(&handle)
+                && titles
+                    .iter()
+                    .any(|t| title == *t || title.starts_with(&format!("{t} ")))
+        })
+        .collect();
+    let [window] = matches.as_slice() else {
+        return None;
+    };
+    Some(
+        json!({"window":window["window"],"pid":window["process_id"],"process_name":window["process_name"],
+        "title":window["title"],"new_window":true,"hosted":true,"reused_process":true}),
+    )
+}
+
+#[cfg(test)]
+mod hosted_launch_tests {
+    use super::pick_hosted_launch;
+    use serde_json::json;
+    #[test]
+    fn new_hosted_calculator_window_is_accepted() {
+        let probe = json!({"before":["100","200"],"titles":["Calculator"],
+            "after":[{"window":"100","title":"Notepad"},{"window":"300","title":"Calculator","process_id":7,"process_name":"ApplicationFrameHost"}]});
+        let pick = pick_hosted_launch(&probe).unwrap();
+        assert_eq!(pick["window"], "300");
+        assert_eq!(pick["new_window"], true);
+    }
+    #[test]
+    fn pre_existing_matching_window_is_never_accepted() {
+        let probe = json!({"before":["100","300"],"titles":["Calculator"],
+            "after":[{"window":"300","title":"Calculator"}]});
+        assert!(pick_hosted_launch(&probe).is_none());
+    }
+    #[test]
+    fn unrelated_or_ambiguous_new_windows_are_rejected() {
+        let other = json!({"before":[],"titles":["Calculator"],"after":[{"window":"5","title":"Untitled - Notepad"},{"window":"6","title":"Calculators online - Browser"}]});
+        assert!(pick_hosted_launch(&other).is_none());
+        let two = json!({"before":[],"titles":["Calculator"],"after":[{"window":"5","title":"Calculator"},{"window":"6","title":"Calculator"}]});
+        assert!(pick_hosted_launch(&two).is_none());
+        let no_titles =
+            json!({"before":[],"titles":[""],"after":[{"window":"5","title":"Calculator"}]});
+        assert!(pick_hosted_launch(&no_titles).is_none());
+    }
 }
 
 #[cfg(test)]

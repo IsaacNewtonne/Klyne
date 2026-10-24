@@ -8,6 +8,7 @@ try {
     [KlyneDesktop]::CheckEmergency()
     $action = $request.action
     $launched = $null
+    $probe = $null
     if ($action.tool -in @('desktop_click','desktop_scroll')) {
         $prior = $request.previous.windows | Where-Object { $_.window -eq $action.window } | Select-Object -First 1
         [KlyneDesktop]::CheckLayout([string]$action.window,[int]$prior.left,[int]$prior.top,[int]$prior.width,[int]$prior.height)
@@ -29,13 +30,17 @@ try {
             $before = @{}
             $beforeWin = @{}
             foreach ($p in Get-Process) { $before[$p.Id] = $true; if ($p.MainWindowHandle -ne 0) { $beforeWin[[string]$p.MainWindowHandle.ToInt64()] = $true } }
+            # Every visible top-level handle before launch: a hosted app's
+            # window (Calculator under ApplicationFrameHost) is accepted later
+            # only if its handle is NOT in this snapshot.
+            $beforeTop = @([KlyneDesktop]::TopHandles())
             $builtin = @{ 'notepad'='notepad.exe'; 'notepad.exe'='notepad.exe'; 'calc'='calc.exe'; 'calc.exe'='calc.exe'; 'calculator'='calc.exe' }
             $exe = $builtin[$appId.ToLowerInvariant()]
             if ($exe) {
                 [KlyneDesktop]::InputStarted = $true
                 Start-Process -FilePath (Join-Path $env:WINDIR "System32\$exe")
                 $want = @($exe -replace '\.exe$','')
-                if ($exe -eq 'calc.exe') { $want += 'CalculatorApp' }
+                if ($exe -eq 'calc.exe') { $want += 'CalculatorApp'; $titles = @('Calculator') } else { $titles = @('Notepad') }
             } else {
                 $apps = @(Get-StartApps)
                 $installed = $apps | Where-Object { $_.AppID -ceq $appId } | Select-Object -First 1
@@ -52,6 +57,7 @@ try {
                 [KlyneDesktop]::InputStarted = $true
                 Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList @("shell:AppsFolder\$($installed.AppID)")
                 $want = @()
+                $titles = @([string]$installed.Name)
             }
             for ($i = 0; $i -lt 25 -and !$launched; $i++) {
                 Start-Sleep -Milliseconds 200
@@ -64,6 +70,7 @@ try {
                 }
                 if ($pick) { $launched = @{ window = [string]$pick.MainWindowHandle.ToInt64(); pid = $pick.Id; process_name = $pick.ProcessName; title = $pick.MainWindowTitle; new_window = $true; reused_process = [bool]$before.ContainsKey($pick.Id) } }
             }
+            if (!$launched) { Start-Sleep -Milliseconds 800; $probe = @{ before = $beforeTop; after = @([KlyneDesktop]::TopWindows()); titles = @($titles); app_id = $appId } }
             if ($launched) { try { [KlyneDesktop]::Focus($launched.window) } catch { $launched['focus_error'] = $_.Exception.Message } }
             else { $launched = @{ window = $null; note = 'No new window appeared. The app may have opened inside an existing window (for example a new Notepad tab in the user''s window). Do not type into existing windows; stop and report this.' } }
         }
@@ -96,6 +103,7 @@ try {
     $result = @{ok=$true; observation=$observation}
     if ($action.tool -eq 'desktop_clipboard_get') { $result['clipboard'] = $clipboard }
     if ($launched) { $result['launched'] = $launched }
+    if ($probe) { $result['launch_probe'] = $probe }
     $result | ConvertTo-Json -Depth 12 -Compress
 } catch {
     $failure = $_.Exception.Message + ' [' + $_.FullyQualifiedErrorId + ']'

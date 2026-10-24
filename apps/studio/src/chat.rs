@@ -2665,6 +2665,35 @@ impl Chats {
                 "summary":format!("Already removed: {target} was deleted and verified earlier in this task. Nothing to do; do not request it again."),
                 "data":data.to_string()}));
         }
+        if matches!(
+            tool.as_str(),
+            "read_file"
+                | "list_dir"
+                | "stat_path"
+                | "search_file"
+                | "memory_read"
+                | "skill_read"
+                | "capability_list"
+        ) && !crate::verify::asks_to_show(&chat.execution.original_request)
+        {
+            let task_start = chat
+                .tasks
+                .iter()
+                .find(|t| t.status == "Working")
+                .and_then(|t| t.evidence_start)
+                .unwrap_or(chat.execution.evidence_start);
+            if let Some(saves) =
+                crate::verify::verified_saves(chat.evidence.get(task_start..).unwrap_or(&[]))
+            {
+                let answer = format!("Done. Klyne verified: {}.", saves.join(", "));
+                chat.execution.host_finish = Some(answer);
+                return Some(
+                    json!({"agent":"Host verifier","action":"verify_satisfied","ok":true,
+                    "summary":"Save/write checks already hold; the extra read was skipped (contents were not requested). Finishing with the evidence.",
+                    "data":"{}"}),
+                );
+            }
+        }
         let mapped = if tool == "run_shell" {
             crate::verify::native_for_shell(&action, &chat.execution.saved_tools)
         } else {

@@ -469,6 +469,71 @@ pub fn asks_to_run(text: &str) -> bool {
     .any(|w| t.contains(w))
 }
 
+/// Whether the request asks to see contents (show, read, list …), so a
+/// read after a verified write is wanted.
+pub fn asks_to_show(text: &str) -> bool {
+    let t = format!(
+        " {} ",
+        text.to_lowercase()
+            .replace(['.', ',', ';', '!', '?', ':'], " ")
+    );
+    [
+        " show ",
+        " display ",
+        " print ",
+        " contents ",
+        " content ",
+        " read ",
+        " list ",
+        " summarize ",
+        " summarise ",
+        " what's in ",
+        " what is in ",
+        " tell me ",
+        " open ",
+    ]
+    .iter()
+    .any(|w| t.contains(w))
+}
+
+const SAVES: &[&str] = &[
+    "tool_save",
+    "skill_save",
+    "memory_save",
+    "write_file",
+    "append_file",
+    "make_dir",
+    "document_create",
+    "document_save",
+    "artifact_write",
+];
+
+/// Verified save/write steps in a task window, described for the answer;
+/// None when there are none or any check is unmet.
+pub fn verified_saves(window: &[Value]) -> Option<Vec<String>> {
+    let saves: Vec<String> = window
+        .iter()
+        .filter(|e| {
+            e["agent"] != "Reviewer"
+                && e["ok"] == true
+                && e["verify"]["status"] == "satisfied"
+                && SAVES.contains(&tool_of(e["action"].as_str().unwrap_or("")))
+        })
+        .map(|e| {
+            let action = e["action"].as_str().unwrap_or("");
+            let data: Value = e["data"]
+                .as_str()
+                .and_then(|d| serde_json::from_str(d).ok())
+                .unwrap_or(Value::Null);
+            match data["name"].as_str() {
+                Some(name) if !action.contains(':') => format!("{action} {name}"),
+                _ => action.replacen(':', " ", 1),
+            }
+        })
+        .collect();
+    (!saves.is_empty() && all_satisfied(window)).then_some(saves)
+}
+
 /// A native tool covering a run_shell request, so no shell approval is
 /// needed: version checks → runtime_status, a saved tool's own command →
 /// tool_run, dir/ls → list_dir, type/cat/Get-Content → read_file,
@@ -1052,5 +1117,24 @@ mod adjective_tests {
         ];
         assert!(unsupported_claims("The saved skill t_x has been forgotten", &ev).is_empty());
         assert!(!unsupported_claims("Saved t_y to memory", &ev).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod save_finish_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn verified_save_ends_without_reads_unless_contents_are_asked() {
+        let w = vec![
+            json!({"agent":"Assistant","action":"write_file:a.txt","ok":true,"verify":{"status":"satisfied"}}),
+        ];
+        assert_eq!(verified_saves(&w).unwrap(), vec!["write_file a.txt"]);
+        let bad = vec![
+            json!({"agent":"Assistant","action":"write_file:a.txt","ok":true,"verify":{"status":"unsatisfied"}}),
+        ];
+        assert!(verified_saves(&bad).is_none());
+        assert!(asks_to_show("Write a.txt and show me its contents"));
+        assert!(!asks_to_show("Save a tool named t_x with program cmd"));
     }
 }

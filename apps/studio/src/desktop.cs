@@ -213,6 +213,23 @@ public static class KlyneDesktop {
         if(result.Length>4000)result=result.Substring(0,4000)+"[truncated]";
         return result;
     }
+    // Visible titled top-level windows (hosted-app launch check).
+    public static List<object> TopWindows() {
+        var list=new List<object>();
+        EnumWindows(delegate(IntPtr handle,IntPtr param){
+            if(list.Count>=200 || !IsWindowVisible(handle))return true;
+            var title=new StringBuilder(400);GetWindowText(handle,title,title.Capacity);if(title.Length==0)return true;
+            uint process;GetWindowThreadProcessId(handle,out process);string name=null;
+            try {using(var p=System.Diagnostics.Process.GetProcessById((int)process))name=p.ProcessName;}catch{}
+            list.Add(new {window=handle.ToInt64().ToString(),title=title.ToString(),process_id=process,process_name=name});return true;
+        },IntPtr.Zero);
+        return list;
+    }
+    public static List<string> TopHandles() {
+        var list=new List<string>();
+        EnumWindows(delegate(IntPtr handle,IntPtr param){ if(IsWindowVisible(handle))list.Add(handle.ToInt64().ToString()); return true; },IntPtr.Zero);
+        return list;
+    }
     public static object Observe(string imagePath) {        CheckEmergency();var screen=SystemInformation.VirtualScreen;
         if(screen.Width<=0 || screen.Height<=0 || screen.Width>20000 || screen.Height>12000)throw new Exception("No supported interactive desktop.");
         var width=Math.Min(1600,screen.Width);var height=Math.Max(1,(int)((long)screen.Height*width/screen.Width));
