@@ -94,8 +94,9 @@ pub fn critique_enabled(settings: &Settings, small_model: bool) -> bool {
     }
 }
 
-/// Measured on qwen3.5:9b (docs/native-tools-2026-10-24.md).
-pub const CRITIQUE_ON_FOR_SMALL_MODELS: bool = true;
+/// Off for small local models: on qwen3.5:9b one critique pass added ~38 s
+/// to a read task (docs/native-tools-2026-10-24.md). Set "critique":"on" to force it.
+pub const CRITIQUE_ON_FOR_SMALL_MODELS: bool = false;
 
 /// Whether the reviewer must return a structured findings report.
 pub fn findings_enabled(settings: &Settings, small_model: bool) -> bool {
