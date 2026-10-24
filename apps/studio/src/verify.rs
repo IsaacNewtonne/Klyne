@@ -138,6 +138,19 @@ pub fn annotate(entries: &mut [Value], workspace: &Path, present: &dyn Fn(&str, 
 }
 
 /// Acting steps whose latest host check is unsatisfied (by action string).
+/// Attempts at the same effect share a key, so a later success supersedes
+/// an earlier failure: command runs are one family, and path spellings
+/// (`.\\a`, `./a`, `a`) are one target.
+fn attempt_key(action: &str) -> String {
+    let (tool, target) = action.split_once(':').unwrap_or((action, ""));
+    let family = match tool {
+        "tool_run" | "tool_test" | "shell" | "run_shell" => "command",
+        other => other,
+    };
+    let target = target.replace('\\', "/");
+    format!("{family}:{}", target.trim_start_matches("./"))
+}
+
 pub fn unsatisfied(evidence: &[Value]) -> Vec<String> {
     let mut latest: Vec<(String, bool)> = Vec::new();
     for entry in evidence {
@@ -145,7 +158,7 @@ pub fn unsatisfied(evidence: &[Value]) -> Vec<String> {
         if !matches!(status, "satisfied" | "unsatisfied") || entry["agent"] == "Reviewer" {
             continue;
         }
-        let key = entry["action"].as_str().unwrap_or("").to_owned();
+        let key = attempt_key(entry["action"].as_str().unwrap_or(""));
         latest.retain(|(k, _)| *k != key);
         latest.push((key, status == "satisfied"));
     }
@@ -184,6 +197,18 @@ mod tests {
         assert_eq!(check(&again, Path::new("."), &none)["status"], "satisfied");
         let read = json!({"agent":"Planner","action":"browser_read","ok":true,"verify":{"status":"not_applicable"}});
         assert!(answer_supported(&[read]));
+    }
+
+    #[test]
+    fn later_success_supersedes_a_failed_attempt() {
+        let failed =
+            json!({"agent":"Assistant","action":"tool_run","verify":{"status":"unsatisfied"}});
+        let tested =
+            json!({"agent":"Assistant","action":"tool_test","verify":{"status":"satisfied"}});
+        assert!(unsatisfied(&[failed, tested]).is_empty());
+        let a = json!({"agent":"Assistant","action":"write_file:tools\\a.json","verify":{"status":"unsatisfied"}});
+        let b = json!({"agent":"Assistant","action":"write_file:./tools/a.json","verify":{"status":"satisfied"}});
+        assert!(unsatisfied(&[a, b]).is_empty());
     }
 
     #[test]
