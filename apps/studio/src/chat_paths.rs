@@ -50,7 +50,8 @@ pub fn project_directory(message: &str) -> Option<PathBuf> {
             .filter_map(|(i, c)| (c.is_whitespace() || matches!(c, ',' | ')' | '\'')).then_some(i))
             .collect();
         ends.push(tail.len());
-        for end in ends.into_iter().rev() {
+        let mut selected = false;
+        for &end in ends.iter().rev() {
             let mut path = Path::new(tail[..end].trim_end().trim_end_matches(['.', '?', '!']));
             // A named file selects its containing folder (2026-10-24), so
             // "read C:\\Users\\me\\Desktop\\notes.txt" works on the Desktop.
@@ -65,7 +66,32 @@ pub fn project_directory(message: &str) -> Option<PathBuf> {
                 if crate::safe_dir(&path).is_ok() && !found.contains(&path) {
                     found.push(path);
                 }
+                selected = true;
                 break;
+            }
+        }
+        // A file or folder the request will create selects its existing
+        // parent (2026-10-24), so "write C:\\temp\\demo\\new.txt" or "make a
+        // folder C:\\temp\\demo" uses the file tools instead of the shell.
+        if !selected {
+            for &end in ends.iter().rev() {
+                let path = Path::new(tail[..end].trim_end().trim_end_matches(['.', '?', '!']));
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if name.contains(char::is_whitespace) || path.exists() {
+                    continue;
+                }
+                if let Some(parent) = path.parent()
+                    && parent.is_dir()
+                    && crate::safe_dir(parent).is_ok()
+                    && let Ok(parent) = std::fs::canonicalize(parent)
+                {
+                    if crate::safe_dir(&parent).is_ok() && !found.contains(&parent) {
+                        found.push(parent);
+                    }
+                    break;
+                }
             }
         }
     }
@@ -131,6 +157,36 @@ mod tests {
             other.to_string_lossy()
         );
     }
+    #[test]
+    fn a_file_or_folder_to_be_created_selects_its_existing_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(temp.path()).unwrap();
+        let new_file = temp.path().join("caps.txt");
+        assert_eq!(
+            project_directory(&format!(
+                "write {} containing 'ok', then read it back",
+                new_file.display()
+            )),
+            Some(canonical.clone())
+        );
+        let new_dir = temp.path().join("demo");
+        assert_eq!(
+            project_directory(&format!(
+                "make a folder {}, write notes.txt",
+                new_dir.display()
+            )),
+            Some(canonical)
+        );
+        // Two missing levels are not guessed.
+        assert_eq!(
+            project_directory(&format!(
+                "write {}",
+                temp.path().join("a").join("b.txt").display()
+            )),
+            None
+        );
+    }
+
     #[test]
     fn a_named_file_selects_its_folder() {
         let temp = tempfile::tempdir().unwrap();

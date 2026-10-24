@@ -101,7 +101,11 @@ fn schema(tool: &str) -> (String, Value) {
                 "expected_sha256",
             ],
         ),
-        "make_dir" => object("Create a folder.", json!({"path":path()}), &["path"]),
+        "make_dir" => object(
+            "Create a folder (use this, not shell mkdir/New-Item).",
+            json!({"path":path()}),
+            &["path"],
+        ),
         "copy_file" => object(
             "Copy a file.",
             json!({"from":path(),"to":path()}),
@@ -123,7 +127,7 @@ fn schema(tool: &str) -> (String, Value) {
             &["url"],
         ),
         "run_shell" => object(
-            "Run a program with arguments in the workspace (Windows). For PowerShell use program \"powershell\" with args [\"-NoProfile\",\"-Command\",\"...\"]. Destructive commands (delete, install, registry, shutdown, force push, setx) pause for user approval.",
+            "Run a program with arguments in the workspace (Windows). For PowerShell use program \"powershell\" with args [\"-NoProfile\",\"-Command\",\"...\"]. Destructive commands (delete, install, registry, shutdown, force push, setx) pause for user approval. Not for file work: use make_dir, write_file, read_file, list_dir instead of mkdir, New-Item, Set-Content or cat.",
             json!({"program":s("Executable name or path"),"args":{"type":"array","items":{"type":"string"},"description":"Arguments"},"timeout_seconds":i("Optional timeout; 0 waits until completion")}),
             &["program", "args"],
         ),
