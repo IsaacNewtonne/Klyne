@@ -661,6 +661,47 @@ fn claim_targets(sentence: &str) -> Vec<String> {
         .collect()
 }
 
+/// "the saved skill", "a removed file": the participle names a thing rather
+/// than claiming an action.
+fn adjective_use(words: &[&str], i: usize) -> bool {
+    const BEFORE: &[&str] = &["the", "a", "an", "your", "my", "no", "any", "previously"];
+    const AFTER: &[&str] = &[
+        "tool",
+        "tools",
+        "skill",
+        "skills",
+        "memory",
+        "memories",
+        "capability",
+        "capabilities",
+        "item",
+        "items",
+        "file",
+        "files",
+    ];
+    (i > 0 && BEFORE.contains(&words[i - 1])) || words.get(i + 1).is_some_and(|w| AFTER.contains(w))
+}
+
+/// Answer for a repeated forget/delete: the latest user message names a
+/// target that was already removed and verified in this conversation.
+pub fn already_removed_answer(user_text: &str, evidence: &[Value]) -> Option<String> {
+    for target in claim_targets(user_text) {
+        for tool in ["tool_forget", "skill_forget"] {
+            if already_removed(evidence, &json!({"tool":tool,"name":target})) {
+                return Some(format!(
+                    "Already removed: {target} was deleted and verified earlier. Nothing else to do."
+                ));
+            }
+        }
+        if already_removed(evidence, &json!({"tool":"delete_path","path":target})) {
+            return Some(format!(
+                "Already removed: {target} was deleted and verified earlier. Nothing else to do."
+            ));
+        }
+    }
+    None
+}
+
 /// Claimed actions in a final answer with no matching successful evidence.
 /// Deterministic keyword check: each sentence claiming an effect (removed,
 /// saved, created, wrote, ran, opened …) needs a successful, verified tool
@@ -685,11 +726,15 @@ pub fn unsupported_claims(text: &str, evidence: &[Value]) -> Vec<String> {
             continue;
         }
         for (verbs, tools) in CLAIMS {
-            if !verbs.iter().any(|v| {
-                sentence
-                    .split(|c: char| !c.is_alphanumeric())
-                    .any(|w| w == *v)
-            }) {
+            let words: Vec<&str> = sentence
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .filter(|w| !w.is_empty())
+                .collect();
+            if !words
+                .iter()
+                .enumerate()
+                .any(|(i, w)| verbs.contains(w) && !adjective_use(&words, i))
+            {
                 continue;
             }
             let matching: Vec<&&Value> = acted
@@ -993,5 +1038,19 @@ mod wrapper_tests {
         assert!(!asks_to_run("Save a tool named x. Do not test or run it."));
         assert!(asks_to_run("Save a tool and run it."));
         assert!(!asks_to_run("Save a tool named t74_echo"));
+    }
+}
+
+#[cfg(test)]
+mod adjective_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn saved_as_adjective_is_not_a_claim() {
+        let ev = vec![
+            json!({"agent":"Assistant","action":"tool_forget","ok":true,"data":"{\"forgotten\":\"t_x\",\"kind\":\"tool\"}","verify":{"status":"satisfied"}}),
+        ];
+        assert!(unsupported_claims("The saved skill t_x has been forgotten", &ev).is_empty());
+        assert!(!unsupported_claims("Saved t_y to memory", &ev).is_empty());
     }
 }

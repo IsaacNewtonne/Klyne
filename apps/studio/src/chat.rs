@@ -2191,7 +2191,20 @@ impl Chats {
                                     })
                                     .map(|m| m.text.clone())
                                     .unwrap_or_else(|| "Done; Klyne verified the result.".into());
-                                let answer = if crate::verify::unsupported_claims(&answer, episode)
+                                let latest_user = chat
+                                    .messages
+                                    .iter()
+                                    .rev()
+                                    .find(|m| m.role == "user")
+                                    .map(|m| m.text.clone())
+                                    .unwrap_or_default();
+                                let answer = if let Some(done) =
+                                    crate::verify::already_removed_answer(
+                                        &latest_user,
+                                        &chat.evidence,
+                                    ) {
+                                    done
+                                } else if crate::verify::unsupported_claims(&answer, episode)
                                     .is_empty()
                                 {
                                     answer
