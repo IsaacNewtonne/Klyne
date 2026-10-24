@@ -3350,7 +3350,13 @@ impl Chats {
         };
         note_tool(chat, &tool, tool_started, result["ok"] != false);
         if result["observation"].is_object() {
-            chat.desktop_previous = Some(result["observation"].clone());
+            let mut observation = result["observation"].clone();
+            // Keep the launch handle with the observation so a launched pid
+            // resolves to its window (UWP windows belong to another process).
+            if result["launched"]["window"].is_string() {
+                observation["launched"] = result["launched"].clone();
+            }
+            chat.desktop_previous = Some(observation);
         }
         let mut model_result = result.clone();
         if result["observation"].is_object() {

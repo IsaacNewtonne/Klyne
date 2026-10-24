@@ -225,8 +225,15 @@ fn resolve_window(value: &Value, previous: Option<&Value>) -> Value {
         .and_then(|p| p["windows"].as_array())
         .cloned()
         .unwrap_or_default();
+    let launched = previous.map(|p| &p["launched"]);
     let resolved = if rows.iter().any(|w| w["window"] == id.as_str()) {
         id
+    } else if let Some(l) = launched.filter(|l| {
+        l["pid"].as_u64().map(|p| p.to_string()).as_deref() == Some(id.as_str())
+            || matches!(id.as_str(), "launched" | "launched.window")
+    }) && let Some(window) = l["window"].as_str()
+    {
+        window.to_string()
     } else {
         let by_pid: Vec<&Value> = rows
             .iter()
@@ -556,6 +563,12 @@ mod tests {
             Some(&previous),
         );
         assert_eq!(number["window"], "999");
+        let launched = json!({"windows":[{"window":"55","process_id":1}],"launched":{"pid":4242,"window":"55"}});
+        let via = resolve_window(
+            &json!({"tool":"desktop_type","window":4242,"text":"x"}),
+            Some(&launched),
+        );
+        assert_eq!(via["window"], "55");
         let unknown = resolve_window(
             &json!({"tool":"desktop_type","window":"5","text":"x"}),
             Some(&previous),
