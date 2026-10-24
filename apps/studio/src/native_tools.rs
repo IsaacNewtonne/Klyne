@@ -521,6 +521,17 @@ pub fn call_to_decision(name: &str, raw_arguments: &Value) -> Option<Value> {
             if tool == "run_shell" && !action.contains_key("args") {
                 action.insert("args".into(), json!([]));
             }
+            // Small models sometimes "run" an argument-free Klyne tool as a
+            // shell program; call the tool itself (2026-10-24).
+            if tool == "run_shell"
+                && action
+                    .get("args")
+                    .is_some_and(|a| a.as_array().is_some_and(Vec::is_empty))
+                && let Some(program) = action.get("program").and_then(Value::as_str)
+                && matches!(program, "runtime_status" | "app_list" | "capability_list")
+            {
+                return Some(json!({"decision":"act","action":{"tool":program}}));
+            }
             Some(json!({"decision":"act","action":Value::Object(action)}))
         }
     }
@@ -684,6 +695,18 @@ pub fn parameter_billions(model: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn klyne_tools_run_as_shell_programs_are_mapped_to_the_tool() {
+        assert_eq!(
+            call_to_decision("run_shell", &json!({"program":"runtime_status","args":[]})),
+            Some(json!({"decision":"act","action":{"tool":"runtime_status"}}))
+        );
+        assert_eq!(
+            call_to_decision("run_shell", &json!({"program":"cmd","args":[]})).unwrap()["action"]["tool"],
+            "run_shell"
+        );
+    }
 
     #[test]
     fn findings_fields_can_be_removed_from_the_reviewer_finish() {
