@@ -22,7 +22,16 @@ const CORE_FILES: &[&str] = &[
     "move_file",
     "delete_path",
 ];
-const CORE_WEB: &[&str] = &["fetch_url", "browser_open", "browser_read"];
+const CORE_WEB: &[&str] = &["fetch_url", "browser_open", "browser_read", "browser_close"];
+/// Cheap read-only/meta tools kept visible in compact mode (2026-10-24):
+/// without them small models ran e.g. "runtime_status" as a shell program.
+const CORE_META: &[&str] = &[
+    "runtime_status",
+    "capability_list",
+    "skill_read",
+    "memory_read",
+    "app_list",
+];
 const CORE_TERMINAL: &[&str] = &["run_shell", "ask_model"];
 const CORE_DESKTOP: &[&str] = &[
     "desktop_observe",
@@ -310,6 +319,7 @@ pub fn tools(
                     || CORE_WEB.contains(&t.as_str())
                     || CORE_TERMINAL.contains(&t.as_str())
                     || CORE_DESKTOP.contains(&t.as_str())
+                    || CORE_META.contains(&t.as_str())
             })
             .collect();
         if core.len() < items.len() {
