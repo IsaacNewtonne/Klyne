@@ -395,6 +395,22 @@ pub fn tools(
 }
 
 /// Remove `<think>...</think>` (and an unterminated leading think block).
+/// Remove the reviewer findings fields from the finish tool (used when the
+/// findings report is off for small models).
+pub fn without_findings(tools: &mut [Value]) {
+    for tool in tools.iter_mut() {
+        if tool["function"]["name"] == FINISH {
+            let parameters = &mut tool["function"]["parameters"];
+            if let Some(properties) = parameters["properties"].as_object_mut() {
+                for key in ["findings", "examined", "not_examined"] {
+                    properties.remove(key);
+                }
+            }
+            parameters["required"] = json!(["summary"]);
+        }
+    }
+}
+
 pub fn strip_think(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -654,6 +670,22 @@ pub fn parameter_billions(model: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn findings_fields_can_be_removed_from_the_reviewer_finish() {
+        let mut tools = tools(&json!({"files":["read_file"]}), &[], true, true);
+        let finish = |t: &[Value]| {
+            t.iter()
+                .find(|t| t["function"]["name"] == FINISH)
+                .unwrap()
+                .clone()
+        };
+        assert!(finish(&tools)["function"]["parameters"]["properties"]["findings"].is_object());
+        without_findings(&mut tools);
+        let f = finish(&tools);
+        assert!(f["function"]["parameters"]["properties"]["findings"].is_null());
+        assert_eq!(f["function"]["parameters"]["required"], json!(["summary"]));
+    }
 
     #[test]
     fn native_tool_calls_become_act_decisions() {

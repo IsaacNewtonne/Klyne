@@ -1,7 +1,7 @@
 //! Review-quality and helper-model settings (2026-10-24), read from
 //! `<studio root>/quality/config.json`. Missing keys use the defaults below.
 //!
-//! {"critique":"auto|on|off","checklist":true,
+//! {"critique":"auto|on|off","findings":"auto|on|off","checklist":true,
 //!  "helper":{"enabled":true,"endpoint":"http://127.0.0.1:11434","model":"<tag>",
 //!            "max_input_chars":12000,"timeout_seconds":90,"internal_jobs":false}}
 use serde_json::{Value, json};
@@ -23,6 +23,7 @@ pub struct Helper {
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub critique: String,
+    pub findings: String,
     pub checklist: bool,
     pub helper: Helper,
 }
@@ -30,7 +31,14 @@ pub struct Settings {
 pub fn parse(value: &Value) -> Settings {
     let helper = &value["helper"];
     let critique = value["critique"].as_str().unwrap_or("auto");
+    let findings = value["findings"].as_str().unwrap_or("auto");
     Settings {
+        findings: if matches!(findings, "on" | "off") {
+            findings
+        } else {
+            "auto"
+        }
+        .to_owned(),
         critique: if matches!(critique, "on" | "off") {
             critique
         } else {
@@ -88,6 +96,19 @@ pub fn critique_enabled(settings: &Settings, small_model: bool) -> bool {
 
 /// Measured on qwen3.5:9b (docs/native-tools-2026-10-24.md).
 pub const CRITIQUE_ON_FOR_SMALL_MODELS: bool = true;
+
+/// Whether the reviewer must return a structured findings report.
+pub fn findings_enabled(settings: &Settings, small_model: bool) -> bool {
+    match settings.findings.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => !small_model || FINDINGS_ON_FOR_SMALL_MODELS,
+    }
+}
+
+/// Off for small local models: on qwen3.5:9b the findings report made the
+/// reviewer step 2-3x longer (docs/native-tools-2026-10-24.md).
+pub const FINDINGS_ON_FOR_SMALL_MODELS: bool = false;
 
 fn endpoint_ok(endpoint: &str) -> bool {
     crate::connections::Connection::parse(&json!({"kind":"ollama","endpoint":endpoint})).is_ok()
@@ -173,6 +194,11 @@ mod tests {
         assert_eq!(s.helper.model, DEFAULT_HELPER_MODEL);
         assert!(!critique_enabled(&parse(&json!({"critique":"off"})), false));
         assert!(critique_enabled(&parse(&json!({"critique":"on"})), true));
+        let auto = parse(&Value::Null);
+        assert!(findings_enabled(&auto, false));
+        assert_eq!(findings_enabled(&auto, true), FINDINGS_ON_FOR_SMALL_MODELS);
+        assert!(findings_enabled(&parse(&json!({"findings":"on"})), true));
+        assert!(!findings_enabled(&parse(&json!({"findings":"off"})), false));
     }
 
     #[test]

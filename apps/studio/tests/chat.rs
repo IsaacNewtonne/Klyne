@@ -4511,6 +4511,42 @@ fn reviewer_findings_shape_is_enforced_and_skipped_items_reach_the_planner_as_da
 }
 
 #[test]
+fn findings_report_can_be_turned_off_for_the_reviewer() {
+    let s = Server::with_quality(json!({"critique":"off","findings":"off"}));
+    let (endpoint, fixture) = fixture_service(
+        vec![
+            content_reply(&plan().to_string()),
+            tool_reply(
+                "write_file",
+                json!({"path":"greeting.txt","contents":"Hello"}),
+            ),
+            tool_reply("finish", json!({"summary":"Saved greeting.txt"})),
+            tool_reply("finish", json!({"summary":"greeting.txt says Hello"})),
+        ],
+        true,
+    );
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let calls = fixture.join().unwrap();
+    assert_eq!(calls.len(), 4);
+    let reviewer = &calls[3];
+    assert!(
+        !reviewer["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("give findings")
+    );
+    let finish = reviewer["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["function"]["name"] == "finish")
+        .unwrap();
+    assert!(finish["function"]["parameters"]["properties"]["findings"].is_null());
+}
+
+#[test]
 fn critique_runs_for_writes_and_sends_doubts_back_to_the_reviewer() {
     let s = Server::with_quality(json!({"critique":"on"}));
     let (endpoint, fixture) = model(vec![

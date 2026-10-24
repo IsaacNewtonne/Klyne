@@ -1364,7 +1364,15 @@ impl Chats {
             let transport_failed = response.is_err();
             let parsed = response
                 .and_then(|output| parse_model_response(&output.0))
-                .and_then(|value| {
+                .and_then(|mut value| {
+                    // Findings report off (small models by default): only a
+                    // report the model chose to give is still validated.
+                    if role == "independent reviewer"
+                        && !self.findings_required(chat)
+                        && let Some(object) = value.as_object_mut()
+                    {
+                        object.remove("via_tool");
+                    }
                     validate_model_decision(role, &value)?;
                     Ok(value)
                 });
@@ -2092,6 +2100,17 @@ impl Chats {
             }
         }
     }
+    /// Whether the reviewer must return a findings report for this chat.
+    fn findings_required(&self, chat: &Chat) -> bool {
+        let small = chat
+            .execution
+            .reviewer
+            .as_ref()
+            .unwrap_or(&chat.provider)
+            .compact_tools();
+        crate::quality::findings_enabled(&crate::quality::load(self.studio_root()), small)
+    }
+
     /// 2026-10-24 review-quality prompt and context additions. Kept to a
     /// sentence each so the compact prompt for small models stays short.
     fn quality_context(
@@ -2117,7 +2136,11 @@ impl Chats {
                 }
             }
             "independent reviewer" => {
-                system.push_str(" With finish, give findings: one {item, verdict pass|fail, evidence, severity low|medium|high} per requirement or checklist item, plus examined and not_examined lists. Never finish with a failed medium or high finding.");
+                if self.findings_required(chat) {
+                    system.push_str(" With finish, give findings: one {item, verdict pass|fail, evidence, severity low|medium|high} per requirement or checklist item, plus examined and not_examined lists. Never finish with a failed medium or high finding.");
+                } else {
+                    context["review_findings"] = json!(false);
+                }
             }
             "worker" => {
                 if let Some(scope) = chat.execution.skill_scope.as_ref()

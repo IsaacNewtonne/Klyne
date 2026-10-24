@@ -160,12 +160,16 @@ impl Connection {
                 .flatten()
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect();
-            body["tools"] = json!(crate::native_tools::tools(
+            let mut tools = crate::native_tools::tools(
                 &context["available_tools"],
                 &enabled,
                 context["compact_tools"] == true,
                 role == "independent reviewer",
-            ));
+            );
+            if role == "independent reviewer" && context["review_findings"] == false {
+                crate::native_tools::without_findings(&mut tools);
+            }
+            body["tools"] = json!(tools);
         } else {
             body["format"] = json!("json");
         }
