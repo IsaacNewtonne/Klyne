@@ -2399,6 +2399,19 @@ impl Chats {
                 "The worker still repeats unchanged file writes after progress review. Unfinished work is saved; the task is not complete.",
             ));
         }
+        let evidence_gate = crate::quality::load(self.studio_root()).evidence;
+        let window = task.evidence_start.unwrap_or(chat.evidence.len());
+        if evidence_gate && crate::verify::all_satisfied(chat.evidence.get(window..).unwrap_or(&[]))
+        {
+            // Klyne's own postcondition checks already hold: repeated reads
+            // add nothing, so finish the task without another review.
+            chat.evidence.push(json!({"agent":"Host verifier","action":"review_finish","ok":true,"summary":"Postcondition checks satisfied; repeated checks stopped."}));
+            chat.status = "Working".into();
+            self.save(chat)?;
+            return Ok(Some(
+                json!({"decision":"complete","summary":"Done. Klyne verified the result directly (postcondition check satisfied)."}),
+            ));
+        }
         chat.status = "Reviewing".into();
         self.save(chat)?;
         for _ in 0..8 {
@@ -2422,7 +2435,15 @@ impl Chats {
                     self.save(chat)?;
                     return Ok(Some(review));
                 }
-                _ => self.action(chat, stop, start, "Reviewer", &review, true)?,
+                _ => {
+                    let episode = chat.evidence.get(window..).unwrap_or(&[]);
+                    if evidence_gate
+                        && reviewer_step(episode, &review_action_key(&review)) == ReviewStep::Stuck
+                    {
+                        break;
+                    }
+                    self.action(chat, stop, start, "Reviewer", &review, true)?
+                }
             }
         }
         Err(err(
