@@ -12,9 +12,10 @@
   <p class="settings-copy">Choose the language you will speak. For Vietnamese replies, choose an installed Vietnamese computer voice. Conversation mode sends turns after a pause; use headphones for reliable interruption detection.</p>
   <button id="voice-check" type="button">Check voice</button><button id="voice-preview" type="button">Test speaking voice</button><p id="voice-health" role="status"></p>`;
   el('execution-settings').before(settings);
-  const bar=document.createElement('div');bar.className='voice-controls';
-  bar.innerHTML=`<button id="voice-record" type="button" aria-label="Talk using microphone" aria-pressed="false" title="Alt + Space">🎙 Talk</button><button id="voice-conversation" type="button" aria-pressed="false">Conversation</button><button id="voice-stop" type="button">Stop voice</button><span id="voice-status" role="status" aria-live="polite">Voice off</span>`;
-  el('chat-form').before(bar);
+  let bar=document.querySelector('.composer-wrap > .voice-controls:not(#live-chat-controls)');
+  if(!bar){bar=document.createElement('div');bar.className='voice-controls';
+  bar.innerHTML=`<button id="voice-record" type="button" aria-label="Talk using microphone" aria-pressed="false" title="Alt + Space">🎙 Talk</button><button id="voice-conversation" type="button" aria-pressed="false">Conversation</button><button id="voice-stop" type="button" hidden>Stop voice</button><span id="voice-status" role="status" aria-live="polite">Voice off</span>`;
+  el('chat-form').before(bar);}
   let generation=0,request=null,audio=null,stream=null,context=null,node=null,source=null;
   let chunks=[],samples=0,recording=false,opening=false,continuous=false,voiced=0,silence=0;
   let monitoring=false;
@@ -25,7 +26,7 @@
   let saved={};try{saved=JSON.parse(localStorage.getItem('klyne-voice')||'{}');}catch(_){}
   for(const id of savedIds){if(id==='voice-computer')continue;if(saved[id]!==undefined){if(el(id).type==='checkbox')el(id).checked=!!saved[id];else el(id).value=saved[id];}}
   for(const id of ['voice-language','voice-output'])if(!el(id).value)el(id).value='en';
-  const status=text=>{el('voice-status').textContent=text;};
+  const status=text=>{el('voice-status').textContent=text;el('voice-stop').hidden=/^voice off$|stopped/i.test(text);};
   function save(){const values={};for(const id of savedIds)values[id]=el(id).type==='checkbox'?el(id).checked:el(id).value;try{localStorage.setItem('klyne-voice',JSON.stringify(values));}catch(_){} }
   for(const id of savedIds)el(id).onchange=save;
   function voices(){

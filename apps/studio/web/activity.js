@@ -1,4 +1,5 @@
 'use strict';
+setTimeout(()=>document.documentElement.classList.add('ui-ready'),1500);
 // One operation per ID, not per category: simultaneous calls can finish independently.
 (() => {
   const listeners=new Set(), operations=new Map(), flashes=new Map(), failures=new Map();
