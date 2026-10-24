@@ -3660,7 +3660,7 @@ fn production_view_tracks_real_model_workers_evidence_and_result() {
     b.eval("polling=true;snapshot=structuredClone(presentation);snapshot.status='Interrupted';snapshot.pending={proposal:{kind:'shell',program:'cargo',args:['test']}};snapshot.execution.max_tokens=1234;snapshot.execution.max_cost_usd=0.25;configuredChat=null;render()").unwrap();
     assert_eq!(b.eval("document.querySelector('#prod-continue').checkVisibility() && document.querySelector('#prod-continue').textContent==='Review action'").unwrap(),true);
     b.click("#prod-continue").unwrap();
-    assert_eq!(b.eval("document.querySelector('#pending-action').checkVisibility() && document.querySelector('#pending-action').open && document.querySelector('#pending-proposal').textContent.includes('cargo') && [...document.querySelector('#pending-disposition').options].map(o=>o.value).join(',')==='approved,abandon'").unwrap(),true);
+    assert_eq!(b.eval("document.querySelector('#pending-action').checkVisibility() && document.querySelector('#pending-action').open && document.querySelector('#pending-proposal').textContent.includes('cargo') && [...document.querySelector('#pending-disposition').options].map(o=>o.value).join(',')==='approved,approved_conversation,abandon'").unwrap(),true);
     assert_eq!(
         b.eval("executionConfig().max_tokens===1234 && executionConfig().max_cost_usd===0.25")
             .unwrap(),

@@ -491,7 +491,9 @@ impl Chats {
             .pending
             .take()
             .ok_or_else(|| err("No pending action"))?;
-        if pending["proposal"]["kind"] == "destructive" {
+        if pending.get("proposal").is_some() {
+            // "conversation" keeps the exact approved binding for this chat
+            // (destructive: the category); context changes still revoke it.
             pending["approval_scope"] = json!(if body["scope"] == "conversation" {
                 "conversation"
             } else {
@@ -532,7 +534,11 @@ impl Chats {
                     );
                 }
                 record_approval(&mut chat, &pending)?;
-                let summary = if pending["approval_scope"] == "conversation" {
+                let summary = if pending["approval_scope"] == "conversation"
+                    && pending["proposal"]["kind"] != "destructive"
+                {
+                    "User approved this exact action for the rest of this conversation".to_owned()
+                } else if pending["approval_scope"] == "conversation" {
                     format!(
                         "User approved this kind of action ({}) for the rest of this conversation",
                         pending["proposal"]["category"].as_str().unwrap_or("?")
@@ -4333,7 +4339,11 @@ fn validate_approval(chat: &Chat, pending: &Value, now: u64) -> io::Result<()> {
 fn refresh_approval_leases(chat: &mut Chat) {
     let leases = std::mem::take(&mut chat.execution.approval_leases);
     for lease in leases {
-        if validate_approval(chat, &lease, desktop::now_ms()).is_ok() {
+        // Conversation-scoped card grants do not expire with the card, but a
+        // changed context (access, workspace, script bytes) still revokes them.
+        let lasting = lease["approval_scope"] == "conversation"
+            && lease["context"] == approval_context(chat, &lease["proposal"]);
+        if lasting || validate_approval(chat, &lease, desktop::now_ms()).is_ok() {
             chat.execution.approval_leases.push(lease);
             continue;
         }
@@ -4995,7 +5005,20 @@ mod tests {
         let pending = json!({"proposal":proposal,"created_at_ms":now,"expires_at_ms":now+60000,"context":approval_context(&chat,&proposal)});
         record_approval(&mut chat, &pending).unwrap();
         assert_eq!(chat.execution.shell_grants.len(), 1);
-        fs::write(script, "changed").unwrap();
+        // A grant approved for the conversation outlives the card's expiry
+        // but is still revoked when the approved script changes.
+        let mut lasting = pending.clone();
+        lasting["approval_scope"] = json!("conversation");
+        let mut kept = chat.clone();
+        kept.execution.shell_grants.clear();
+        kept.execution.approval_leases.clear();
+        record_approval(&mut kept, &lasting).unwrap();
+        kept.execution.approval_leases[0]["expires_at_ms"] = json!(0);
+        refresh_approval_leases(&mut kept);
+        assert_eq!(kept.execution.shell_grants.len(), 1);
+        fs::write(&script, "changed").unwrap();
+        refresh_approval_leases(&mut kept);
+        assert!(kept.execution.shell_grants.is_empty());
         assert!(validate_approval(&chat, &pending, now).is_err());
         refresh_approval_leases(&mut chat);
         assert!(chat.execution.shell_grants.is_empty());
