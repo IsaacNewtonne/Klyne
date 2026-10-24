@@ -21,6 +21,47 @@ pub fn fallback(root: &Path) -> Option<Connection> {
     Connection::parse(&settings(root)?["fallback"])
         .ok()
         .filter(|connection| connection.kind != "demo")
+        // 2026-10-24: a fallback model that Ollama reports as not installed
+        // would only 404; skip it so the normal retry path is used instead.
+        .filter(|connection| !missing_ollama_model(connection))
+}
+
+fn missing_ollama_model(connection: &Connection) -> bool {
+    connection.kind == "ollama"
+        && !connection.model.is_empty()
+        && crate::connections::ollama_model_installed(&connection.endpoint, &connection.model)
+            == Some(false)
+}
+
+/// Configured recovery/helper models that Ollama reports as not installed.
+pub fn model_warnings(root: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(settings) = settings(root) {
+        for (label, key) in [
+            ("Recovery fallback", "fallback"),
+            ("Recovery repair", "repair_provider"),
+        ] {
+            if let Ok(connection) = Connection::parse(&settings[key])
+                && missing_ollama_model(&connection)
+            {
+                warnings.push(format!(
+                    "{label} model {} is not installed in Ollama. Run ollama pull {} or choose an installed model in recovery/config.json.",
+                    connection.model, connection.model
+                ));
+            }
+        }
+    }
+    let helper = crate::quality::load(root).helper;
+    if helper.enabled
+        && crate::connections::ollama_model_installed(&helper.endpoint, &helper.model)
+            == Some(false)
+    {
+        warnings.push(format!(
+            "Helper model {} is not installed in Ollama; ask_model stays hidden. Change quality/config.json or pull the model.",
+            helper.model
+        ));
+    }
+    warnings
 }
 
 pub fn record(root: &Path, chat_id: &str, incident: Value) -> std::io::Result<()> {

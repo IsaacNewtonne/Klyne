@@ -96,6 +96,9 @@ $('execution-settings').append(recoveryLink);
 fetch('/api/recovery').then(r=>r.ok?r.json():null).then(info=>{
   const port=info?.state?.recovery_port;
   if(Number.isInteger(port) && port>0 && port<65536) recoveryLink.href=`http://127.0.0.1:${port}/`;
+  // 2026-10-24: configured models missing from Ollama are shown, not 404'd.
+  const warnings=Array.isArray(info?.model_warnings)?info.model_warnings.filter(w=>typeof w==='string'):[];
+  if(warnings.length){const note=document.createElement('p');note.id='model-warnings';note.className='settings-copy';note.setAttribute('role','status');note.textContent='⚠ '+warnings.join(' ');$('execution-settings').append(note);toast(warnings[0]);}
 }).catch(()=>{});
 const linkedChat = new URLSearchParams(location.hash.slice(1)).get('chat');
 let selected = linkedChat && /^[0-9-]{1,79}$/.test(linkedChat) ? linkedChat : null, snapshot = null, chats = [], polling = false, submitting = false, revision = 0, toastTimer, pulseSeq = 0;

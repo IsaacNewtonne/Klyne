@@ -879,3 +879,95 @@ mod tests {
         );
     }
 }
+
+// ---- 2026-10-24: installed-model check and plain helper calls ----
+
+/// Installed Ollama model names at `endpoint`, cached for 60 seconds.
+/// None when Ollama is unreachable (callers then skip the check).
+pub fn ollama_models(endpoint: &str) -> Option<Vec<String>> {
+    use std::sync::{Mutex, OnceLock};
+    type Cache = Mutex<Vec<(String, std::time::Instant, Vec<String>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(entries) = cache.lock()
+        && let Some((_, at, models)) = entries.iter().find(|(e, _, _)| e == endpoint)
+        && at.elapsed() < Duration::from_secs(60)
+    {
+        return Some(models.clone());
+    }
+    let data = request_json(client(3).ok()?.get(format!("{endpoint}/api/tags")), None).ok()?;
+    let models: Vec<String> = data["models"]
+        .as_array()?
+        .iter()
+        .filter_map(|m| m["name"].as_str().map(str::to_owned))
+        .collect();
+    if let Ok(mut entries) = cache.lock() {
+        entries.retain(|(e, _, _)| e != endpoint);
+        entries.push((
+            endpoint.to_owned(),
+            std::time::Instant::now(),
+            models.clone(),
+        ));
+    }
+    Some(models)
+}
+
+/// Whether `model` is in an installed list; a tag without `:` means `:latest`.
+pub fn model_listed(models: &[String], model: &str) -> bool {
+    let wanted = if model.contains(':') {
+        model.to_owned()
+    } else {
+        format!("{model}:latest")
+    };
+    models.iter().any(|m| m == model || *m == wanted)
+}
+
+/// Some(false) only when Ollama answered and the model is absent.
+pub fn ollama_model_installed(endpoint: &str, model: &str) -> Option<bool> {
+    ollama_models(endpoint).map(|models| model_listed(&models, model))
+}
+
+/// One plain (no tools, no JSON mode) non-streaming Ollama chat call.
+/// Returns the reply text and a usage summary.
+pub fn ollama_plain(
+    endpoint: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+    num_ctx: u64,
+    timeout_seconds: u64,
+) -> io::Result<(String, Value)> {
+    let body = json!({"model":model,"stream":false,"keep_alive":"30m",
+        "options":{"num_ctx":num_ctx,"temperature":0.2},
+        "messages":[{"role":"system","content":system},{"role":"user","content":user}]});
+    let data = request_json(
+        client(timeout_seconds.clamp(5, 600))?.post(format!("{endpoint}/api/chat")),
+        Some(&body),
+    )?;
+    if let Some(message) = data["error"].as_str() {
+        return Err(error(format!("Helper model error: {message}")));
+    }
+    let text = crate::native_tools::strip_think(data["message"]["content"].as_str().unwrap_or(""))
+        .trim()
+        .to_owned();
+    let seconds = |key: &str| data[key].as_f64().unwrap_or(0.0) / 1e9;
+    Ok((
+        text,
+        json!({"prompt_tokens":data["prompt_eval_count"],"completion_tokens":data["eval_count"],
+            "load_seconds":seconds("load_duration"),"total_seconds":seconds("total_duration")}),
+    ))
+}
+
+#[cfg(test)]
+mod model_check_tests {
+    #[test]
+    fn model_listed_matches_exact_and_latest() {
+        let models = vec!["qwen3.5:9b".to_owned(), "llama3:latest".to_owned()];
+        assert!(super::model_listed(&models, "qwen3.5:9b"));
+        assert!(super::model_listed(&models, "llama3"));
+        assert!(!super::model_listed(
+            &models,
+            "hf.co/empero-ai/Qwythos-9B:Q4_K_M"
+        ));
+    }
+}

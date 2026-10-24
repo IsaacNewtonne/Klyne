@@ -30,11 +30,14 @@ mod network;
 mod performance;
 mod procedures;
 mod progress;
+mod quality;
 mod recovery;
 mod resource_routes;
 mod restart_reconciliation;
+mod review_quality;
 mod route_recovery;
 mod schedules;
+mod skipped;
 mod telemetry;
 mod voice;
 
@@ -365,7 +368,9 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
             let state = fs::read(studio.root.join("recovery/status.json"))
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-            return Ok(json!({"enabled":settings.is_some(),"state":state}));
+            return Ok(
+                json!({"enabled":settings.is_some(),"state":state,"model_warnings":recovery::model_warnings(&studio.root)}),
+            );
         }
         if method == "GET" && path == "/api/runs" {
             return studio.list();
@@ -748,6 +753,14 @@ fn main() -> io::Result<()> {
     schedules::recover(&studio.root)?;
     coordinator::recover(&studio.root)?;
     live_chat::recover(&studio.root)?;
+    // 2026-10-24: warn at startup (not 404 later) when a configured
+    // recovery or helper model is missing from Ollama's /api/tags.
+    let warn_root = studio.root.clone();
+    std::thread::spawn(move || {
+        for warning in recovery::model_warnings(&warn_root) {
+            eprintln!("Klyne warning: {warning}");
+        }
+    });
     let scheduler = Arc::downgrade(&studio);
     std::thread::spawn(move || {
         loop {
