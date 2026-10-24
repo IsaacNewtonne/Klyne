@@ -39,6 +39,7 @@ mod route_recovery;
 mod schedules;
 mod skipped;
 mod telemetry;
+mod verify;
 mod voice;
 
 use harness_core::{

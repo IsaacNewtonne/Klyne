@@ -95,6 +95,8 @@ pub struct Execution {
     pub command_policy: crate::broker::CommandPolicy,
     pub original_request: String,
     pub evidence_start: usize,
+    /// An approved destructive action Klyne runs itself on resume.
+    pub replay_action: Option<Value>,
     pub desktop_fallbacks: Vec<String>,
     pub failure: Option<crate::failure_policy::FailureDecision>,
     pub previous_plans: Vec<Vec<Task>>,
@@ -1724,6 +1726,21 @@ impl Chats {
                 }
                 self.save(chat)?;
                 let mut unsupported_completions = 0;
+                if let Some(action) = chat.execution.replay_action.take()
+                    && crate::quality::load(self.studio_root()).evidence
+                {
+                    // Run the exact approved action; the grant matches its binding.
+                    let agent = chat.tasks[index].agent.clone();
+                    self.action(
+                        chat,
+                        stop,
+                        start,
+                        &agent,
+                        &json!({"decision":"act","action":action}),
+                        false,
+                    )?;
+                    self.save(chat)?;
+                }
                 loop {
                     let task = chat.tasks[index].clone();
                     let recalled = crate::capabilities::recall_scoped(
@@ -1934,8 +1951,20 @@ impl Chats {
                             .evidence
                             .get(chat.execution.evidence_start..)
                             .unwrap_or(&[]);
-                        let completion_check =
-                            crate::completion_guard::check_review(goal, &review, evidence)
+                        let unmet = if crate::quality::load(self.studio_root()).evidence {
+                            crate::verify::unsatisfied(evidence)
+                        } else {
+                            Vec::new()
+                        };
+                        let completion_check = (if unmet.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(err(format!(
+                                "Klyne's postcondition check is unsatisfied for: {}. Completion needs a successful result with a satisfied check; repair or report the failure.",
+                                unmet.join(", ")
+                            )))
+                        })
+                        .and_then(|()| crate::completion_guard::check_review(goal, &review, evidence))
                                 .and_then(|()| {
                                     crate::completion_guard::verify_claims(
                                         &review,
@@ -2099,7 +2128,58 @@ impl Chats {
                         return Ok(());
                     }
                     Some("fail") => return Err(err(required(&review, "reason")?)),
-                    _ => self.action(chat, stop, start, "Reviewer", &review, true)?,
+                    _ => {
+                        let episode = chat
+                            .evidence
+                            .get(chat.execution.evidence_start..)
+                            .unwrap_or(&[]);
+                        let step = if crate::quality::load(self.studio_root()).evidence {
+                            reviewer_step(episode, &review_action_key(&review))
+                        } else {
+                            ReviewStep::Run
+                        };
+                        match step {
+                            ReviewStep::Run => {
+                                self.action(chat, stop, start, "Reviewer", &review, true)?
+                            }
+                            ReviewStep::Nudge => {
+                                chat.evidence.push(json!({"agent":"Host verifier","action":"review_nudge","ok":true,"summary":"Klyne's own postcondition checks are satisfied for every acting step (see verify). Do not re-read; finish now with the user-facing answer, or request repair only for a specific unmet requirement."}));
+                                self.save(chat)?;
+                            }
+                            ReviewStep::Finish => {
+                                let answer = chat
+                                    .messages
+                                    .iter()
+                                    .rev()
+                                    .find(|m| {
+                                        m.role == "assistant"
+                                            && m.agent != "Klyne"
+                                            && m.agent != "Planner"
+                                            && m.agent != "Recovery"
+                                    })
+                                    .map(|m| m.text.clone())
+                                    .unwrap_or_else(|| "Done; Klyne verified the result.".into());
+                                chat.evidence.push(json!({"agent":"Host verifier","action":"review_finish","ok":true,"summary":"Reviewer kept re-reading after host checks were satisfied; finished from verified evidence."}));
+                                push(chat, "assistant", "Klyne", &answer);
+                                chat.status = "Completed".into();
+                                chat.execution.failure = None;
+                                self.save(chat)?;
+                                return Ok(());
+                            }
+                            ReviewStep::Stuck => {
+                                chat.evidence.push(json!({"agent":"Host verifier","action":"review_loop","ok":false,"summary":"The reviewer repeated the same check without a satisfied host verification."}));
+                                chat.status = "Needs input".into();
+                                push(
+                                    chat,
+                                    "assistant",
+                                    "Klyne",
+                                    "The review kept repeating the same check and Klyne could not verify the result. Progress is saved; check the destination or send a follow-up.",
+                                );
+                                self.save(chat)?;
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2350,7 +2430,31 @@ impl Chats {
         ))
     }
 
+    /// Runs one action, then adds Klyne's own delivery status and
+    /// postcondition check to every evidence entry it produced.
     fn action(
+        &self,
+        chat: &mut Chat,
+        stop: &AtomicBool,
+        start: Instant,
+        agent: &str,
+        decision: &Value,
+        review: bool,
+    ) -> io::Result<()> {
+        let before = chat.evidence.len();
+        let result = self.action_inner(chat, stop, start, agent, decision, review);
+        let names = crate::capabilities::context(&self.root).unwrap_or(json!([]));
+        let present = |kind: &str, name: &str| capability_present(&names, kind, name);
+        let workspace = chat.workspace.clone();
+        if let Some(added) = chat.evidence.get_mut(before..) {
+            crate::verify::annotate(added, &workspace, &present);
+        }
+        if chat.evidence.len() > before {
+            let _ = self.save(chat);
+        }
+        result
+    }
+    fn action_inner(
         &self,
         chat: &mut Chat,
         stop: &AtomicBool,
@@ -3987,6 +4091,61 @@ fn revoke_card_grant(execution: &mut Execution, lease: &Value) {
     }
 }
 
+/// Whether capability_list output names an active item of this kind.
+fn capability_present(list: &Value, kind: &str, name: &str) -> bool {
+    let items = list
+        .as_array()
+        .or_else(|| list["items"].as_array())
+        .or_else(|| list["data"].as_array())
+        .or_else(|| list["capabilities"].as_array());
+    items
+        .into_iter()
+        .flatten()
+        .any(|item| item["name"] == name && (item["kind"] == kind || item["kind"].is_null()))
+}
+/// Reviewer loop guard: what to do with a reviewer read request.
+#[derive(Debug, PartialEq)]
+enum ReviewStep {
+    Run,
+    /// Skip this read and tell the reviewer to decide (host checks pass).
+    Nudge,
+    /// Stop reviewing: host checks are satisfied, complete with the worker's result.
+    Finish,
+    /// Stop reviewing: repeated reads without satisfied host checks.
+    Stuck,
+}
+fn reviewer_step(episode: &[Value], action_key: &str) -> ReviewStep {
+    let reviewer: Vec<&Value> = episode
+        .iter()
+        .filter(|e| e["agent"] == "Reviewer")
+        .collect();
+    let same = reviewer
+        .iter()
+        .filter(|e| e["action"] == action_key)
+        .count();
+    let satisfied = crate::verify::all_satisfied(episode);
+    let nudged = episode
+        .iter()
+        .any(|e| e["agent"] == "Host verifier" && e["action"] == "review_nudge");
+    if satisfied {
+        if nudged || same >= 1 {
+            return ReviewStep::Finish;
+        }
+        return ReviewStep::Nudge;
+    }
+    if same >= 2 || reviewer.len() >= 12 {
+        return ReviewStep::Stuck;
+    }
+    ReviewStep::Run
+}
+fn review_action_key(review: &Value) -> String {
+    let action = &review["action"];
+    let tool = action["tool"].as_str().unwrap_or("");
+    match action["path"].as_str().or_else(|| action["url"].as_str()) {
+        Some(target) => format!("{tool}:{target}"),
+        None => tool.to_owned(),
+    }
+}
 fn record_approval(chat: &mut Chat, pending: &Value) -> io::Result<()> {
     refresh_approval_leases(chat);
     let proposal = &pending["proposal"];
@@ -4087,6 +4246,9 @@ fn record_approval(chat: &mut Chat, pending: &Value) -> io::Result<()> {
                 "binding":binding,"category":category,
                 "scope":if conversation {"conversation"} else {"once"},
                 "granted_at_ms":now}));
+            if proposal["action"].is_object() {
+                chat.execution.replay_action = Some(proposal["action"].clone());
+            }
             Ok(())
         }
         _ => Err(err("Unknown approval proposal")),
@@ -4342,6 +4504,65 @@ mod tests {
             bad["tasks"][1]["depends_on"] = invalid;
             assert!(tasks(&bad).is_err());
         }
+    }
+    #[test]
+    fn approved_destructive_action_is_queued_for_host_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let mut chat = budget_chat(0, 0.0);
+        chat.workspace = root.path().into();
+        let now = desktop::now_ms();
+        let action = json!({"tool":"memory_forget","name":"t70"});
+        let finding = crate::destructive::Finding {
+            category: "capability_forget".into(),
+            reason: "test".into(),
+        };
+        let proposal = crate::destructive::proposal(&action, &finding);
+        let pending = json!({"proposal":proposal,"created_at_ms":now,"expires_at_ms":now+60000,"context":approval_context(&chat,&proposal),"approval_scope":"once"});
+        record_approval(&mut chat, &pending).unwrap();
+        assert_eq!(chat.execution.replay_action, Some(action));
+    }
+    #[test]
+    fn reviewer_loops_are_cut_off() {
+        let ok =
+            json!({"agent":"Assistant","action":"write_file:a","verify":{"status":"satisfied"}});
+        let read =
+            json!({"agent":"Reviewer","action":"read_file:a","verify":{"status":"not_applicable"}});
+        // Satisfied: first read is skipped with a nudge, the next finishes.
+        assert_eq!(
+            reviewer_step(std::slice::from_ref(&ok), "read_file:a"),
+            ReviewStep::Nudge
+        );
+        let nudge = json!({"agent":"Host verifier","action":"review_nudge"});
+        assert_eq!(
+            reviewer_step(&[ok.clone(), nudge], "stat_path:a"),
+            ReviewStep::Finish
+        );
+        // Unsatisfied: a third identical read is refused.
+        let bad =
+            json!({"agent":"Assistant","action":"write_file:a","verify":{"status":"unsatisfied"}});
+        assert_eq!(
+            reviewer_step(&[bad.clone(), read.clone()], "read_file:a"),
+            ReviewStep::Run
+        );
+        assert_eq!(
+            reviewer_step(&[bad, read.clone(), read], "read_file:a"),
+            ReviewStep::Stuck
+        );
+        assert_eq!(
+            review_action_key(&json!({"action":{"tool":"read_file","path":"a"}})),
+            "read_file:a"
+        );
+    }
+    #[test]
+    fn capability_presence_reads_the_list() {
+        let list = json!([{"kind":"memory","name":"teal"}]);
+        assert!(capability_present(&list, "memory", "teal"));
+        assert!(!capability_present(&list, "tool", "teal"));
+        assert!(capability_present(
+            &json!({"items":[{"kind":"tool","name":"x"}]}),
+            "tool",
+            "x"
+        ));
     }
     use harness_core::permissions::PermissionDecision;
     #[test]

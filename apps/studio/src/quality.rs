@@ -29,6 +29,9 @@ pub struct Settings {
     /// the model reports the thinking capability; workers always get
     /// think:false. "off" (default) sends think:false everywhere.
     pub think: String,
+    /// Evidence-based completion: host postcondition gate, reviewer loop
+    /// guard and host replay of approved actions. Off by default.
+    pub evidence: bool,
     pub helper: Helper,
 }
 
@@ -55,6 +58,7 @@ pub fn parse(value: &Value) -> Settings {
             _ => "off",
         }
         .to_owned(),
+        evidence: value["evidence"].as_bool().unwrap_or(false),
         helper: Helper {
             enabled: helper["enabled"]
                 .as_bool()
