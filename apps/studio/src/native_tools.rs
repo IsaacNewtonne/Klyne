@@ -567,6 +567,28 @@ pub fn call_to_decision(name: &str, raw_arguments: &Value) -> Option<Value> {
             {
                 return Some(json!({"decision":"act","action":{"tool":program}}));
             }
+            // ...and capability tools run as `tool_save name=x --program y`:
+            // turn `key=value` / `--key value` arguments into fields.
+            if tool == "run_shell"
+                && let Some(program) = action.get("program").and_then(Value::as_str)
+                && matches!(
+                    program,
+                    "skill_save"
+                        | "tool_save"
+                        | "tool_test"
+                        | "tool_run"
+                        | "memory_save"
+                        | "memory_forget"
+                )
+                && let Some(fields) = action
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .and_then(|a| keyed_fields(a))
+            {
+                let mut call = fields;
+                call.insert("tool".into(), json!(program));
+                return Some(json!({"decision":"act","action":Value::Object(call)}));
+            }
             // Same for memory: `memory_save <name> <fact...>` and
             // `memory_forget <name>` as shell programs.
             if tool == "run_shell"
@@ -590,6 +612,27 @@ pub fn call_to_decision(name: &str, raw_arguments: &Value) -> Option<Value> {
             Some(json!({"decision":"act","action":Value::Object(action)}))
         }
     }
+}
+
+/// `["name=x","--program","y"]` -> `{name:"x",program:"y"}`; `None` unless
+/// every argument is part of a key/value pair.
+fn keyed_fields(args: &[Value]) -> Option<serde_json::Map<String, Value>> {
+    let mut out = serde_json::Map::new();
+    let mut items = args.iter().map(Value::as_str);
+    while let Some(item) = items.next() {
+        let item = item?;
+        if let Some(key) = item.strip_prefix("--") {
+            let (key, value) = match key.split_once('=') {
+                Some((k, v)) => (k, v.to_string()),
+                None => (key, items.next()??.to_string()),
+            };
+            out.insert(key.replace('-', "_"), json!(value));
+        } else {
+            let (key, value) = item.split_once('=')?;
+            out.insert(key.to_string(), json!(value));
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// Strict text fallback: the whole reply (after removing reasoning) must be
@@ -769,6 +812,15 @@ mod tests {
         assert_eq!(saved["action"]["tool"], "memory_save");
         assert_eq!(saved["action"]["name"], "favorite_color_test");
         assert_eq!(saved["action"]["instructions"], "teal");
+        let tool = call_to_decision(
+            "run_shell",
+            &json!({"program":"tool_save","args":["name=t","--program","hostname","args=[]"]}),
+        )
+        .unwrap();
+        assert_eq!(
+            tool["action"],
+            json!({"tool":"tool_save","name":"t","program":"hostname","args":"[]"})
+        );
         assert_eq!(
             call_to_decision(
                 "run_shell",
