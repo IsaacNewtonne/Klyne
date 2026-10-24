@@ -86,3 +86,28 @@ Recommended user environment variables for Ollama:
 | List `C:\temp` | Completed | 25 s |
 | Read a named Desktop file | Completed | 23 to 28 s |
 | Follow-up "delete that file" | Paused for approval; the file was not deleted | 11 s |
+
+## Review quality and helper model (added 2026-10-24, afternoon)
+
+Settings: `workspace/studio/quality/config.json` (optional; missing keys use defaults):
+`{"critique":"auto|on|off","findings":"auto|on|off","checklist":true,"helper":{"enabled":false,"endpoint":"http://127.0.0.1:11434","model":"hf.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB:Q4_K_M","max_input_chars":12000,"timeout_seconds":90,"internal_jobs":false}}`
+
+- Reviewer findings report (`findings`): one {item, verdict, evidence, severity} per requirement, plus examined / not_examined. A failed medium/high finding blocks completion. `auto` = on for large models, OFF for compact (<=14B Ollama) models.
+- Critique pass (`critique`): a skeptical re-check of the reviewer's claims, skipped for chat and single read-only steps. `auto` = OFF for compact models.
+- Planner checklist (`checklist`, default on): up to 7 short checks per task.
+- Skills: `skill_save` accepts `when_to_use`, `references` (loaded on demand with `skill_read {name, reference}`) and `allowed_tools`; after `skill_read`, that step is limited to the skill's tools.
+- Skipped items: reviewer `not_examined` items go to `workspace/studio/skipped.sqlite3` (deduplicated, 14-day expiry) and reach the planner as fenced untrusted data.
+- Recovery/helper models are checked against Ollama `/api/tags` at startup; a missing model shows a warning (log + execution settings) instead of a 404.
+- `ask_model` {task, input, model?}: read-only helper-model call, no approval; exposed only when the helper is enabled and installed. OFF by default.
+
+Measurements on the MSI (RTX, 8 GB VRAM, qwen3.5:9b, num_ctx 16384, warm):
+
+| Check | Before | With findings + critique on | Final defaults |
+|---|---|---|---|
+| (a) list C:\temp | 25.2 s | 29.1 s | 29.3 s |
+| (b) read a file | 23-28 s | 30.5-57 s (one 104 s run with critique) | 28.9-43.3 s |
+| (d) mkdir + write + read back | - | - | 9.6 s to the mkdir approval, 50.3 s after |
+
+The findings report made the reviewer step 11-27 s and the critique added ~38 s, so both are off by default for small models.
+
+Helper (Nemotron 3.5 Bolt E4B, 7.5B Q4_K_M, 3.8 GB in VRAM vs 6.6 GB for qwen): Ollama cannot keep both on the 8 GB GPU and swaps them (Nemotron load 9-16 s, qwen reload 11-14 s). Warm, it was correct but not faster on short jobs because of hidden thinking (intent 1.9 s vs 0.2 s, JSON extract 5.1 s vs 2.0 s). Live delegation "read notes.txt and have the helper model summarize it in one line": 58.3 s (ask_model 13.8 s, 12.9 s of it loading) vs 17.5 s for the same request answered by qwen alone. Not worth it on this GPU; leave the helper off.
