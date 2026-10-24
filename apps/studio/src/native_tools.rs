@@ -806,16 +806,17 @@ pub fn normalize_reply(content: &str, tool_calls: &[Value]) -> String {
 
 /// Parse a size like `9b`, `14b`, `0.5b`, `3.8b-instruct` from a model tag.
 pub fn parameter_billions(model: &str) -> Option<f64> {
+    let size = |text: &str| {
+        text.split(['-', '_', '/', ':']).find_map(|part| {
+            part.to_ascii_lowercase()
+                .strip_suffix('b')
+                .and_then(|number| number.parse::<f64>().ok())
+        })
+    };
+    // Prefer the tag (qwen3.5:9b); GGUF repos put the size in the name
+    // (hf.co/bartowski/Ornith-1.5-9B-GGUF:IQ4_XS).
     let tag = model.rsplit_once(':').map(|(_, t)| t).unwrap_or(model);
-    for part in tag.split(['-', '_']) {
-        let lower = part.to_ascii_lowercase();
-        if let Some(number) = lower.strip_suffix('b')
-            && let Ok(value) = number.parse::<f64>()
-        {
-            return Some(value);
-        }
-    }
-    None
+    size(tag).or_else(|| size(model))
 }
 
 #[cfg(test)]
@@ -955,6 +956,10 @@ mod tests {
     #[test]
     fn model_sizes_are_parsed_from_tags() {
         assert_eq!(parameter_billions("qwen3.5:9b"), Some(9.0));
+        assert_eq!(
+            parameter_billions("hf.co/bartowski/Ornith-1.5-9B-GGUF:IQ4_XS"),
+            Some(9.0)
+        );
         assert_eq!(parameter_billions("llama3.2:3b-instruct-q4"), Some(3.0));
         assert_eq!(parameter_billions("qwen2.5:0.5b"), Some(0.5));
         assert_eq!(parameter_billions("fixture"), None);
