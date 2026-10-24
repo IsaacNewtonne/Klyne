@@ -110,6 +110,28 @@ impl Tool for FetchTool {
                 };
             }
         };
+        if response.status().is_redirection() {
+            // Not followed (the permission check covered only this URL).
+            // Report the target so the caller can fetch it explicitly.
+            let target = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| reqwest::Url::parse(url).ok()?.join(v).ok())
+                .map(|u| u.to_string())
+                .filter(|u| u.len() <= 2048);
+            return Observation {
+                ok: false,
+                summary: format!("fetch failed for {url}"),
+                data: match target {
+                    Some(target) => format!(
+                        "HTTP {} redirect to {target} (not followed; fetch that URL directly)",
+                        response.status()
+                    ),
+                    None => format!("HTTP {}", response.status()),
+                },
+            };
+        }
         if !response.status().is_success() {
             return Observation {
                 ok: false,

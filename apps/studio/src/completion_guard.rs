@@ -141,6 +141,9 @@ pub fn check_review(
                     | "browser_read"
                     | "browser_screenshot"
                     | "browser_close"
+                    // Opening a page in the isolated browser is a read, like
+                    // fetch (2026-10-24); clicks, typing and uploads still count.
+                    | "browser_open"
             )
     });
     if app_action
@@ -522,5 +525,22 @@ mod tests {
                 effect
             ));
         }
+    }
+
+    #[test]
+    fn reading_a_page_in_the_isolated_browser_needs_no_effect_citation() {
+        let evidence = vec![
+            serde_json::json!({"agent":"Assistant","action":"browser_open","ok":true,"data":"Example Domain"}),
+            serde_json::json!({"agent":"Assistant","action":"browser_read","ok":true,"data":"Example Domain"}),
+            serde_json::json!({"agent":"Assistant","action":"browser_close","ok":true,"data":""}),
+        ];
+        let review =
+            serde_json::json!({"decision":"complete","summary":"The heading is Example Domain"});
+        assert!(check_review("open example.com and read the heading", &review, &evidence).is_ok());
+        let mut clicked = evidence.clone();
+        clicked.push(
+            serde_json::json!({"agent":"Assistant","action":"browser_click","ok":true,"data":""}),
+        );
+        assert!(check_review("open example.com and click", &review, &clicked).is_err());
     }
 }
