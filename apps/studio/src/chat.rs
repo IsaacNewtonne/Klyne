@@ -2519,12 +2519,12 @@ impl Chats {
             .evidence
             .get(chat.execution.evidence_start..)
             .unwrap_or(&[]);
-        if tool == "tool_save" && action["program"].is_string() {
+        if tool == "tool_save" && (action["program"].is_string() || action["code"].is_string()) {
             let name = action["name"].clone();
             chat.execution.saved_tools.retain(|t| t["name"] != name);
             chat.execution
                 .saved_tools
-                .push(json!({"name":name,"program":action["program"],"args":action["args"]}));
+                .push(json!({"name":name,"program":action["program"],"args":action["args"],"code":action["code"]}));
         }
         if matches!(
             tool.as_str(),

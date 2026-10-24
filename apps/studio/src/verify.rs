@@ -343,6 +343,18 @@ mod tests {
     }
 }
 
+const NATIVE_BY_NAME: &[&str] = &[
+    "memory_forget",
+    "skill_forget",
+    "tool_forget",
+    "tool_run",
+    "tool_test",
+    "runtime_status",
+    "memory_read",
+    "skill_read",
+    "capability_list",
+];
+
 /// Full command line of a run_shell action, unwrapping `powershell -Command`
 /// and `cmd /c` wrappers.
 fn shell_line(action: &Value) -> String {
@@ -420,9 +432,25 @@ pub fn native_for_shell(action: &Value, saved: &[Value]) -> Option<Value> {
                 .join(" "),
         );
         let stripped = line.split('|').next().unwrap_or("").trim().to_owned();
-        if !own.is_empty() && (stripped == own || stripped == full) {
+        let code = normalize_line(tool["code"].as_str().unwrap_or(""));
+        if (!code.is_empty() && (line == code || stripped == code))
+            || (tool["program"].is_string()
+                && !own.is_empty()
+                && (stripped == own || stripped == full))
+        {
             return Some(json!({"tool":"tool_run","name":tool["name"]}));
         }
+    }
+    // A native tool name typed as a shell command ("skill_forget x").
+    let first: Vec<&str> = line.split_whitespace().collect();
+    if let [verb, rest @ ..] = first.as_slice()
+        && NATIVE_BY_NAME.contains(verb)
+    {
+        let mut native = json!({"tool":verb});
+        if let Some(name) = rest.first() {
+            native["name"] = json!(name);
+        }
+        return Some(native);
     }
     if line.contains("--version") && (line.contains("klyne") || line.contains("runtime")) {
         return Some(json!({"tool":"runtime_status"}));
@@ -755,6 +783,34 @@ mod claim_tests {
             json!({"tool":"make_dir","path":"out"})
         );
         assert!(native_for_shell(&shell("cargo", &["build"]), &[]).is_none());
+        let code = [json!({"name":"t74_echo","code":"cmd /c echo hello"})];
+        assert_eq!(
+            native_for_shell(
+                &shell(
+                    "powershell",
+                    &[
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "cmd /c echo hello"
+                    ]
+                ),
+                &code
+            )
+            .unwrap()["name"],
+            "t74_echo"
+        );
+        assert_eq!(
+            native_for_shell(
+                &shell(
+                    "powershell",
+                    &["-NoProfile", "-Command", "skill_forget t74_echo"]
+                ),
+                &[]
+            )
+            .unwrap(),
+            json!({"tool":"skill_forget","name":"t74_echo"})
+        );
         assert!(
             native_for_shell(&shell("powershell", &["-Command", "Remove-Item x"]), &[]).is_none()
         );
