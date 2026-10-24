@@ -4155,6 +4155,10 @@ fn reviewer_step(episode: &[Value], action_key: &str) -> ReviewStep {
         return ReviewStep::Nudge;
     }
     if same >= 2 || reviewer.len() >= 12 {
+        // Forced decision: a supported answer finishes, otherwise stop.
+        if crate::verify::answer_supported(episode) {
+            return ReviewStep::Finish;
+        }
         return ReviewStep::Stuck;
     }
     ReviewStep::Run

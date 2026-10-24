@@ -68,6 +68,11 @@ pub fn check(entry: &Value, workspace: &Path, present: &dyn Fn(&str, &str) -> bo
         return json!({"status":"not_applicable","check":"read-only or approval record"});
     }
     if entry["ok"] != true {
+        let text = format!("{} {}", entry["summary"], entry["data"]).to_lowercase();
+        if tool.ends_with("_forget") && text.contains("no saved") {
+            // Forgetting something already absent still meets the postcondition.
+            return json!({"status":"satisfied","check":"already absent"});
+        }
         return json!({"status":"unsatisfied","check":"the tool reported failure"});
     }
     let target = action.split_once(':').map(|(_, t)| t).unwrap_or("");
@@ -152,6 +157,15 @@ pub fn unsatisfied(evidence: &[Value]) -> Vec<String> {
 }
 
 /// True when at least one acting step was verified and none is unsatisfied.
+/// Pure answers: nothing unsatisfied and at least one successful
+/// non-reviewer result (verify may be n/a for reads).
+pub fn answer_supported(evidence: &[Value]) -> bool {
+    unsatisfied(evidence).is_empty()
+        && evidence
+            .iter()
+            .any(|e| e["ok"] == true && e["agent"] != "Reviewer" && e["agent"] != "Host verifier")
+}
+
 pub fn all_satisfied(evidence: &[Value]) -> bool {
     unsatisfied(evidence).is_empty()
         && evidence
@@ -162,6 +176,15 @@ pub fn all_satisfied(evidence: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_forget_of_absent_item_is_satisfied_and_reads_support_answers() {
+        let none = |_: &str, _: &str| false;
+        let again = json!({"agent":"Assistant","action":"memory_forget","ok":false,"summary":"No saved memory named 'x'"});
+        assert_eq!(check(&again, Path::new("."), &none)["status"], "satisfied");
+        let read = json!({"agent":"Planner","action":"browser_read","ok":true,"verify":{"status":"not_applicable"}});
+        assert!(answer_supported(&[read]));
+    }
 
     #[test]
     fn delivery_and_file_checks() {
