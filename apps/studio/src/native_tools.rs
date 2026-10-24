@@ -266,6 +266,39 @@ fn schema(tool: &str) -> (String, Value) {
             json!({"name":s("Memory name")}),
             &["name"],
         ),
+        // Argument schemas for the capability tools (2026-10-24); without
+        // them small models guessed the fields and looped on errors.
+        "memory_save" => object(
+            "Save a memory for future conversations (advisory, not verified).",
+            json!({"name":s("Short id: letters, digits, - or _"),"description":s("One line"),
+                "instructions":s("The fact to remember"),
+                "scope":{"type":"string","enum":["global","workspace"]},
+                "category":{"type":"string","enum":["preference","environment","lesson"]}}),
+            &["name", "description", "instructions"],
+        ),
+        "memory_forget" => object(
+            "Permanently remove a saved memory.",
+            json!({"name":s("Memory name")}),
+            &["name"],
+        ),
+        "skill_save" => object(
+            "Save a reusable skill (instructions for a kind of task).",
+            json!({"name":s("Short id: letters, digits, - or _"),"description":s("One line"),
+                "instructions":s("Steps to follow"),"when_to_use":s("Optional: when to load it"),
+                "allowed_tools":{"type":"array","items":s("tool name"),"description":"Optional: tools the skill may use"}}),
+            &["name", "description", "instructions"],
+        ),
+        "tool_save" => object(
+            "Save a reusable command tool: a program with fixed arguments.",
+            json!({"name":s("Short id: letters, digits, - or _"),"description":s("One line"),
+                "program":s("Executable"),"args":{"type":"array","items":{"type":"string"},"description":"Arguments"}}),
+            &["name", "description", "program", "args"],
+        ),
+        "tool_test" | "tool_run" => object(
+            "Test (tool_test) or run (tool_run, after a passing test) a saved tool.",
+            json!({"name":s("Tool name")}),
+            &["name"],
+        ),
         _ => (
             format!("Klyne built-in tool {tool}. See the system instructions for its arguments."),
             json!({"type":"object","properties":{},"additionalProperties":true}),
