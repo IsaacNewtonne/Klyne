@@ -833,4 +833,4 @@ h1,h2,#prod-title,#ui-callout h3,.welcome h1{font-family:Bahnschrift,"DIN Altern
 /* Hide the shell until the first data render so late-filled parts don't jump (activity.js reveals it after 1.5s regardless). */
 @media (scripting:enabled){html:not(.ui-ready) .app{visibility:hidden}}
 @media (max-width:600px){.production-on #send,.production-on #stop-chat,#send,#stop-chat{min-height:44px}.settings-panel summary,#settings summary,aside details>summary,details>summary{min-height:44px;display:flex;align-items:center}input[type=checkbox]{min-width:20px;min-height:20px}label:has(>input[type=checkbox]){min-height:44px;display:flex;align-items:center;gap:8px}}
-@media (max-width:600px){html .production-on #chat-form #send,html .production-on #chat-form #stop-chat,html #chat-form #send,html #chat-form #stop-chat{min-height:44px;height:44px}}
+@media (max-width:600px){.production-on #production #chat-form #send,.production-on #production #chat-form #stop-chat,#chat-form #send,#chat-form #stop-chat{min-height:44px;height:44px}}
