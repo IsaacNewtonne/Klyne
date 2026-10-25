@@ -30,8 +30,26 @@ fn normalized(text: &str) -> String {
 /// Which interactions the user's words ask for. Only imperative tasks about
 /// a page, link, browser or app count; how/why questions without a URL are
 /// explanations, not interactions.
+/// The words of `text` without URLs and file paths, so a folder named
+/// `klyne_click_live` or a URL slug is not read as an instruction.
+pub fn prose(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|w| {
+            let w = w.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | ',' | ';'));
+            let b = w.as_bytes();
+            !(w.contains("://")
+                || w.contains('\\')
+                || w.contains('/')
+                || w.contains('_')
+                || w.to_lowercase().starts_with("www.")
+                || (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':'))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn needs(text: &str) -> Needs {
-    let n = normalized(text);
+    let n = normalized(&prose(text));
     let has = |words: &[&str]| words.iter().any(|w| n.contains(&format!(" {w} ")));
     let url = text.contains("http://") || text.contains("https://");
     let context = url
@@ -365,6 +383,20 @@ mod tests {
     }
 
     const TASK: &str = r#"Open https://example.com in the browser, click the "More information..." link, and tell me the title of the page it lands on."#;
+
+    #[test]
+    fn words_inside_paths_and_urls_are_not_instructions() {
+        // Live 2026-10-25: the test root "klyne_click_live_20261025" in the
+        // planner's absolute save path read as "click".
+        let save = r"Extract two sentences, then write to \\?\C:\temp\klyne_click_live_20261025\files\summary.txt. Summarize GitHub issue https://github.com/rust-lang/rust/issues/100 and save the summary to summary.txt.";
+        assert!(!needs(save).click);
+        assert!(
+            !needs("Summarize https://example.com/click-here/submit and the page C:/click/tap")
+                .click
+        );
+        assert!(needs("Open https://example.com and click the Learn more link").click);
+        assert!(!crate::web_reach::needs_interaction(save));
+    }
 
     #[test]
     fn needs_reads_imperative_interactions_only() {

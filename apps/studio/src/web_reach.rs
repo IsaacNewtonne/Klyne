@@ -1661,7 +1661,8 @@ pub fn browser_challenge(title: &str, text: &str) -> bool {
 /// logins, screenshots or an explicit browser), so read-only routing and
 /// host-level blocks must not stand in for the browser.
 pub fn needs_interaction(text: &str) -> bool {
-    let words: String = text
+    // Words inside URLs and file paths are not instructions.
+    let words: String = crate::interaction::prose(text)
         .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { ' ' })
