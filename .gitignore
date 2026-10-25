@@ -14,3 +14,11 @@
 artifacts/
 # Downloaded by scripts/install-yt-dlp.ps1 (video_transcript).
 /tools/yt-dlp/
+
+# Local databases (chat stores, skipped items) never belong in Git.
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-wal
+*.db-shm
