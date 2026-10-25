@@ -334,6 +334,25 @@ impl Chats {
     /// Web-reach settings for this conversation: the Jina fallback flag from
     /// quality/config.json, yt-dlp from Klyne's tools folder, and a GitHub
     /// token only when the user granted GITHUB_TOKEN for api.github.com.
+    /// The user's words that decide whether a task needs real browser
+    /// interaction: the original request, the latest user message and the
+    /// working task's instruction.
+    fn interaction_text(&self, chat: &Chat) -> String {
+        let last_user = chat
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.text.as_str())
+            .unwrap_or("");
+        let task = chat
+            .tasks
+            .iter()
+            .find(|t| t.status == "Working")
+            .map(|t| t.instruction.as_str())
+            .unwrap_or("");
+        format!("{} {last_user} {task}", chat.execution.original_request)
+    }
     fn reach_options(&self, chat: &Chat) -> crate::web_reach::Options {
         let token = crate::broker::secret_allowed(
             &chat.execution.secret_grants,
@@ -2617,6 +2636,58 @@ impl Chats {
             self.save(chat)?;
             return guard(chat, stop, start);
         }
+        // Browser on a blocked source: answered from evidence, no wandering.
+        // Fetch-first: a read-only browser_open of an https link becomes
+        // fetch_url (the browser stays available if the fetch is too thin
+        // or the task needs clicks, forms or a login).
+        let mut routed_from_browser = false;
+        if !review
+            && decision["action"]["tool"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("browser_"))
+        {
+            let interactive = crate::web_reach::needs_interaction(&self.interaction_text(chat));
+            let window = chat
+                .evidence
+                .get(chat.execution.evidence_start..)
+                .unwrap_or(&[]);
+            if let Some(skip) =
+                crate::web_reach::browser_blocked(window, &decision["action"], interactive, agent)
+            {
+                chat.evidence.push(skip);
+                let workspace = chat.workspace.clone();
+                if let Some(added) = chat.evidence.get_mut(before..) {
+                    crate::verify::annotate(added, &workspace, &|_: &str, _: &str| false);
+                }
+                self.save(chat)?;
+                return guard(chat, stop, start);
+            }
+            if decision["action"]["tool"] == "browser_open"
+                && chat.access.web
+                && !interactive
+                && !crate::clarification::existing_browser_profile(&chat.execution.original_request)
+                && let Some(url) = decision["action"]["url"]
+                    .as_str()
+                    .filter(|u| u.starts_with("https://"))
+                    .map(str::to_owned)
+                && !crate::web_reach::fetched_before(window, &url)
+            {
+                decision["action"] = json!({"tool":"fetch_url","url":url});
+                routed_from_browser = true;
+                // The fetch may itself hit a blocked source.
+                if let Some(skip) =
+                    crate::web_reach::repeat_of_blocked(window, &decision["action"], agent)
+                {
+                    chat.evidence.push(skip);
+                    let workspace = chat.workspace.clone();
+                    if let Some(added) = chat.evidence.get_mut(before..) {
+                        crate::verify::annotate(added, &workspace, &|_: &str, _: &str| false);
+                    }
+                    self.save(chat)?;
+                    return guard(chat, stop, start);
+                }
+            }
+        }
         if !review
             && crate::quality::load(self.studio_root()).evidence
             && let Some(skip) = self.host_shortcut(chat, agent, &mut decision)
@@ -2635,6 +2706,22 @@ impl Chats {
         }
         let decision = &decision;
         let result = self.action_inner(chat, stop, start, agent, decision, review);
+        if routed_from_browser && let Some(added) = chat.evidence.get_mut(before..) {
+            for entry in added.iter_mut().filter(|e| {
+                e["action"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("fetch:"))
+            }) {
+                entry["routed_from"] = json!("browser_open");
+                let note = if entry["ok"] == true {
+                    " (Klyne read this link with fetch_url instead of opening the browser; call browser_open again only if this text is too thin or the task needs clicks, forms or a login)"
+                } else {
+                    " (Klyne tried fetch_url before the browser)"
+                };
+                let summary = format!("{}{note}", entry["summary"].as_str().unwrap_or(""));
+                entry["summary"] = json!(summary);
+            }
+        }
         let names = crate::capabilities::context(&self.root).unwrap_or(json!([]));
         let present = |kind: &str, name: &str| capability_present(&names, kind, name);
         let workspace = chat.workspace.clone();
@@ -3180,7 +3267,18 @@ impl Chats {
                     "browser_read" | "browser_screenshot" | "browser_close"
                 ),
             ) == harness_core::EffectState::Unknown;
-            chat.evidence.push(json!({"agent":agent,"action":decision["action"]["tool"],"ok":value["ok"]!=false,"summary":"Browser observation","data":value.to_string()}));
+            let mut entry = json!({"agent":agent,"action":decision["action"]["tool"],"ok":value["ok"]!=false,"summary":"Browser observation","data":value.to_string()});
+            // Page URL, source and anti-bot challenge classification: a
+            // challenge page is PLATFORM_BLOCKED and never evidence.
+            crate::web_reach::annotate_browser(
+                &mut entry,
+                &value,
+                chat.evidence
+                    .get(chat.execution.evidence_start..)
+                    .unwrap_or(&[]),
+                decision["action"]["url"].as_str(),
+            );
+            chat.evidence.push(entry);
             if !uncertain {
                 chat.pending = None;
             }

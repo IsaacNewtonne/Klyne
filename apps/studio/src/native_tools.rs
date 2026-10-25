@@ -153,7 +153,7 @@ fn schema(tool: &str) -> (String, Value) {
             &["program", "args"],
         ),
         "browser_open" => object(
-            "Open a URL in Klyne's isolated browser.",
+            "Open a URL in Klyne's isolated browser, for pages that need clicks, forms or a login. To read or summarize a link, call fetch_url instead: Klyne reads read-only links with fetch_url first and opens the browser only when the fetched text is too thin. Anti-bot challenge pages return PLATFORM_BLOCKED; do not retry them.",
             json!({"url":s("URL")}),
             &["url"],
         ),
