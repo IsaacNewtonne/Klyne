@@ -27,6 +27,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "document_read",
     "runtime_status",
     "fetch_url",
+    "video_transcript",
     "capability_list",
     "skill_read",
     "memory_read",
