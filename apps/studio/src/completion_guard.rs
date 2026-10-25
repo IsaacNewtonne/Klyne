@@ -118,6 +118,14 @@ fn observed_effect(
         })
 }
 
+fn navigated_click(entry: &serde_json::Value) -> bool {
+    let data = match &entry["data"] {
+        serde_json::Value::String(s) => serde_json::from_str(s).unwrap_or_default(),
+        other => other.clone(),
+    };
+    data["changed"] == true && data["url"].as_str().is_some_and(|u| !u.is_empty())
+}
+
 pub fn check_review(
     goal: &str,
     review: &serde_json::Value,
@@ -145,6 +153,10 @@ pub fn check_review(
                     // fetch (2026-10-24); clicks, typing and uploads still count.
                     | "browser_open"
             )
+            // A browser click whose own observation shows the page it
+            // changed to has read its result (the interaction gate checks
+            // the answer against it); sends still need observed_results.
+            && !(action == "browser_click" && navigated_click(e))
     });
     if app_action
         && ![
@@ -386,6 +398,16 @@ mod tests {
             )
             .is_ok()
         );
+    }
+    #[test]
+    fn a_click_that_landed_on_a_new_page_needs_no_extra_inspection() {
+        let landed = json!({"agent":"Assistant","action":"browser_click","ok":true,"data":json!({"url":"https://www.iana.org/help/example-domains","changed":true,"title":"Example Domains"}).to_string()});
+        let review = json!({"decision":"complete","summary":"The page title is Example Domains."});
+        assert!(check_review("click Learn more", &review, &[landed]).is_ok());
+        let unchanged = json!({"agent":"Assistant","action":"browser_click","ok":true,"data":json!({"url":"https://x.test","changed":false}).to_string()});
+        assert!(check_review("click Learn more", &review, &[unchanged]).is_err());
+        let fill = json!({"agent":"Assistant","action":"browser_fill","ok":true,"data":"{}"});
+        assert!(check_review("type cats", &review, &[fill]).is_err());
     }
     #[test]
     fn unrelated_actions_and_targets_never_confirm_saves() {

@@ -1889,6 +1889,42 @@ impl Chats {
                             );
                             return Ok(());
                         }
+                        // Interaction gate: a click or typing task needs the
+                        // real action, a changed page and an answer from it.
+                        let last_open = chat
+                            .tasks
+                            .iter()
+                            .enumerate()
+                            .all(|(i, t)| i == index || t.status == "Done");
+                        let need_text = if last_open {
+                            format!("{} {}", task.instruction, chat.execution.original_request)
+                        } else {
+                            task.instruction.clone()
+                        };
+                        if let Some(problem) = crate::interaction::problem(
+                            &need_text,
+                            summary,
+                            chat.evidence
+                                .get(chat.execution.evidence_start..)
+                                .unwrap_or(&[]),
+                            chat.access.web || chat.access.desktop,
+                        ) {
+                            unsupported_completions += 1;
+                            chat.evidence.push(json!({"agent":"Worker check","action":"interaction_check","ok":false,"summary":problem,"data":"The proposed answer was not accepted."}));
+                            self.save(chat)?;
+                            if unsupported_completions < 3 {
+                                continue;
+                            }
+                            chat.tasks[index].status = "Needs input".into();
+                            chat.status = "Needs input".into();
+                            push(
+                                chat,
+                                "assistant",
+                                "Klyne",
+                                "The task asks for a click or typing, but I couldn't confirm that it happened and changed the page, so I didn't report a result. Progress is saved; press Resume work to try again.",
+                            );
+                            return Ok(());
+                        }
                         push(chat, "assistant", &task.agent, summary);
                         chat.tasks[index].status = "Done".into();
                         chat.tasks[index].evidence_end = Some(chat.evidence.len());
@@ -2095,6 +2131,20 @@ impl Chats {
                                 unmet.join(", ")
                             )))
                         })
+                        .and_then(|()| {
+                            let answer = format!(
+                                "{}\n{}",
+                                review["summary"].as_str().unwrap_or(""),
+                                review["answer"].as_str().unwrap_or("")
+                            );
+                            crate::interaction::problem(
+                                goal,
+                                &answer,
+                                evidence,
+                                chat.access.web || chat.access.desktop,
+                            )
+                            .map_or(Ok(()), |p| Err(err(p)))
+                        })
                         .and_then(|()| crate::completion_guard::check_review(goal, &review, evidence))
                                 .and_then(|()| {
                                     crate::completion_guard::verify_claims(
@@ -2108,7 +2158,12 @@ impl Chats {
                             chat.execution.failure = Some(crate::failure_policy::decide(
                                 crate::failure_policy::FailureKind::VerificationNeeded,
                             ));
-                            chat.evidence.push(json!({"agent":"Completion review","action":"completion_check","ok":false,"summary":error.to_string(),"data":"Read-only verification is needed. Do not repeat the action."}));
+                            let data = if error.to_string().starts_with("Interaction check") {
+                                "Return a repair task for the worker to do the interaction with browser_click (or the desktop equivalent) and answer from the page after it."
+                            } else {
+                                "Read-only verification is needed. Do not repeat the action."
+                            };
+                            chat.evidence.push(json!({"agent":"Completion review","action":"completion_check","ok":false,"summary":error.to_string(),"data":data}));
                             note_verification(chat, verify_started);
                             if verification_failures < 3 {
                                 self.save(chat)?;
@@ -2649,6 +2704,7 @@ impl Chats {
         // fetch_url (the browser stays available if the fetch is too thin
         // or the task needs clicks, forms or a login).
         let mut routed_from_browser = false;
+        let mut routed_to_click = false;
         if !review
             && decision["action"]["tool"]
                 .as_str()
@@ -2669,6 +2725,25 @@ impl Chats {
                 }
                 self.save(chat)?;
                 return guard(chat, stop, start);
+            }
+            // Click tasks: a link on the current page is clicked instead
+            // of opened; a guessed URL is refused with the page's links.
+            match crate::interaction::route_open(
+                &self.interaction_text(chat),
+                window,
+                &decision["action"],
+            ) {
+                Some(crate::interaction::OpenRoute::Click(click)) => {
+                    decision["action"] = click;
+                    routed_to_click = true;
+                }
+                Some(crate::interaction::OpenRoute::Refuse(hint)) => {
+                    let page = crate::web_reach::browser_page(window);
+                    chat.evidence.push(json!({"agent":agent,"action":"browser_open","ok":false,"route":"use_click","url":decision["action"]["url"],"page_url":page,"summary":hint.clone(),"data":hint}));
+                    self.save(chat)?;
+                    return guard(chat, stop, start);
+                }
+                None => {}
             }
             if decision["action"]["tool"] == "browser_open"
                 && chat.access.web
@@ -2714,6 +2789,14 @@ impl Chats {
         }
         let decision = &decision;
         let result = self.action_inner(chat, stop, start, agent, decision, review);
+        if routed_to_click && let Some(added) = chat.evidence.get_mut(before..) {
+            for entry in added.iter_mut().filter(|e| e["action"] == "browser_click") {
+                entry["routed_from"] = json!("browser_open");
+                entry["summary"] = json!(
+                    "Browser observation (the task asks for a click, so Klyne clicked this link instead of opening its URL)"
+                );
+            }
+        }
         if routed_from_browser && let Some(added) = chat.evidence.get_mut(before..) {
             for entry in added.iter_mut().filter(|e| {
                 e["action"]

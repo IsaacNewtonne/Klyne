@@ -22,6 +22,7 @@ mod documents;
 mod execution_graph;
 mod failure_policy;
 mod improvement;
+mod interaction;
 mod live_chat;
 mod local_apps;
 mod mcp;
