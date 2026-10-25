@@ -40,7 +40,9 @@ intelligenceSettings.innerHTML=`<summary>Routing and learning</summary>
 <label for="decision-threshold">Confidence threshold (0–1)</label><input id="decision-threshold" type="number" min="0" max="1" step="0.05" value="0.8"><label for="decision-price">Input price, USD per million tokens</label><input id="decision-price" type="number" min="0" step="0.01" value="0"><p class="settings-copy">Zero means unpriced. A task with a spend limit requires a price before using Jev. Confidence is a routing score, not proof of correctness.</p>
 <label><input id="decision-specialist" type="checkbox"> Use the selected review model for complex work too</label>
 <label><input id="learn-procedures" type="checkbox"> Learn procedures from independently checked tasks</label><p class="settings-copy">Stores successful plans for the same goal and acceptance checks. Two later qualifying runs promote a candidate; a failed check rejects it. Tasks without acceptance checks do not train procedures.</p>
-<button id="procedure-refresh" type="button">Refresh procedures</button><p id="procedure-status" role="status"></p><div id="procedure-list"></div>`;
+<button id="procedure-refresh" type="button">Refresh procedures</button><p id="procedure-status" role="status"></p><div id="procedure-list"></div>
+<p class="settings-copy"><strong>What Klyne remembers about you</strong> · Auto-memory learns small beliefs from your own words after a completed task (never passwords, keys or other private data). Retired beliefs are kept for the record but no longer used. Turn it off with <code>"auto_memory": false</code> in quality/config.json.</p>
+<button id="belief-refresh" type="button">Refresh memory</button><p id="belief-status" role="status"></p><div id="belief-list"></div>`;
 scheduleSettings.after(intelligenceSettings);
 let savedDecisionConnection=null, savedDecisionEndpoint='https://api.typesafe.ai/v1/systemone';
 function configureIntelligence(config={},learn=false){
@@ -56,6 +58,9 @@ for(const id of ['decisions-enabled','decision-key-env','decision-model','decisi
 };
 async function loadProcedures(){try{const data=await api('/api/procedures');setMarkup($('procedure-list'),(data.procedures||[]).map(p=>`<div class="api-row"><div class="app-copy"><strong>${escape(p.name)}</strong><small>Version ${escape(p.version)} · ${escape(p.state)} · ${(p.trials||[]).filter(t=>t.outcome==='passed').length} passed trials</small></div>${['candidate','active','standby'].includes(p.state)?`<button data-retire-procedure="${escape(p.id)}">Retire</button>`:''}</div>`).join('')||'<p class="settings-copy">No learned procedures.</p>');}catch(error){$('procedure-status').textContent=error.message;}}
 $('procedure-refresh').onclick=loadProcedures;
+async function loadBeliefs(){try{const data=await api('/api/beliefs');$('belief-status').textContent=data.auto_memory===false?'Auto-memory is off.':'';setMarkup($('belief-list'),(data.beliefs||[]).map(b=>`<div class="api-row"><div class="app-copy"><strong>${escape(b.statement)}</strong><small>${escape(b.kind)} · ${b.status==='active'?`confidence ${Math.round((b.confidence||0)*100)}% · ${b.support} supporting, ${b.against} against`:`retired: ${escape(b.retired_reason||'')}`}</small></div>${b.status==='active'?`<button data-retire-belief="${escape(b.id)}">Retire</button>`:''}</div>`).join('')||'<p class="settings-copy">Nothing remembered yet.</p>');}catch(error){$('belief-status').textContent=error.message;}}
+$('belief-refresh').onclick=loadBeliefs;
+$('belief-list').onclick=async event=>{const button=event.target.closest('[data-retire-belief]');if(!button)return;button.disabled=true;try{await api('/api/beliefs',{action:'retire',id:button.dataset.retireBelief});await loadBeliefs();}catch(error){$('belief-status').textContent=error.message;}finally{button.disabled=false;}};
 $('procedure-list').onclick=async event=>{const button=event.target.closest('[data-retire-procedure]');if(!button)return;button.disabled=true;try{await api('/api/procedures',{action:'retire',id:button.dataset.retireProcedure});await loadProcedures();}catch(error){$('procedure-status').textContent=error.message;}finally{button.disabled=false;}};
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const running = chat => ['Planning','Working','Reviewing','Stopping'].includes(chat?.status);
@@ -432,7 +437,7 @@ for(const id of ['provider-endpoint','provider-model'])$(id).oninput=()=>{++revi
 const ROLES=['planner','worker','reviewer','voice'];
 async function loadRoleModels(){try{const data=await api('/api/quality/models');const tags=data.installed||[];for(const role of ROLES){const sel=$('role-'+role),cur=(data.models||{})[role]||'';const opts=['<option value="">Same as main</option>',...tags.map(t=>`<option value="${escape(t)}">${escape(t)}</option>`)];if(cur&&!tags.includes(cur))opts.push(`<option value="${escape(cur)}">${escape(cur)} (not installed)</option>`);setMarkup(sel,opts.join(''));sel.value=cur;}$('role-status').textContent=(data.warnings||[]).join(' ')||(data.installed?'':'Ollama is not reachable; showing saved values.');}catch(error){$('role-status').textContent=error.message;}}
 $('role-save').onclick=async()=>{try{const body={};for(const role of ROLES)body[role]=$('role-'+role).value;const data=await api('/api/quality/models',body);$('role-status').textContent=(data.warnings||[]).join(' ')||'Saved. New turns use these models.';}catch(error){$('role-status').textContent=error.message;}};
-$('settings-button').onclick=$('model-shortcut').onclick=()=>{$('settings').showModal();loadApiConnections();loadSchedules();loadProcedures();loadRoleModels();};
+$('settings-button').onclick=$('model-shortcut').onclick=()=>{$('settings').showModal();loadApiConnections();loadSchedules();loadProcedures();loadBeliefs();loadRoleModels();};
 let installedApps=[];
 function renderApps() {
   const query=$('apps-search').value.toLowerCase();

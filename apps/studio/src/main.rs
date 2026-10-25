@@ -3,6 +3,7 @@ mod app_adapter;
 mod app_schema;
 mod artifacts;
 mod autonomy;
+mod beliefs;
 mod broker;
 mod browser_tools;
 mod capabilities;
@@ -395,6 +396,12 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         if method == "GET" && path == "/api/schedules" {
             return schedules::list(&studio.root);
         }
+        if method == "GET" && path == "/api/beliefs" {
+            let beliefs = beliefs::list(&studio.root)?;
+            return Ok(
+                json!({"beliefs":beliefs,"auto_memory":quality::load(&studio.root).auto_memory}),
+            );
+        }
         if method == "GET" && path == "/api/procedures" {
             return procedures::list(&studio.root.join("conversations"));
         }
@@ -555,6 +562,15 @@ fn serve(mut stream: TcpStream, studio: &Arc<Studio>, host: &str) -> io::Result<
         }
         if path == "/api/schedules" {
             return schedules::manage(studio, &body);
+        }
+        if path == "/api/beliefs" && body["action"] == "retire" {
+            return beliefs::retire(
+                &studio.root,
+                body["id"]
+                    .as_str()
+                    .ok_or_else(|| err("Missing belief ID"))?,
+                "retired by the user",
+            );
         }
         if path == "/api/procedures" && body["action"] == "retire" {
             return procedures::retire(

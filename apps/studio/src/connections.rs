@@ -1052,6 +1052,33 @@ pub fn ollama_plain(
     ))
 }
 
+/// One small JSON-mode Ollama call for auto-memory. It uses the same
+/// num_ctx and keep-alive as the worker so Ollama reuses the loaded model
+/// instead of reloading it (8 GB GPU), and never thinks.
+pub fn ollama_json_small(
+    endpoint: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+    timeout_seconds: u64,
+) -> io::Result<String> {
+    let body = json!({"model":model,"stream":false,"think":false,"format":"json",
+        "keep_alive":OLLAMA_KEEP_ALIVE,
+        "options":{"num_ctx":OLLAMA_NUM_CTX,"temperature":0.1,"num_predict":400},
+        "messages":[{"role":"system","content":system},{"role":"user","content":user}]});
+    let data = request_json(
+        client(timeout_seconds.clamp(5, 300))?.post(format!("{endpoint}/api/chat")),
+        Some(&body),
+    )?;
+    if let Some(message) = data["error"].as_str() {
+        return Err(error(format!("Memory model error: {message}")));
+    }
+    Ok(
+        crate::native_tools::strip_think(data["message"]["content"].as_str().unwrap_or(""))
+            .to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod model_check_tests {
     #[test]

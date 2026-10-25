@@ -1102,8 +1102,70 @@ impl Chats {
             service.watches.lock().unwrap().remove(&chat.id);
             let _ = service.save(&mut chat);
             service.active.lock().unwrap().remove(&chat.id);
+            // Auto-memory runs after the reply is saved and shown.
+            if chat.status == "Completed" && !stop.load(Ordering::SeqCst) {
+                service.auto_memory(&chat);
+            }
         });
         Ok(json!({"id":id}))
+    }
+    /// Auto-memory (2026-10-25, adapted from Mercury Agent, MIT): one small
+    /// worker-model call over the user's own words this turn (never tool
+    /// output) may record up to 5 belief operations.
+    fn auto_memory(&self, chat: &Chat) {
+        let root = self.studio_root();
+        let settings = crate::quality::load(root);
+        if !settings.auto_memory || chat.provider.kind != "ollama" {
+            return;
+        }
+        // The user's words since this goal started.
+        let start = chat
+            .messages
+            .iter()
+            .rposition(|m| m.role == "user" && m.text == chat.execution.original_request)
+            .unwrap_or(chat.messages.len().saturating_sub(1));
+        let words: Vec<String> = chat.messages[start..]
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.text.chars().take(1500).collect())
+            .filter(|t: &String| !crate::beliefs::sensitive(t))
+            .collect();
+        if words.is_empty() || !words.iter().any(|w| crate::beliefs::worth_extracting(w)) {
+            return;
+        }
+        // An explicit memory_save this turn already handled it.
+        if chat
+            .evidence
+            .get(chat.execution.evidence_start..)
+            .unwrap_or(&[])
+            .iter()
+            .any(|e| {
+                e["action"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("memory_save"))
+            })
+        {
+            return;
+        }
+        let model = settings
+            .models
+            .for_role("worker")
+            .unwrap_or(&chat.provider.model)
+            .to_owned();
+        let known = crate::beliefs::active(root);
+        let Ok(text) = crate::connections::ollama_json_small(
+            &chat.provider.endpoint,
+            &model,
+            crate::beliefs::SYSTEM,
+            &crate::beliefs::prompt(&words, &known),
+            90,
+        ) else {
+            return;
+        };
+        let ops = crate::beliefs::parse_ops(&text);
+        if !ops.is_empty() {
+            let _ = crate::beliefs::apply(root, &ops, &chat.id);
+        }
     }
     fn typed_decision(
         &self,
@@ -1339,6 +1401,13 @@ impl Chats {
             && let Some(nudge) = chat.execution.resume_nudge.take()
         {
             notes.push(nudge);
+        }
+        if matches!(role, "planner" | "worker")
+            && crate::quality::load(self.studio_root()).auto_memory
+            && let Some(remembered) =
+                crate::beliefs::notes(self.studio_root(), &chat.execution.original_request)
+        {
+            notes.push(remembered);
         }
         if !notes.is_empty() {
             context["system_notes"] = json!(notes);

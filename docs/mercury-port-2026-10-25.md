@@ -128,3 +128,52 @@ last 4 user turns contain one of their keywords:
 `enable_tools` still exposes any hidden group explicitly (its description
 lists what was auto-shown), access toggles still decide what exists at
 all, and full (non-compact) mode is unchanged.
+
+## 5. Auto-memory (beliefs)
+
+Source idea: Mercury Agent's memory extraction (MIT), reimplemented in
+`apps/studio/src/beliefs.rs`.
+
+- **When.** After a task ends **Completed** (not on stop, pause or
+  failure), once the reply is saved, so it never delays the answer. It is
+  skipped for trivial turns (hi, thanks, ok, continue…), when the user's
+  words this turn carry no first-person or preference signal, when a
+  `memory_save` already ran this turn, and for non-Ollama providers.
+- **Model.** One non-streaming call to the configured worker model
+  (`models.worker`, else the conversation's model) with `think:false`,
+  JSON mode, `num_predict` 400 and the same `num_ctx`/keep-alive as the
+  worker. The worker model is already loaded, so there is no extra swap
+  on an 8 GB GPU.
+- **Input.** Only the user's own messages from this goal (each clipped to
+  1500 characters; messages that look sensitive are dropped first) plus
+  the known active beliefs. It never sees tool outputs, web pages or the
+  assistant's replies.
+- **Output.** A strict array (or `{"ops":[…]}`) of at most 5 operations:
+  `create`, `owner_stated`, `support`, `contradict`, `correction`. Kinds:
+  fact, preference, trait, situation, relationship, goal, project,
+  episode. Statements are at most 200 characters. Invalid operations are
+  dropped.
+- **Filter.** Statements that look like passwords, keys, tokens, seed or
+  recovery phrases, OTP/2FA codes, logins, card/bank/ID numbers, emails,
+  phone numbers, addresses, birth dates, health, religion or orientation
+  are dropped. The filter checks for `@`, 7+ digit runs and long random
+  strings, and reuses the existing memory secret check.
+- **Lifecycle.** A new belief starts at confidence 0.55 (0.8 if the user
+  stated it). A near-duplicate (>75 % word overlap) adds support instead.
+  Contradiction lowers confidence and retires the belief once the
+  contradictions reach the support count. A correction retires the old
+  belief and creates the corrected one. Confidence halves every 90 days
+  without support, and a belief below 0.2 is retired. Beliefs are
+  **retired, never deleted**. They are stored in
+  `workspace/studio/memory/beliefs.json`.
+- **Use.** Up to 5 relevant active beliefs (preferences first, then those
+  sharing words with the request) go into the planner and worker host
+  notes. They are labelled as possibly outdated, and the user's current
+  words win.
+- **UI and API.** Under **Settings → What Klyne remembers about you**,
+  each belief shows its kind, confidence and support, with a **Retire**
+  button. `GET /api/beliefs` lists them; `POST /api/beliefs
+  {"action":"retire","id":"b1"}` retires one.
+- **Config.** `"auto_memory": true` (default) in `quality/config.json`;
+  set `false` to turn it off. The `memory_read`/`memory_save`/
+  `memory_forget` tools and their sqlite store are unchanged.

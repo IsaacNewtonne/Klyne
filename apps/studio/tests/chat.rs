@@ -4866,3 +4866,63 @@ fn step_budget_pause_is_not_done_and_resume_carries_the_nudge() {
     assert_eq!(notes["role"], "system", "{notes}");
     assert!(notes["content"].as_str().unwrap().contains("NOT done"));
 }
+
+#[test]
+fn auto_memory_records_owner_beliefs_filters_secrets_and_can_retire_them() {
+    // Auto-memory (2026-10-25, adapted from Mercury Agent, MIT).
+    let s = Server::new();
+    let note = json!({"summary":"Acknowledge it.","tasks":[{"agent":"Assistant","instruction":"Acknowledge the user's preference"}]});
+    let (endpoint, fixture) = model(vec![
+        note,
+        complete("Noted: metric units."),
+        complete("Acknowledged."),
+        json!({"ops":[
+            {"op":"owner_stated","kind":"preference","statement":"The user prefers metric units."},
+            {"op":"create","kind":"fact","statement":"The user's password is hunter2"}
+        ]}),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Remember that I prefer metric units in every answer");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let calls = fixture.join().unwrap();
+    let memory_call = calls.last().unwrap();
+    assert_eq!(memory_call["think"], false);
+    assert_eq!(memory_call["options"]["num_ctx"], 16384);
+    let words = memory_call["messages"][1]["content"].as_str().unwrap();
+    assert!(
+        words.contains("metric units") && !words.contains("Noted"),
+        "{words}"
+    );
+    let mut beliefs = json!(null);
+    for _ in 0..100 {
+        beliefs = s.api("/api/beliefs", None);
+        if !beliefs["beliefs"].as_array().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let list = beliefs["beliefs"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{beliefs}");
+    assert_eq!(list[0]["statement"], "The user prefers metric units.");
+    assert!(!beliefs.to_string().contains("hunter2"));
+    // The next conversation sees it as a host note, not as history.
+    let plan2 = json!({"summary":"Answer.","tasks":[{"agent":"Assistant","instruction":"Answer the units question"}]});
+    let (endpoint, fixture) = model(vec![plan2, complete("Use grams."), complete("Answered.")]);
+    let mut next = request(&endpoint);
+    next["message"] = json!("Which units should the recipe use?");
+    let created = s.api("/api/chats", Some(next));
+    s.wait(created["id"].as_str().unwrap());
+    let calls = fixture.join().unwrap();
+    let notes = &calls[0]["messages"][1];
+    assert_eq!(notes["role"], "system", "{notes}");
+    assert!(notes["content"].as_str().unwrap().contains("metric units"));
+    // Retire from the UI: kept, but no longer active or recalled.
+    let id = list[0]["id"].as_str().unwrap();
+    let retired = s.api("/api/beliefs", Some(json!({"action":"retire","id":id})));
+    assert_eq!(retired["status"], "retired");
+    let after = s.api("/api/beliefs", None);
+    assert_eq!(after["beliefs"].as_array().unwrap().len(), 1);
+    assert_eq!(after["beliefs"][0]["status"], "retired");
+}

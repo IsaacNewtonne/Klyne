@@ -247,7 +247,7 @@ fn memory_visible(payload: &Value, workspace: Option<&Path>, now: u64) -> bool {
     }
     true
 }
-fn sensitive_memory(text: &str) -> bool {
+pub(crate) fn sensitive_memory(text: &str) -> bool {
     let text = text.to_lowercase();
     [
         "api_key",

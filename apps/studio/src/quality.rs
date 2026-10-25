@@ -88,6 +88,9 @@ pub struct Settings {
     /// Stall watchdog (`"stall":{"soft_seconds":180,"hard_seconds":480}`):
     /// 'still working' in the UI, then pause and ask.
     pub stall: crate::loop_guard::StallLimits,
+    /// Auto-memory (`"auto_memory": true`, default on): after a completed
+    /// turn one small worker-model call may record beliefs about the user.
+    pub auto_memory: bool,
 }
 
 pub fn parse(value: &Value) -> Settings {
@@ -120,6 +123,7 @@ pub fn parse(value: &Value) -> Settings {
         }
         .to_owned(),
         stall: crate::loop_guard::StallLimits::parse(&value["stall"]),
+        auto_memory: value["auto_memory"].as_bool().unwrap_or(true),
         models: RoleModels {
             planner: role_model(&value["models"]["planner"]),
             worker: role_model(&value["models"]["worker"]),
