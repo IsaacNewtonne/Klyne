@@ -148,7 +148,7 @@ Source idea: Mercury Agent's memory extraction (MIT), reimplemented in
   1500 characters; messages that look sensitive are dropped first) plus
   the known active beliefs. It never sees tool outputs, web pages or the
   assistant's replies.
-- **Output.** A strict array (or `{"ops":[…]}`) of at most 5 operations:
+- **Output.** A JSON object `{"ops":[…]}` (Ollama JSON mode always returns an object; a bare array or a single operation object is also accepted) with at most 5 operations:
   `create`, `owner_stated`, `support`, `contradict`, `correction`. Kinds:
   fact, preference, trait, situation, relationship, goal, project,
   episode. Statements are at most 200 characters. Invalid operations are

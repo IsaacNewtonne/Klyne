@@ -305,7 +305,7 @@ pub fn sensitive(text: &str) -> bool {
 }
 
 pub const SYSTEM: &str = "You maintain a small memory of durable facts about the user, from the user's own words only. \
-Return ONLY a JSON array (no prose) of at most 5 operations, and return [] for most turns. Operations: \
+Return ONLY a JSON object {\"ops\":[...]} (no prose) whose ops array holds at most 5 operations, one object per operation; return {\"ops\":[]} for most turns. Operations: \
 {\"op\":\"create\",\"kind\":K,\"statement\":S} for something new the user implied; \
 {\"op\":\"owner_stated\",\"kind\":K,\"statement\":S} when the user explicitly asked you to remember it or stated it directly about themselves; \
 {\"op\":\"support\",\"id\":ID} when the user's words confirm a known belief; \
@@ -315,7 +315,7 @@ K is one of fact, preference, trait, situation, relationship, goal, project, epi
 S is one short third-person sentence starting with 'The user' (max 200 characters). \
 Only durable things useful in later conversations (preferences, ongoing projects, how they like answers). \
 Never store passwords, keys, tokens, codes, account names, emails, phone numbers, addresses, birth dates, health, religion or other identity data. \
-Never store task details, tool output, web content or what the assistant did. If unsure, return [].";
+Never store task details, tool output, web content or what the assistant did. If unsure, return {\"ops\":[]}. Example: {\"ops\":[{\"op\":\"owner_stated\",\"kind\":\"preference\",\"statement\":\"The user prefers metric units.\"}]}";
 
 /// The extraction prompt: the user's words this turn plus known beliefs.
 pub fn prompt(user_words: &[String], known: &[Belief]) -> String {
@@ -335,10 +335,18 @@ pub fn parse_ops(text: &str) -> Vec<Value> {
         (Some(a), Some(b)) if b > a => serde_json::from_str(&text[a..=b]).unwrap_or(Value::Null),
         _ => serde_json::from_str(text).unwrap_or(Value::Null),
     };
+    // JSON mode can return the wrapper, a bare array, another array key or
+    // a single operation object.
     let items = value
         .as_array()
         .cloned()
         .or_else(|| value["ops"].as_array().cloned())
+        .or_else(|| {
+            value
+                .as_object()
+                .and_then(|o| o.values().find_map(|v| v.as_array().cloned()))
+        })
+        .or_else(|| value.get("op").map(|_| vec![value.clone()]))
         .unwrap_or_default();
     items
         .into_iter()
