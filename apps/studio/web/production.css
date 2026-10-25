@@ -818,3 +818,11 @@ h1,h2,#prod-title,#ui-callout h3,.welcome h1{font-family:Bahnschrift,"DIN Altern
 #ui-callout.ui-progress .ui-muted{color:#8f8378;font-size:.86em}
 #ui-callout[data-ui=done] p:not(.ui-muted){display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 @media(max-width:700px){#ui-callout{--callout-slot:150px}}
+/* Composer "input needed": the divider above the composer glows and sweeps orange.
+   No frame around the composer (the nested frame stays removed). */
+html[data-klyne-mode=input] #production .prod-input-panel #chat-form:before{display:block;content:"";position:absolute;inset:-1px 0 auto 0;height:2px;padding:0;border-radius:2px;-webkit-mask:none;mask:none;background:linear-gradient(90deg,rgba(255,138,61,0) 0%,#ff8a3d 30%,#ffd2a2 50%,#ff8a3d 70%,rgba(255,138,61,0) 100%);background-size:200% 100%;box-shadow:0 0 10px rgba(255,138,61,.55),0 0 22px rgba(255,107,43,.25);animation:kl-input-sweep 2.4s ease-in-out infinite;z-index:3;pointer-events:none}
+html[data-klyne-mode=input] #production .prod-input-panel #chat-form{border-top-color:rgba(255,173,100,.55)!important}
+html[data-klyne-mode=input] #production .prod-input-panel #chat-form textarea{border-color:rgba(255,138,61,.45)}
+@keyframes kl-input-sweep{0%{background-position:100% 0;opacity:.6}50%{opacity:1}100%{background-position:-100% 0;opacity:.6}}
+@media(prefers-reduced-motion:reduce){html[data-klyne-mode=input] #production .prod-input-panel #chat-form:before{animation:none;background-position:50% 0;opacity:1}}
+html[data-page-hidden=true] #production .prod-input-panel #chat-form:before{animation-play-state:paused}
