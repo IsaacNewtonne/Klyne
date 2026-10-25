@@ -242,7 +242,7 @@
     function draw(now){
       frame=0;clearTimeout(slowFrame);slowFrame=0;frames++;ctx.clearRect(0,0,geo.w,geo.h);
       if(document.hidden||root.hidden||conversation){return;}
-      {const es=getComputedStyle(edgesEl);showLines=es.display!=='none'&&parseFloat(es.opacity)>0;}
+      {const es=getComputedStyle(edgesEl);showLines=es.display!=='none'&&(parseFloat(es.opacity)>0||root.classList.contains('layout-morphing'));}
       const still=motion.matches,breathe=still?1:.65+.35*Math.sin(now/380);
       // State ring around the orb (fix #8): colour = current UI state.
       if(geo.r>0){
@@ -512,8 +512,19 @@
   function renderCallout(chat,ui){
     const box=$('ui-callout');if(!box)return;
     const show=chat&&['approval','input','blocked','error','done'].includes(ui);
-    box.hidden=!show;box.dataset.ui=ui;if(!show){markup(box,'');return;}
+    // Layout stability (2026-10-25): while a chat is open the callout slot is
+    // always present (progress card while thinking/working) so the Done box
+    // replaces it in place instead of pushing the graph down.
+    const progress=!!chat&&!show&&!!UI[ui];
+    box.hidden=!show&&!progress;box.dataset.ui=ui;box.classList.toggle('ui-progress',progress);
+    box.setAttribute('aria-live',progress?'off':'polite');
+    if(!show&&!progress){markup(box,'');return;}
     const [label,icon]=UI[ui];const msg=lastKlyne(chat);let html='';
+    if(progress){
+      const op=window.klyneActivity.state().operations?.[0]?.operation;
+      const line=ui==='acting'?(op?op+'…':'Working on the current step…'):ui==='thinking'?'The model is working out the next step…':ui==='off'?'Turn on access for this tool in Settings to continue.':'Send a message to start, or pick up where you left off.';
+      markup(box,`<h3><span aria-hidden="true">${icon}</span>${label}</h3><p>${esc(line)}</p><p class="ui-muted">The answer will appear here when the work is done.</p>`);return;
+    }
     if(ui==='approval'){
       const p=chat.pending.proposal,cmd=describeProposal(p),why=chat.pending.reason||p.reason||(chat.tasks?.find(t=>t.status==='Awaiting approval')?.instruction)||'Klyne needs this to continue the current step.';
       const scopeHint=p.kind==='destructive'?'Allow this kind of action ('+(p.category||'destructive')+') for the rest of this chat. You will still be asked in other chats.':'Allow this exact '+(p.kind==='shell'?'command':'request')+' again in this chat without asking. Anything different still asks; changes to access or the files it uses cancel it.';
@@ -714,10 +725,13 @@
     morphFrame=0;
     if(root.hidden || conversation || document.hidden){layoutRects.clear();return;}
     const nodes=[...root.querySelectorAll('.prod-capability:not([data-morph-exit])'),$('prod-model-panel')];
+    // Rects are relative to the graph, so content above the graph growing or
+    // shrinking (e.g. the Done box) moves everything together with no morph.
+    const g=$('prod-graph').getBoundingClientRect(),rel=r=>({x:r.x-g.x,y:r.y-g.y,width:r.width,height:r.height});
     const measurements=nodes.map(node=>{
-      const running=layoutAnimations.get(node),visible=running?node.getBoundingClientRect():null;
+      const running=layoutAnimations.get(node),visible=running?rel(node.getBoundingClientRect()):null;
       running?.cancel();layoutAnimations.delete(node);
-      return {node,before:visible||layoutRects.get(node),after:node.getBoundingClientRect()};
+      return {node,before:visible||layoutRects.get(node),after:rel(node.getBoundingClientRect())};
     });
     const generation=++layoutGeneration,pending=[];
     for(const {node,before,after}of measurements){
@@ -731,6 +745,9 @@
     for(const node of layoutRects.keys())if(!node.isConnected)layoutRects.delete(node);
     if(pending.length){
       root.classList.add('layout-morphing');
+      // Keep the connection lines attached to the moving cards: re-anchor once per frame.
+      const follow=()=>{if(generation!==layoutGeneration||!root.classList.contains('layout-morphing'))return;measureReactor();requestAnimationFrame(follow);};
+      requestAnimationFrame(follow);
       Promise.all(pending).then(()=>{if(generation!==layoutGeneration)return;layoutAnimations.clear();root.classList.remove('layout-morphing');scheduleEdges();});
     }else {root.classList.remove('layout-morphing');scheduleEdges();}
   }

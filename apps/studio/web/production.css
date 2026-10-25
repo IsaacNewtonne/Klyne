@@ -808,3 +808,13 @@ h1,h2,#prod-title,#ui-callout h3,.welcome h1{font-family:Bahnschrift,"DIN Altern
 #production .prod-input-panel #chat-form:before,#production .prod-input-panel #chat-form:after{display:none}
 #production .prod-input-panel #chat-form textarea{background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px 12px}
 #production .prod-input-panel #chat-form textarea:focus-visible{border-color:var(--ui-accent,#ff8a3d)}
+/* Caveats round 2026-10-25 -------------------------------------------------- */
+/* Callout slot stays present while a chat is open; the progress card and the
+   Done box share one height so the result lands in place (no layout shift). */
+#ui-callout{min-height:var(--callout-slot,124px);box-sizing:border-box}
+#ui-callout.ui-progress{border-color:rgba(255,255,255,.08);background:rgba(255,255,255,.025)}
+#ui-callout.ui-progress h3{color:#d8cbbd}
+#ui-callout.ui-progress p{margin:4px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ui-callout.ui-progress .ui-muted{color:#8f8378;font-size:.86em}
+#ui-callout[data-ui=done] p:not(.ui-muted){display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+@media(max-width:700px){#ui-callout{--callout-slot:150px}}
