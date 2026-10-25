@@ -154,7 +154,7 @@
   root.querySelector('.prod-stream').append(stepsButton);
   stepsButton.onclick=()=>showInspector('steps:all');
   const reactor=$('prod-reactor'), brush=reactor.getContext('2d');
-  let reactorFrame=0,lastReactorFrame=0,inViewport=true,modeSince=0,lastMode='idle';
+  let reactorFrame=0,reactorIdle=0,lastReactorFrame=0,inViewport=true,modeSince=0,lastMode='idle';
   let dimensions={w:1,h:1,dpr:1}, routes=[], graphDirty=true;
 
   const prodCore=$('prod-core');
@@ -230,6 +230,7 @@
       if(!motion.matches&&(ops.length||approvalKey))return true;
       return false;
     }
+    let slowFrame=0;
     function kick(){if(!frame)frame=requestAnimationFrame(draw);}
     function badge(R,text,color,alpha){
       const [x,y]=point(R,.5);ctx.font='600 11px "Segoe UI",system-ui,sans-serif';
@@ -239,7 +240,7 @@
       ctx.fillStyle=color;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(text,x,y+.5);ctx.globalAlpha=1;
     }
     function draw(now){
-      frame=0;frames++;ctx.clearRect(0,0,geo.w,geo.h);
+      frame=0;clearTimeout(slowFrame);slowFrame=0;frames++;ctx.clearRect(0,0,geo.w,geo.h);
       if(document.hidden||root.hidden||conversation){return;}
       {const es=getComputedStyle(edgesEl);showLines=es.display!=='none'&&parseFloat(es.opacity)>0;}
       const still=motion.matches,breathe=still?1:.65+.35*Math.sin(now/380);
@@ -298,7 +299,8 @@
         badge(R,b.text+(took!=null&&fmt(took)?' · '+fmt(took):''),color,b.live?1:Math.min(1,(b.until-now)/600));
       }
       canvas.dataset.comets=String(comets.length);canvas.dataset.approval=approvalKey||'';
-      if(animating(now))frame=requestAnimationFrame(draw);
+      // Comets need full frame rate; approval breathing / fading glows / live badges only need ~25 fps.
+      if(animating(now)){if(comets.length||ops.length)frame=requestAnimationFrame(draw);else slowFrame=setTimeout(kick,40);}
       else if(still&&(glows.size||[...badges.values()].some(b=>b.live)))setTimeout(kick,500);
     }
     motion.addEventListener('change',kick);
@@ -424,15 +426,27 @@
       reactor.dataset.sunEnergy=energy.toFixed(3);
       reactor.dataset.sunGlyphs=String(glyphCount);
     }
-    if(alive)reactorFrame=requestAnimationFrame(drawReactor);
+    // Pacing (2026-10-25): full ~30 fps only while thinking/working, during the
+    // completion burst, while energy is still settling or the pointer is on the
+    // orb. Otherwise a gentle 4 fps idle flicker (no rAF spin). Reduced motion:
+    // one static frame per state change. Hidden tab: stopped (visibilitychange).
+    if(alive){
+      const busy=working||waiting||burst||sunEnergy!==targetEnergy||sunPointer.strength!==sunPointer.target||sunPointer.target>0;
+      reactor.dataset.sunPace=busy?'full':'idle';
+      if(busy)reactorFrame=requestAnimationFrame(drawReactor);
+      else reactorIdle=setTimeout(()=>{reactorIdle=0;reactorFrame=requestAnimationFrame(drawReactor);},250);
+    }else reactor.dataset.sunPace='still';
   }
+  function stopReactor(){cancelAnimationFrame(reactorFrame);reactorFrame=0;clearTimeout(reactorIdle);reactorIdle=0;}
+  // Wake from the idle pace at once when the mode changes (e.g. a new run starts).
+  window.klyneActivity.subscribe(()=>{if(reactorIdle&&window.klyneActivity.state().mode!==lastMode){stopReactor();reactorFrame=requestAnimationFrame(drawReactor);}});
 
   function refreshReactor(){
-    cancelAnimationFrame(reactorFrame);reactorFrame=requestAnimationFrame(drawReactor);
+    stopReactor();reactorFrame=requestAnimationFrame(drawReactor);
     updateRoutes();
   }
-  new IntersectionObserver(entries=>{inViewport=entries[0].isIntersecting;root.classList.toggle('prod-offscreen',!inViewport);if(inViewport){measureReactor();refreshReactor();}else cancelAnimationFrame(reactorFrame);}).observe(root);
-  document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelAnimationFrame(reactorFrame);else refreshReactor();});
+  new IntersectionObserver(entries=>{inViewport=entries[0].isIntersecting;root.classList.toggle('prod-offscreen',!inViewport);if(inViewport){measureReactor();refreshReactor();}else stopReactor();}).observe(root);
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)stopReactor();else refreshReactor();});
   const continueButton = document.createElement('button');
   continueButton.id = 'prod-continue'; continueButton.type = 'button'; continueButton.hidden = true;
   root.querySelector('.prod-heading').append(continueButton);
