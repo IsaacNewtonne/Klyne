@@ -249,6 +249,25 @@ pub fn problem(request: &str, answer: &str, window: &[Value], can_act: bool) -> 
             stale.join("\", \"")
         ));
     }
+    // A task asking for the title must get the landed page's document title,
+    // not a heading or menu label from its text.
+    if request_words.contains(" title ") {
+        let titles: Vec<String> = window
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| landed_at[*i] && is_page(e))
+            .filter_map(|(_, e)| observation(e)["title"].as_str().map(str::to_owned))
+            .filter(|t| !normalized(t).trim().is_empty())
+            .collect();
+        let said = normalized(answer);
+        if let Some(title) = titles.last()
+            && !titles.iter().any(|t| said.contains(&normalized(t)))
+        {
+            return Some(format!(
+                "Interaction check: the task asks for the page title. The page the click landed on has the document title \"{title}\", and the answer does not give it. Report that title exactly."
+            ));
+        }
+    }
     None
 }
 
@@ -474,6 +493,16 @@ mod tests {
             )
             .is_none()
         );
+
+        // A title question needs the landed document title, not a heading.
+        let heading = problem(
+            TASK,
+            r#"The page title is "Instructions and Guides"."#,
+            &ok,
+            true,
+        )
+        .unwrap();
+        assert!(heading.contains("\"Example Domains\""), "{heading}");
 
         // Typing tasks need a fill.
         let typing = "Open https://x.test and type into the search field: cats";
