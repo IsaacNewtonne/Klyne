@@ -259,7 +259,12 @@ pub fn problem(request: &str, answer: &str, window: &[Value], can_act: bool) -> 
             .filter_map(|(_, e)| observation(e)["title"].as_str().map(str::to_owned))
             .filter(|t| !normalized(t).trim().is_empty())
             .collect();
-        let said = normalized(answer);
+        // URLs do not count: ".../example-domains" is not the title.
+        let prose: Vec<&str> = answer
+            .split_whitespace()
+            .filter(|w| !w.contains("://") && !w.to_lowercase().starts_with("www."))
+            .collect();
+        let said = normalized(&prose.join(" "));
         if let Some(title) = titles.last()
             && !titles.iter().any(|t| said.contains(&normalized(t)))
         {
@@ -503,6 +508,14 @@ mod tests {
         )
         .unwrap();
         assert!(heading.contains("\"Example Domains\""), "{heading}");
+        // The URL slug "example-domains" is not the title (live 2026-10-25).
+        let slug = problem(
+            TASK,
+            r#"Landed on https://www.iana.org/help/example-domains; the title would be "Example Domain - Instructions and Guides"."#,
+            &ok,
+            true,
+        );
+        assert!(slug.is_some_and(|p| p.contains("document title")));
 
         // Typing tasks need a fill.
         let typing = "Open https://x.test and type into the search field: cats";
