@@ -126,6 +126,29 @@ fn navigated_click(entry: &serde_json::Value) -> bool {
     data["changed"] == true && data["url"].as_str().is_some_and(|u| !u.is_empty())
 }
 
+/// A browser click with no visible effect, or one that only moved to an
+/// anchor on the same page ("Skip to content"): nothing to inspect.
+fn in_page_click(entry: &serde_json::Value) -> bool {
+    let data = match &entry["data"] {
+        serde_json::Value::String(s) => serde_json::from_str(s).unwrap_or_default(),
+        other => other.clone(),
+    };
+    let base = |key: &str| {
+        data[key].as_str().map(|u| {
+            u.split('#')
+                .next()
+                .unwrap_or(u)
+                .trim_end_matches('/')
+                .to_lowercase()
+        })
+    };
+    data["changed"] == false
+        || (data["changed"] == true
+            && base("url").is_some()
+            && base("url") == base("url_before")
+            && data["url"] != data["url_before"])
+}
+
 #[cfg(test)]
 pub fn check_review(
     goal: &str,
@@ -148,6 +171,11 @@ pub fn check_review_in(
             "No tool action has been attempted for this goal. Restating the request is not completion. Use the supplied destination and message; request repair tasks to inspect the app and do the authorized work. Do not ask for capitalization confirmation.",
         ));
     }
+    let asked = crate::interaction::needs(goal);
+    let incidental_clicks = !asked.click
+        && !asked.typing
+        && !crate::web_reach::needs_interaction(goal)
+        && !delivery_claim(goal);
     let app_action = evidence.iter().any(|e| {
         let action = e["action"].as_str().unwrap_or("");
         e["agent"] != "Reviewer"
@@ -168,6 +196,9 @@ pub fn check_review_in(
             // changed to has read its result (the interaction gate checks
             // the answer against it); sends still need observed_results.
             && !(action == "browser_click" && navigated_click(e))
+            // A goal that asks for no interaction: an in-page click with
+            // nothing to inspect ("Skip to content") is incidental.
+            && !(action == "browser_click" && incidental_clicks && in_page_click(e))
     });
     if app_action
         && ![
@@ -455,6 +486,27 @@ mod tests {
         assert!(check_review("click Learn more", &review, &[unchanged]).is_err());
         let fill = json!({"agent":"Assistant","action":"browser_fill","ok":true,"data":"{}"});
         assert!(check_review("type cats", &review, &[fill]).is_err());
+    }
+    #[test]
+    fn incidental_in_page_clicks_need_no_inspection_on_read_or_save_goals() {
+        // Live 2026-10-25: a save task's model clicked GitHub's "Skip to
+        // content" link and the reviewer could never cite app results.
+        let skip = json!({"agent":"Assistant","action":"browser_click","ok":true,"data":json!({"url_before":"https://github.com/rust-lang/rust/issues/100","url":"https://github.com/rust-lang/rust/issues/100#start-of-content","changed":true,"clicked":"Skip to content"}).to_string()});
+        let still = json!({"agent":"Assistant","action":"browser_click","ok":true,"data":json!({"url_before":"https://github.com/x#a","url":"https://github.com/x#a","changed":false}).to_string()});
+        let review = json!({"decision":"complete","summary":"Summarized the issue."});
+        let goal = "Summarize GitHub issue https://github.com/rust-lang/rust/issues/100 and save it to summary.txt";
+        let r = check_review(goal, &review, &[skip.clone(), still.clone()]);
+        assert!(r.is_ok(), "{r:?}");
+        // When the goal asks for the click, the usual rules apply.
+        assert!(
+            check_review(
+                "Open the issue page and click Skip to content",
+                &review,
+                &[still]
+            )
+            .is_err()
+        );
+        assert!(check_review("send a message to Sam", &review, &[skip]).is_err());
     }
     #[test]
     fn unrelated_actions_and_targets_never_confirm_saves() {
