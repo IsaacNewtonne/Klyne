@@ -4861,12 +4861,8 @@ fn step_budget_pause_is_not_done_and_resume_carries_the_nudge() {
     let requests = fixture.join().unwrap();
     assert_eq!(done["status"], "Completed", "{done}");
     assert_eq!(done["execution"]["turn_end"], "chose_to_stop");
-    let context: Value =
-        serde_json::from_str(requests[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
-    assert!(
-        context["resume_nudge"]
-            .as_str()
-            .unwrap()
-            .contains("NOT done")
-    );
+    // The nudge travels in its own system block, not in the history.
+    let notes = &requests[0]["messages"][1];
+    assert_eq!(notes["role"], "system", "{notes}");
+    assert!(notes["content"].as_str().unwrap().contains("NOT done"));
 }

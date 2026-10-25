@@ -12,6 +12,7 @@ mod chat_store;
 mod clarification;
 mod completion_guard;
 mod connections;
+mod context_window;
 mod coordinator;
 mod decisions;
 mod desktop;

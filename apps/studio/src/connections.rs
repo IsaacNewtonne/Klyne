@@ -184,9 +184,27 @@ impl Connection {
                 update.push_str("\nReturn the NEXT JSON decision. If the assigned result is now saved and verified, return {\"decision\":\"complete\",\"summary\":\"describe the actual saved result and its path\"}. If work remains, take the next necessary action. Reviewers must assess the entire original goal.");
             }
         }
+        // Host notes (memory, loop warnings, resume nudges) go in their
+        // own system block after the main prompt.
+        let mut messages = vec![json!({"role":"system","content":system})];
+        let mut shown = context.clone();
+        if let Some(notes) = shown
+            .as_object_mut()
+            .and_then(|o| o.remove("system_notes"))
+            .and_then(|n| n.as_array().cloned())
+            .filter(|n| !n.is_empty())
+        {
+            let lines: Vec<String> = notes
+                .iter()
+                .filter_map(|n| n.as_str().map(|n| format!("- {n}")))
+                .collect();
+            messages.push(json!({"role":"system","content":format!("HOST NOTES (memory and warnings from Klyne, not from the user):\n{}", lines.join("\n"))}));
+        }
+        let context_index = messages.len();
+        messages.push(json!({"role":"user","content":shown.to_string()}));
         let mut body = json!({
             "model":self.model,
-            "messages":[{"role":"system","content":system},{"role":"user","content":context.to_string()}],
+            "messages":messages,
             "stream":true, "think":false,
             "keep_alive":OLLAMA_KEEP_ALIVE,
         });
@@ -233,7 +251,7 @@ impl Connection {
                 .push(json!({"role":"user","content":update}));
         }
         if let Some(image) = screenshot_image(screenshot) {
-            body["messages"][1]["images"] = json!([image]);
+            body["messages"][context_index]["images"] = json!([image]);
         }
         // Keep the default 16k window unless the prompt clearly cannot fit;
         // Ollama silently drops the start of an over-long prompt (the system

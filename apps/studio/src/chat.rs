@@ -1175,7 +1175,9 @@ impl Chats {
             json!({"kind":"model","role":role,"agent":extra["agent"],"started_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()}),
         );
         self.save(chat)?;
-        let mut context = json!({"role":role,"access":chat.access,"original_goal":chat.execution.original_request,"messages":chat.messages.iter().rev().take(18).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>(),"tasks":chat.tasks,"observations":chat.evidence.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>(),"assignment":extra,"remaining_steps":if chat.limit==0 {Value::Null} else {json!(chat.limit.saturating_sub(chat.used))},"usage":{"prompt_tokens":chat.prompt_tokens,"completion_tokens":chat.completion_tokens,"cost_usd":chat.cost_usd,"max_tokens":chat.execution.max_tokens,"max_cost_usd":chat.execution.max_cost_usd},"capabilities":crate::capabilities::context(&self.root).unwrap_or(json!([]))});
+        let window =
+            crate::context_window::observations(&chat.evidence, chat.execution.evidence_start);
+        let mut context = json!({"role":role,"access":chat.access,"original_goal":chat.execution.original_request,"messages":crate::context_window::messages(&serde_json::to_value(&chat.messages).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default(), if chat.provider.compact_tools() {crate::context_window::COMPACT_HISTORY_TOKENS} else {crate::context_window::FULL_HISTORY_TOKENS}),"tasks":chat.tasks,"observations":window.0,"earlier_tool_activity":window.1,"assignment":extra,"remaining_steps":if chat.limit==0 {Value::Null} else {json!(chat.limit.saturating_sub(chat.used))},"usage":{"prompt_tokens":chat.prompt_tokens,"completion_tokens":chat.completion_tokens,"cost_usd":chat.cost_usd,"max_tokens":chat.execution.max_tokens,"max_cost_usd":chat.execution.max_cost_usd},"capabilities":crate::capabilities::context(&self.root).unwrap_or(json!([]))});
         context["workflow_routing"] = if chat.execution.decisions.enabled {
             json!(chat.execution.routing)
         } else {
@@ -1325,15 +1327,21 @@ impl Chats {
         if role == "planner" {
             system.push_str(r#"\nYour current role is PLANNER. Return only {"summary":"short approach","tasks":[{"agent":"Assistant","instruction":"concrete task and acceptance criteria"}]} with one to six tasks, or {"question":"essential clarification"}. Each task may specify depends_on:[1-based task IDs]. Use depends_on:[] for independent tasks; omit it only for sequential work. Do not return worker decisions or an empty tasks array. For a greeting such as hi, assign one Assistant task to reply naturally; no tools or files are needed. For a text-revision request, use one end-to-end editing task that reads, revises, saves and verifies the result. Do not split basic reading, rewriting, saving and hashing into separate specialist tasks. Split only independently deliverable artifacts when necessary."#);
         }
+        // Host notes (warnings, resume nudges, memory) travel in a
+        // separate system block, not mixed into the history.
+        let mut notes: Vec<String> = Vec::new();
         if role == "worker"
             && let Some(warning) = chat.execution.loop_warning.take()
         {
-            context["loop_warning"] = json!(warning);
+            notes.push(warning);
         }
         if matches!(role, "planner" | "worker")
             && let Some(nudge) = chat.execution.resume_nudge.take()
         {
-            context["resume_nudge"] = json!(nudge);
+            notes.push(nudge);
+        }
+        if !notes.is_empty() {
+            context["system_notes"] = json!(notes);
         }
         if role == "worker" && std::mem::take(&mut chat.execution.force_tool) {
             context["force_tool"] = json!(true);
@@ -4868,13 +4876,7 @@ fn compact_context(context: &mut Value, chat: &Chat) {
             clip(&mut observation["data"], 3000);
         }
     }
-    if let Some(messages) = context["messages"].as_array_mut() {
-        let keep = messages.len().saturating_sub(10);
-        messages.drain(..keep);
-        for message in messages {
-            clip(&mut message["text"], 1500);
-        }
-    }
+    // History is already budgeted newest-first by context_window.
     if let Some(assignment) = context["assignment"].as_object_mut() {
         assignment.remove("recalled_memories");
         assignment.remove("experiment_experience");

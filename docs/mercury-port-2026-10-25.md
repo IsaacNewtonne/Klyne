@@ -76,3 +76,28 @@ only acting tools plus `ask_user` and `report_blocker` are offered
 (`finish` and read tools are withheld for that step). After three refused
 finishes the task pauses as Needs input. Goals with an explicit task
 contract keep the contract check instead.
+
+## 3. Token-budgeted context window
+
+Source idea: Mercury Agent's context window (MIT), reimplemented in
+`apps/studio/src/context_window.rs`.
+
+- **History** is filled newest-first inside a token budget (chars/4):
+  3000 tokens in compact mode (small local models), 6000 otherwise, sized
+  so system prompt + tools + observations stay inside Ollama `num_ctx`
+  16384. The latest user message and everything after it are always kept
+  whole; older messages are clipped to 1500 characters and dropped once
+  the budget is spent (this replaces the fixed "last 18 / last 10").
+- **Observations** shown raw are the newest 6 from the *current goal*
+  only. If the goal has fewer than 3, the previous goal's newest
+  successful results are carried raw so follow-ups ("personalize it")
+  still see them.
+- **Older tool activity** (earlier in the goal and earlier goals) is sent
+  as `earlier_tool_activity`, up to 12 one-line traces:
+  `read_file notes.txt → ok (3 lines)` / `fetch https://… → ✗ HTTP 404`.
+- **Host notes** (loop warnings, the step-budget resume nudge and, from
+  piece 5, remembered beliefs) go into `system_notes`, which the Ollama
+  client sends as a second system message ("HOST NOTES …") instead of
+  inside the history JSON.
+- Evidence, receipts, the completion gate and claim checks are unchanged:
+  they still read the full evidence list, not the prompt window.
