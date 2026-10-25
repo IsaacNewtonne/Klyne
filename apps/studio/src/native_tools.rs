@@ -22,7 +22,16 @@ const CORE_FILES: &[&str] = &[
     "move_file",
     "delete_path",
 ];
-const CORE_WEB: &[&str] = &["fetch_url", "browser_open", "browser_read", "browser_close"];
+// browser_click and browser_fill are core so small models can do the click
+// or typing a task names without first calling enable_tools (2026-10-25).
+const CORE_WEB: &[&str] = &[
+    "fetch_url",
+    "browser_open",
+    "browser_read",
+    "browser_click",
+    "browser_fill",
+    "browser_close",
+];
 /// Cheap read-only/meta tools kept visible in compact mode (2026-10-24):
 /// without them small models ran e.g. "runtime_status" as a shell program.
 const CORE_META: &[&str] = &[
@@ -947,6 +956,9 @@ mod tests {
         assert!(names.contains(&"list_dir") && names.contains(&"run_shell"));
         assert!(names.contains(&ENABLE_TOOLS) && names.contains(&FINISH));
         assert!(!names.contains(&"desktop_drag"));
+        // Clicking and typing need no enable_tools round trip.
+        assert!(names.contains(&"browser_click") && names.contains(&"browser_fill"));
+        assert!(!names.contains(&"browser_eval"));
         let enabled = tools(&available, &["desktop".into()], true, false);
         assert!(
             enabled
