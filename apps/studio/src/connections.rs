@@ -217,6 +217,11 @@ impl Connection {
             if role == "independent reviewer" && context["review_findings"] == false {
                 crate::native_tools::without_findings(&mut tools);
             }
+            // Narration guard: the forced step offers only acting tools
+            // (plus ask_user/report_blocker) in compact mode.
+            if context["force_tool"] == true && context["compact_tools"] == true {
+                crate::native_tools::only_acting(&mut tools);
+            }
             body["tools"] = json!(tools);
         } else {
             body["format"] = json!("json");
@@ -299,6 +304,11 @@ impl Connection {
         }
         if last["message"].is_null() && content.is_empty() && tool_calls.is_empty() {
             return Err(error("Model returned no message"));
+        }
+        if last["done_reason"] == "length" && tool_calls.is_empty() {
+            return Err(error(
+                "Model output was cut off at the length limit; retry with a shorter reply",
+            ));
         }
         warm_models().lock().unwrap().insert(key, Instant::now());
         let text = if native {

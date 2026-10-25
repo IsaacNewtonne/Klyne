@@ -148,6 +148,15 @@ pub struct Execution {
     /// One-shot host warning for the next model call (loop guard).
     #[serde(default)]
     pub loop_warning: Option<String>,
+    /// Why the last turn ended (turn_end::Ending::as_str, or the status).
+    #[serde(default)]
+    pub turn_end: String,
+    /// One-shot "you are NOT done" nudge after a step-budget pause.
+    #[serde(default)]
+    pub resume_nudge: Option<String>,
+    /// Narration guard: the next worker step must call an acting tool.
+    #[serde(default)]
+    pub force_tool: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Chat {
@@ -976,7 +985,13 @@ impl Chats {
                 service.drive(&mut chat, &stop)
             }));
             match result {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    chat.execution.turn_end = if chat.status == "Completed" {
+                        crate::turn_end::Ending::ChoseToStop.as_str().into()
+                    } else {
+                        chat.status.to_lowercase()
+                    };
+                }
                 Ok(Err(_)) if watch.hard.load(Ordering::SeqCst) => {
                     // The stall watchdog paused the goal: ask, don't fail.
                     chat.execution.failure = Some(crate::failure_policy::decide(
@@ -1027,7 +1042,23 @@ impl Chats {
                         }
                         .into();
                     }
-                    push(&mut chat, "assistant", "Klyne", &e.to_string());
+                    let ending = crate::turn_end::classify_error(
+                        stop.load(Ordering::SeqCst),
+                        chat.limit > 0 && chat.used >= chat.limit,
+                        &e.to_string(),
+                    );
+                    chat.execution.turn_end = ending.as_str().into();
+                    if ending == crate::turn_end::Ending::StepsExhausted && !approval {
+                        // Out of steps is a pause, never Done: the resumed
+                        // run is told the task is not finished.
+                        chat.status = "Needs input".into();
+                        chat.execution.resume_nudge =
+                            Some(crate::turn_end::STEPS_EXHAUSTED_NUDGE.into());
+                        let message = crate::turn_end::steps_paused_message(chat.used, chat.limit);
+                        push(&mut chat, "assistant", "Klyne", &message);
+                    } else {
+                        push(&mut chat, "assistant", "Klyne", &e.to_string());
+                    }
                 }
                 Err(_) => {
                     // Approval proposals keep their own failure kind (set by
@@ -1298,6 +1329,14 @@ impl Chats {
             && let Some(warning) = chat.execution.loop_warning.take()
         {
             context["loop_warning"] = json!(warning);
+        }
+        if matches!(role, "planner" | "worker")
+            && let Some(nudge) = chat.execution.resume_nudge.take()
+        {
+            context["resume_nudge"] = json!(nudge);
+        }
+        if role == "worker" && std::mem::take(&mut chat.execution.force_tool) {
+            context["force_tool"] = json!(true);
         }
         if role == "worker" {
             system.push_str(" file_change_receipts records successful writes and their host read-back checks for this goal, including earlier outputs. Use these to track completed work after intervening reads. Do not repeat a write merely because another file was read, or to change only a path spelling such as file.txt to ./file.txt. Change a saved output only to address a concrete unmet requirement; if all requested outputs are complete, return complete. Receipts describe earlier checks, not proof that files cannot change afterward.");
@@ -1982,6 +2021,53 @@ impl Chats {
                                 "assistant",
                                 "Klyne",
                                 "I opened or inspected the app, but did not complete the requested action. The model repeatedly reported unsupported success; progress is saved as unfinished.",
+                            );
+                            return Ok(());
+                        }
+                        // Narration guard (2026-10-25): a change request
+                        // cannot finish without a write or command behind it.
+                        // Judged on the user's own words (not the plan), and
+                        // only when this is the last open task.
+                        let last_task = chat
+                            .tasks
+                            .iter()
+                            .enumerate()
+                            .all(|(i, t)| i == index || t.status == "Done");
+                        // A task contract already checks its artifacts.
+                        if last_task
+                            && chat.contract.is_none()
+                            && chat.execution.host_finish.is_none()
+                            && crate::turn_end::narrated(
+                                &chat.execution.original_request,
+                                chat.access.terminal,
+                                chat.evidence
+                                    .get(chat.execution.evidence_start..)
+                                    .unwrap_or(&[]),
+                            )
+                        {
+                            unsupported_completions += 1;
+                            chat.evidence.push(json!({"agent":"Worker check","action":"narration_check","ok":false,"summary":"The request asks for a change (a saved file, a write or a command), but no write or command ran. Do it now by calling the tool; describing it is not doing it.","data":"The proposed answer was not accepted."}));
+                            chat.execution.force_tool = true;
+                            chat.execution.loop_guard.record_no_action(summary);
+                            self.save(chat)?;
+                            if unsupported_completions < 3 {
+                                match self.loop_trip(chat, stop, start, index)? {
+                                    LoopStep::Go | LoopStep::Repair => continue,
+                                    LoopStep::Review(review) => {
+                                        handoff = Some(review);
+                                        continue;
+                                    }
+                                    LoopStep::Stop => return Ok(()),
+                                }
+                            }
+                            chat.execution.force_tool = false;
+                            chat.tasks[index].status = "Needs input".into();
+                            chat.status = "Needs input".into();
+                            push(
+                                chat,
+                                "assistant",
+                                "Klyne",
+                                "The task asks me to make a change, but the model only described it and no write or command ran, so I didn't report it as done. Progress is saved; press Resume work to try again.",
                             );
                             return Ok(());
                         }
@@ -4723,6 +4809,9 @@ fn compact_system(role: &str, chat: &Chat, context: &Value) -> String {
             );
             if chat.access.desktop {
                 prompt.push_str("Desktop: call desktop_observe first, then act on window handles and element ids from desktop_current; use desktop_launch to open apps. ");
+            }
+            if context["force_tool"] == true {
+                prompt.push_str("The host did NOT accept your finish: the request needs a change (a saved file, a write or a command) and none ran. Call the acting tool now; describing the change is not doing it. ");
             }
             if context.get("last_file_read").is_some()
                 || chat

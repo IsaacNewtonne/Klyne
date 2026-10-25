@@ -3042,7 +3042,10 @@ fn approval_resume_cannot_reset_the_shared_step_budget() {
     continuation["execution"] = json!({"max_steps":used});
     s.api("/api/chats", Some(continuation));
     let blocked = s.wait(id);
-    assert_eq!(blocked["status"], "Blocked", "{blocked}");
+    // Out of steps is a pause (Needs input), never Done, and the budget
+    // is not reset by resuming.
+    assert_eq!(blocked["status"], "Needs input", "{blocked}");
+    assert_eq!(blocked["execution"]["turn_end"], "steps_exhausted");
     assert_eq!(blocked["used"], used);
     assert!(
         blocked["evidence"]
@@ -4778,5 +4781,92 @@ fn failing_tool_loop_warns_hands_off_once_then_stops_with_needs_input() {
     assert!(
         last["text"].as_str().unwrap().contains("kept failing"),
         "{last}"
+    );
+}
+
+#[test]
+fn narrated_save_is_refused_and_the_next_step_offers_only_acting_tools() {
+    // Narration guard (2026-10-25, adapted from Mercury Agent, MIT).
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        complete("I saved a friendly greeting to greeting.txt."),
+        write_file("Hello there!"),
+        complete("Saved greeting.txt with a friendly greeting."),
+        complete("greeting.txt contains a friendly greeting."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Save a friendly greeting to greeting.txt");
+    body["provider"]["tool_mode"] = json!("compact");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    let requests = fixture.join().unwrap();
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(
+        chat["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["action"] == "narration_check")
+            .count(),
+        1
+    );
+    let names = |r: &Value| -> Vec<String> {
+        r["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let first = names(&requests[1]);
+    let forced = names(&requests[2]);
+    assert!(first.contains(&"finish".to_owned()), "{first:?}");
+    assert!(forced.contains(&"write_file".to_owned()), "{forced:?}");
+    assert!(!forced.contains(&"finish".to_owned()) && !forced.contains(&"read_file".to_owned()));
+    assert!(forced.contains(&"report_blocker".to_owned()));
+}
+
+#[test]
+fn step_budget_pause_is_not_done_and_resume_carries_the_nudge() {
+    let s = Server::new();
+    let read = json!({"decision":"act","action":{"tool":"list_dir","path":"."}});
+    let inspect = json!({"summary":"Inspect it.","tasks":[{"agent":"Assistant","instruction":"List the workspace and report what is there"}]});
+    let (endpoint, fixture) = model(vec![inspect, read]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Inspect the workspace and report what is there");
+    body["execution"] = json!({"max_steps":3});
+    let created = s.api("/api/chats", Some(body));
+    let id = created["id"].as_str().unwrap();
+    let paused = s.wait(id);
+    fixture.join().unwrap();
+    assert_eq!(paused["status"], "Needs input", "{paused}");
+    assert_eq!(paused["execution"]["turn_end"], "steps_exhausted");
+    let last = paused["messages"].as_array().unwrap().last().unwrap();
+    assert!(
+        last["text"].as_str().unwrap().contains("NOT done"),
+        "{last}"
+    );
+    let (endpoint, fixture) = model(vec![
+        complete("The workspace is empty."),
+        complete("The workspace is empty."),
+    ]);
+    let mut more = request(&endpoint);
+    more["id"] = json!(id);
+    more["resume"] = json!(true);
+    more["message"] = json!("continue");
+    more["execution"] = json!({"max_steps":20});
+    s.api("/api/chats", Some(more));
+    let done = s.wait(id);
+    let requests = fixture.join().unwrap();
+    assert_eq!(done["status"], "Completed", "{done}");
+    assert_eq!(done["execution"]["turn_end"], "chose_to_stop");
+    let context: Value =
+        serde_json::from_str(requests[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert!(
+        context["resume_nudge"]
+            .as_str()
+            .unwrap()
+            .contains("NOT done")
     );
 }

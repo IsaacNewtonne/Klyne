@@ -469,6 +469,15 @@ pub fn tools(
     out
 }
 
+/// Keep only acting tools (writes, commands, clicks, typing) plus
+/// ask_user and report_blocker: the narration guard's forced step.
+pub fn only_acting(tools: &mut Vec<Value>) {
+    tools.retain(|t| {
+        let name = t["function"]["name"].as_str().unwrap_or("");
+        crate::turn_end::mutating_tool(name) || matches!(name, ASK_USER | REPORT_BLOCKER)
+    });
+}
+
 /// Remove `<think>...</think>` (and an unterminated leading think block).
 /// Remove the reviewer findings fields from the finish tool (used when the
 /// findings report is off for small models).

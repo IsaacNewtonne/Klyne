@@ -43,3 +43,36 @@ Needs input with "I paused because nothing progressed…". Configure in
 ```json
 {"stall": {"soft_seconds": 180, "hard_seconds": 480}}
 ```
+
+## 2. Turn-end verdict and narration guard
+
+Source idea: Mercury Agent's completion verdict (MIT), reimplemented in
+`apps/studio/src/turn_end.rs`.
+
+Every run now records `execution.turn_end`:
+
+| Verdict | When | Status shown |
+|---|---|---|
+| `chose_to_stop` | the model finished and the review passed | Completed |
+| `steps_exhausted` | the goal's step budget ran out | **Needs input** (a pause, never Done) |
+| `interrupted` | the model server/connection failed or timed out | Blocked |
+| `truncated` | Ollama ended the reply with `done_reason: "length"` | Blocked |
+| `aborted` | the user pressed Stop (or the stall watchdog paused it) | Stopped / Needs input |
+| `blocked` | any other error | Blocked |
+
+Step budget: the message says the task is NOT done. The step count is not
+reset on resume (same as before); after raising the limit and pressing
+Resume work, the first planner/worker call gets a one-shot
+`resume_nudge`: "you are NOT done, resume where you left off". There is
+no automatic resume, so every continuation still goes through the user
+and the approval queue.
+
+Narration guard: when the user's request asks for a change (save, export,
+download, install; write/create/edit/... plus a file target; run/build
+only with Terminal on) and the worker tries to finish with no write,
+command or receipt in this goal, the finish is refused (`narration_check`
+evidence), and the next worker step is forced to act: in compact mode
+only acting tools plus `ask_user` and `report_blocker` are offered
+(`finish` and read tools are withheld for that step). After three refused
+finishes the task pauses as Needs input. Goals with an explicit task
+contract keep the contract check instead.

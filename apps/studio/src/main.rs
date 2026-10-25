@@ -43,6 +43,7 @@ mod schedules;
 mod side_effects;
 mod skipped;
 mod telemetry;
+mod turn_end;
 mod verify;
 mod voice;
 mod web_reach;
