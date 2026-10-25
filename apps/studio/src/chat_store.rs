@@ -243,12 +243,17 @@ pub fn load(path: &Path) -> io::Result<Chat> {
     }
     serde_json::from_value(data).map_err(err)
 }
-pub fn summary(path: &Path) -> io::Result<Value> {
+/// Sidebar summary. `running` says whether this process is actually running
+/// the conversation: a stored in-progress status without a live run (e.g.
+/// after a restart) is reported as "Interrupted", exactly like `Chats::get`,
+/// so the sidebar and the open conversation never disagree.
+pub fn summary(path: &Path, running: bool) -> io::Result<Value> {
     let db = connection(path, false)?;
     let payload: String = db
         .query_row("SELECT payload FROM chat WHERE id=1", [], |r| r.get(0))
         .map_err(err)?;
     let mut data: Value = serde_json::from_str(&payload).map_err(err)?;
+    normalize_stale_status(&mut data, running);
     // Messages live in the history table; the last few are enough to tell
     // an unreachable model apart from other stops.
     if data["messages"].as_array().is_none_or(|m| m.is_empty()) {
@@ -267,6 +272,17 @@ pub fn summary(path: &Path) -> io::Result<Value> {
     Ok(
         serde_json::json!({"id":data["id"],"title":data["title"],"status":data["status"],"attention":attention(&data)}),
     )
+}
+/// In-progress statuses stored on disk are stale when no run is live.
+pub fn normalize_stale_status(data: &mut Value, running: bool) {
+    if !running
+        && matches!(
+            data["status"].as_str(),
+            Some("Planning" | "Working" | "Reviewing" | "Stopping")
+        )
+    {
+        data["status"] = Value::from("Interrupted");
+    }
 }
 /// Display-only sub-kind for a stopped conversation, so the sidebar can tell
 /// "needs your approval" from "needs your answer", "couldn't finish" and
@@ -316,12 +332,13 @@ pub fn attention(data: &Value) -> &'static str {
 /// `since`, and the content-free latency breakdown. Lets the UI skip full
 /// snapshot fetches when nothing changed; the full snapshot remains the
 /// fallback for rendering. Reads one row, never the history tables.
-pub fn pulse(path: &Path, since: u64) -> io::Result<Value> {
+pub fn pulse(path: &Path, since: u64, running: bool) -> io::Result<Value> {
     let db = connection(path, false)?;
     let payload: String = db
         .query_row("SELECT payload FROM chat WHERE id=1", [], |r| r.get(0))
         .map_err(err)?;
-    let data: Value = serde_json::from_str(&payload).map_err(err)?;
+    let mut data: Value = serde_json::from_str(&payload).map_err(err)?;
+    normalize_stale_status(&mut data, running);
     let events = data["activity_events"]
         .as_array()
         .cloned()

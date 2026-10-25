@@ -402,7 +402,7 @@ impl Chats {
     /// like any conversation path; an unknown conversation errors.
     pub fn pulse(&self, id: &str, since: u64) -> io::Result<Value> {
         let dir = self.directory(id)?;
-        crate::chat_store::pulse(&dir.join("chat.sqlite3"), since)
+        crate::chat_store::pulse(&dir.join("chat.sqlite3"), since, self.is_active(id))
     }
     pub fn get(&self, id: &str) -> io::Result<Chat> {
         let dir = self.directory(id)?;
@@ -429,9 +429,22 @@ impl Chats {
         ids.sort();
         ids.reverse();
         ids.truncate(100);
-        Ok(
-            json!({"chats":ids.iter().filter_map(|id| self.directory(id).ok().and_then(|dir|crate::chat_store::summary(&dir.join("chat.sqlite3")).ok())).collect::<Vec<_>>()}),
-        )
+        // Liveness is checked after the read: a stored in-progress status
+        // with no live run is re-read as Interrupted (same rule as `get`).
+        let summary = |id: &String| -> Option<Value> {
+            let path = self.directory(id).ok()?.join("chat.sqlite3");
+            let raw = crate::chat_store::summary(&path, true).ok()?;
+            let in_progress = matches!(
+                raw["status"].as_str(),
+                Some("Planning" | "Working" | "Reviewing" | "Stopping")
+            );
+            if in_progress && !self.is_active(id) {
+                crate::chat_store::summary(&path, false).ok()
+            } else {
+                Some(raw)
+            }
+        };
+        Ok(json!({"chats":ids.iter().filter_map(summary).collect::<Vec<_>>()}))
     }
     pub fn manage(&self, id: &str, body: &Value) -> io::Result<Value> {
         let active = self.active.lock().unwrap();
@@ -5084,6 +5097,57 @@ mod tests {
                 .check(&traversal),
             PermissionDecision::Deny(_)
         ));
+    }
+    #[test]
+    fn sidebar_summary_and_pulse_agree_with_the_snapshot_after_restart() {
+        // A run stored as in-progress with no live worker (crash/restart) must
+        // not keep a live label in the sidebar: list, pulse and get all agree.
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("conversations/124-0");
+        fs::create_dir_all(directory.join("files")).unwrap();
+        let mut chat = Chat {
+            contract: None,
+            result: None,
+            prompt_maker: false,
+            id: "124-0".into(),
+            title: "Stale run".into(),
+            status: "Working".into(),
+            messages: vec![],
+            tasks: vec![],
+            evidence: vec![],
+            access: Access::default(),
+            provider: connections::Connection {
+                kind: "codex".into(),
+                ..Default::default()
+            },
+            used: 1,
+            limit: 64,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: 0.0,
+            pending: None,
+            workspace: directory.join("files"),
+            desktop_previous: None,
+            activity: None,
+            activity_events: Vec::new(),
+            execution: Execution::default(),
+        };
+        Chats::new(root.path()).save(&mut chat).unwrap();
+        let restarted = Chats::new(root.path());
+        let listed = restarted.list().unwrap()["chats"][0].clone();
+        assert_eq!(listed["status"], "Interrupted");
+        assert_eq!(listed["attention"], "blocked");
+        assert_eq!(
+            restarted.pulse(&chat.id, 0).unwrap()["status"],
+            "Interrupted"
+        );
+        assert_eq!(restarted.get(&chat.id).unwrap().status, "Interrupted");
+        chat.status = "Completed".into();
+        restarted.save(&mut chat).unwrap();
+        let listed = restarted.list().unwrap()["chats"][0].clone();
+        assert_eq!(listed["status"], "Completed");
+        assert_eq!(listed["attention"], "");
+        assert_eq!(restarted.pulse(&chat.id, 0).unwrap()["status"], "Completed");
     }
     #[test]
     fn restart_marks_work_interrupted_and_never_replays_pending_actions() {

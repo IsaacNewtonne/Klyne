@@ -181,21 +181,34 @@ async function api(path, body) {
   const result=await response.json(); if(!response.ok) throw new Error(result.error || 'Could not complete the request.'); return result;
 }
 function setMarkup(element, markup) { if(element.dataset.markup!==markup) {element.innerHTML=markup; element.dataset.markup=markup;} }
-function chipFor(chat){const K=window.klyneUi;if(!K)return `<small>${escape(chat.status)}</small>`;const ui=K.uiFromSummary(chat);const [l,i]=ui==='idle'?[chat.status==='Stopped'?'Stopped':'Ready','○']:K.UI[ui];return `<small data-ui="${ui}" data-icon="${i}">${escape(l)}</small>`;}
+// Sidebar status chip. Icon, colour (data-ui) and text always come from ONE
+// state object: the live snapshot for the open conversation, the list summary
+// for the others. The whole chip is part of the list markup, so setMarkup
+// rewrites it whenever the state changes (no in-place text patching that the
+// markup cache cannot see — that left "Executing" under a green Done check).
+const CHIP_LABEL={done:'Done',approval:'Needs approval',input:'Needs input',error:'Failed'};
+function chipState(chat){
+  const K=window.klyneUi,live=snapshot&&chat.id===selected&&snapshot.id===chat.id?snapshot:null;
+  const status=(live||chat).status;
+  if(live&&running(live)&&!live.pending?.proposal){
+    const a=window.klyneActivity?.state(),tool=a?.operations?.[0]?.tool;
+    const label=a?.mode==='waiting'?'Waiting':status==='Reviewing'?'Reviewing':status==='Stopping'?'Stopping':tool==='browser'?'Browsing':tool?'Executing':'Thinking';
+    return {ui:status==='Planning'||status==='Reviewing'||a?.mode==='waiting'?'thinking':'acting',label,activity:a?.mode==='waiting'?'waiting':'working'};
+  }
+  let ui=live?K.uiState(live):K.uiFromSummary(chat);
+  if(live&&ui==='blocked'&&live.execution?.failure?.kind==='missing_input')ui='input';
+  const label=CHIP_LABEL[ui]||(ui==='blocked'?(status==='Stopped'?'Stopped':status==='Interrupted'?'Interrupted':'Couldn’t finish'):ui==='idle'?(status==='Stopped'?'Stopped':'Ready'):K.UI[ui][0]);
+  return {ui,label,activity:''};
+}
+function rowState(chat){const live=snapshot&&chat.id===selected&&snapshot.id===chat.id?snapshot:chat,act=window.klyneUi?chipState(chat).activity:'';return `data-state="${escape(live.status)}"`+(act?` data-activity="${act}"`:'');}
+function chipFor(chat){const K=window.klyneUi;if(!K)return `<small>${escape(chat.status)}</small>`;const c=chipState(chat),i=(K.UI[c.ui]||K.UI.idle)[1];return `<small data-ui="${c.ui}" data-icon="${i}">${escape(c.label)}</small>`;}
 function renderList() {
   const query=$('chat-search').value.toLowerCase();
   const filtered=chats.filter(chat=>`${chat.title} ${chat.status}`.toLowerCase().includes(query));
   const focused=document.activeElement?.closest('[data-chat]')?.dataset.chat;
-  setMarkup($('chat-list'), filtered.map(chat=>`<div class="chat-row"><button class="chat-item" data-chat="${escape(chat.id)}" data-state="${escape(chat.status)}" aria-current="${selected===chat.id}"><strong>${escape(chat.title)}</strong>${chipFor(chat)}</button><button class="chat-options" data-options="${escape(chat.id)}" aria-label="Options for ${escape(chat.title)}" aria-haspopup="dialog">⋯</button></div>`).join('') || `<p>${chats.length?'No matching conversations.':'Your conversations will appear here.'}</p>`);
+  setMarkup($('chat-list'), filtered.map(chat=>`<div class="chat-row"><button class="chat-item" data-chat="${escape(chat.id)}" ${rowState(chat)} aria-current="${selected===chat.id}"><strong>${escape(chat.title)}</strong>${chipFor(chat)}</button><button class="chat-options" data-options="${escape(chat.id)}" aria-label="Options for ${escape(chat.title)}" aria-haspopup="dialog">⋯</button></div>`).join('') || `<p>${chats.length?'No matching conversations.':'Your conversations will appear here.'}</p>`);
   const count = document.querySelector('.conversation-count');
   if(count) count.textContent = filtered.length;
-  const currentRow=[...$('chat-list').querySelectorAll('[data-chat]')].find(row=>row.dataset.chat===selected);
-  if(currentRow && snapshot && running(snapshot)){
-    const a=window.klyneActivity?.state(),tool=a?.operations[0]?.tool;
-    const label=a?.mode==='waiting'?'Waiting':snapshot.status==='Reviewing'?'Reviewing':tool==='browser'?'Browsing':tool?'Executing':'Thinking';
-    currentRow.querySelector('small').textContent=label;
-    currentRow.dataset.activity=a?.mode||'working';
-  }
   if(focused) [...$('chat-list').querySelectorAll('[data-chat]')].find(button=>button.dataset.chat===focused)?.focus({preventScroll:true});
 }
 function render() {
