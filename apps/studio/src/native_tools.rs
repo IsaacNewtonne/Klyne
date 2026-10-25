@@ -138,9 +138,14 @@ fn schema(tool: &str) -> (String, Value) {
             &["path"],
         ),
         "fetch_url" => object(
-            "Download an HTTPS page as text.",
+            "Download an HTTPS page as text. github.com repo/issue/PR links return API text; YouTube links return metadata and transcript. Blocked pages fall back to a reader service; failures carry error_code (NEED_LOGIN, RATE_LIMITED, PLATFORM_BLOCKED, NOT_FOUND, NETWORK) and a hint: do not retry blocked sources.",
             json!({"url":s("https:// URL")}),
             &["url"],
+        ),
+        "video_transcript" => object(
+            "Transcript (subtitles, manual or auto-generated) plus title, channel, duration and URL of a video, e.g. YouTube. No login.",
+            json!({"url_or_id":s("Video URL or 11-character YouTube id"),"lang":s("Optional language code, e.g. en or de; default English, else the original language")}),
+            &["url_or_id"],
         ),
         "run_shell" => object(
             "Run a program with arguments in the workspace (Windows). For PowerShell use program \"powershell\" with args [\"-NoProfile\",\"-Command\",\"...\"]. Destructive commands (delete, install, registry, shutdown, force push, setx) pause for user approval. Not for file work: use make_dir, write_file, read_file, list_dir instead of mkdir, New-Item, Set-Content or cat.",
@@ -395,6 +400,7 @@ pub fn tools(
                     | "document_read"
                     | "runtime_status"
                     | "fetch_url"
+                    | "video_transcript"
             )
         });
     }

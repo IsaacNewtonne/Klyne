@@ -12,3 +12,5 @@
 !.env.example
 
 artifacts/
+# Downloaded by scripts/install-yt-dlp.ps1 (video_transcript).
+/tools/yt-dlp/

@@ -96,6 +96,8 @@ pub fn available_tools(web: bool, terminal: bool, apps: bool, desktop: bool) -> 
             "browser_screenshot",
             "browser_close"
         ]);
+        // Not in the compact core set: exposed with enable_tools("web_media").
+        groups["web_media"] = json!(["video_transcript"]);
     }
     if terminal {
         groups["terminal"] = json!([
