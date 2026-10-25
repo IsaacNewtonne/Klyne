@@ -640,7 +640,10 @@
     const operationText=activity.operations.map(o=>o.operation).join(' · ');
     const phase=chat?.activity?.phase,since=chat?.activity?.started_at?Math.max(0,Math.round((Date.now()-Number(chat.activity.started_at))/1000)):0,who=chat?.activity?.agent || chat?.activity?.role || 'model';
     const phaseText=phase==='loading_model'?`Loading the model into memory for the ${who} (${since}s; the first request can take up to a minute)`:phase==='thinking'?`The ${who} model is thinking (${since}s)`:phase==='generating'?`The ${who} model is writing a reply (${chat.activity.generated_chars||0} characters, ${since}s)`:'';
-    const live=online?(waiting?(operationText || phaseText || `Awaiting ${who} response`):inTool?operationText:active?status:UI[uiState(chat,activity,false)][0]):'Connection lost to Studio · showing last known state';
+    // Stall watchdog (2026-10-25): quiet for the soft limit shows 'still working'.
+    const stall=chat?.activity?.still_working;
+    const stallText=stall?`Still working · no new output for ${Math.max(1,Math.round(stall.silent_s/60))} min. Klyne pauses and asks you after ${Math.round(stall.pause_after_s/60)} min.`:'';
+    const live=online?(stallText && active?stallText:waiting?(operationText || phaseText || `Awaiting ${who} response`):inTool?operationText:active?status:UI[uiState(chat,activity,false)][0]):'Connection lost to Studio · showing last known state';
     if($('prod-live').textContent!==live) $('prod-live').textContent=live;
     const doneSteps=tasks.filter(t=>t.status==='Done').length;
     $('prod-metrics').textContent=tasks.length?`${doneSteps} of ${tasks.length} action steps${status!=='Completed' && doneSteps===tasks.length?' · final review pending':''}`: 'Preparing';

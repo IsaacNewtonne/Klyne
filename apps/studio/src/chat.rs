@@ -142,6 +142,12 @@ pub struct Execution {
     /// Last parsed reviewer findings report.
     #[serde(default)]
     pub last_review: Option<Value>,
+    /// Loop, repetition and no-action detection for this goal.
+    #[serde(default)]
+    pub loop_guard: crate::loop_guard::LoopGuard,
+    /// One-shot host warning for the next model call (loop guard).
+    #[serde(default)]
+    pub loop_warning: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Chat {
@@ -212,6 +218,8 @@ pub struct Chats {
     browsers: crate::browser_tools::Browsers,
     root: PathBuf,
     active: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Stall watchdog heartbeats for running goals (loop_guard::Watch).
+    watches: Mutex<HashMap<String, Arc<crate::loop_guard::Watch>>>,
 }
 impl Chats {
     pub fn is_active(&self, id: &str) -> bool {
@@ -325,7 +333,19 @@ impl Chats {
             root: root.join("conversations"),
             browsers: crate::browser_tools::Browsers::default(),
             active: Mutex::new(HashMap::new()),
+            watches: Mutex::new(HashMap::new()),
         }
+    }
+    /// The running goal's stall notice for the UI, if it has gone quiet.
+    fn stall_notice(&self, id: &str) -> Option<Value> {
+        let watch = self.watches.lock().unwrap().get(id).cloned()?;
+        if !watch.soft.load(Ordering::SeqCst) || watch.done.load(Ordering::SeqCst) {
+            return None;
+        }
+        let limits = crate::quality::load(self.studio_root()).stall;
+        Some(
+            json!({"silent_s":watch.silent_ms()/1000,"soft_s":limits.soft_seconds,"pause_after_s":limits.hard_seconds}),
+        )
     }
     /// The Studio root (parent of `conversations`).
     fn studio_root(&self) -> &Path {
@@ -378,6 +398,9 @@ impl Chats {
         Ok(dir)
     }
     fn save(&self, chat: &mut Chat) -> io::Result<()> {
+        if let Some(watch) = self.watches.lock().unwrap().get(&chat.id) {
+            watch.touch();
+        }
         // Stage-1 baseline checkpoint: stamp observation IDs, detect
         // responsiveness milestones and time the durable write itself.
         // Stamping is positional and idempotent: entries keep the first ID
@@ -439,7 +462,10 @@ impl Chats {
     /// like any conversation path; an unknown conversation errors.
     pub fn pulse(&self, id: &str, since: u64) -> io::Result<Value> {
         let dir = self.directory(id)?;
-        crate::chat_store::pulse(&dir.join("chat.sqlite3"), since, self.is_active(id))
+        let mut pulse =
+            crate::chat_store::pulse(&dir.join("chat.sqlite3"), since, self.is_active(id))?;
+        pulse["still_working"] = json!(self.stall_notice(id).is_some());
+        Ok(pulse)
     }
     pub fn get(&self, id: &str) -> io::Result<Chat> {
         let dir = self.directory(id)?;
@@ -450,6 +476,12 @@ impl Chats {
         ) && !self.active.lock().unwrap().contains_key(id)
         {
             chat.status = "Interrupted".into();
+        }
+        if let Some(notice) = self.stall_notice(id) {
+            chat.activity
+                .get_or_insert_with(|| json!({"kind":"stall"}))
+                .as_object_mut()
+                .map(|a| a.insert("still_working".into(), notice));
         }
         Ok(chat)
     }
@@ -832,6 +864,7 @@ impl Chats {
             chat.execution.approval_queue.clear();
             chat.execution.original_request = text.into();
             chat.execution.evidence_start = chat.evidence.len();
+            chat.execution.loop_guard = crate::loop_guard::LoopGuard::default();
             chat.contract = if let Some(value) = body.get("contract") {
                 Some(serde_json::from_value::<TaskContract>(value.clone()).map_err(err)?)
             } else {
@@ -892,6 +925,29 @@ impl Chats {
         active.insert(id.clone(), stop.clone());
         drop(active);
         let service = Arc::clone(self);
+        let watch = Arc::new(crate::loop_guard::Watch::default());
+        self.watches
+            .lock()
+            .unwrap()
+            .insert(id.clone(), watch.clone());
+        {
+            // Stall watchdog: 'still working' after the soft limit, pause
+            // and ask after the hard limit. Any saved progress resets it.
+            let (watch, stop, limits) = (
+                watch.clone(),
+                stop.clone(),
+                crate::quality::load(self.studio_root()).stall,
+            );
+            std::thread::spawn(move || {
+                while !watch.done.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(500));
+                    if watch.tick(limits) == crate::loop_guard::Tick::Hard {
+                        stop.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            });
+        }
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Wait in the admitted worker, never under the shared active
@@ -921,6 +977,25 @@ impl Chats {
             }));
             match result {
                 Ok(Ok(())) => {}
+                Ok(Err(_)) if watch.hard.load(Ordering::SeqCst) => {
+                    // The stall watchdog paused the goal: ask, don't fail.
+                    chat.execution.failure = Some(crate::failure_policy::decide(
+                        crate::failure_policy::FailureKind::MissingInput,
+                    ));
+                    chat.status = "Needs input".into();
+                    let minutes = crate::quality::load(service.studio_root())
+                        .stall
+                        .hard_seconds
+                        / 60;
+                    push(
+                        &mut chat,
+                        "assistant",
+                        "Klyne",
+                        &format!(
+                            "I paused because nothing progressed for {minutes} minutes (no model output or tool result). Your work is saved. Press Resume work to try again, or tell me what to change."
+                        ),
+                    );
+                }
                 Ok(Err(e)) => {
                     // Approval proposals keep their decision and read as
                     // Interrupted: the user must approve, not reconcile.
@@ -992,6 +1067,8 @@ impl Chats {
                     chat.evidence.push(json!({"agent":"Procedure library","action":"procedure_record","ok":false,"summary":"Procedure could not be recorded","data":error.to_string()}));
                 }
             }
+            watch.done.store(true, Ordering::SeqCst);
+            service.watches.lock().unwrap().remove(&chat.id);
             let _ = service.save(&mut chat);
             service.active.lock().unwrap().remove(&chat.id);
         });
@@ -1216,6 +1293,11 @@ impl Chats {
         }
         if role == "planner" {
             system.push_str(r#"\nYour current role is PLANNER. Return only {"summary":"short approach","tasks":[{"agent":"Assistant","instruction":"concrete task and acceptance criteria"}]} with one to six tasks, or {"question":"essential clarification"}. Each task may specify depends_on:[1-based task IDs]. Use depends_on:[] for independent tasks; omit it only for sequential work. Do not return worker decisions or an empty tasks array. For a greeting such as hi, assign one Assistant task to reply naturally; no tools or files are needed. For a text-revision request, use one end-to-end editing task that reads, revises, saves and verifies the result. Do not split basic reading, rewriting, saving and hashing into separate specialist tasks. Split only independently deliverable artifacts when necessary."#);
+        }
+        if role == "worker"
+            && let Some(warning) = chat.execution.loop_warning.take()
+        {
+            context["loop_warning"] = json!(warning);
         }
         if role == "worker" {
             system.push_str(" file_change_receipts records successful writes and their host read-back checks for this goal, including earlier outputs. Use these to track completed work after intervening reads. Do not repeat a write merely because another file was read, or to change only a path spelling such as file.txt to ./file.txt. Change a saved output only to address a concrete unmet requirement; if all requested outputs are complete, return complete. Receipts describe earlier checks, not proof that files cannot change afterward.");
@@ -1812,6 +1894,9 @@ impl Chats {
                 }
                 self.save(chat)?;
                 let mut unsupported_completions = 0;
+                // A reviewer decision from a loop-guard handoff replaces the
+                // next worker request.
+                let mut handoff: Option<Value> = None;
                 if let Some(action) = chat.execution.replay_action.take()
                     && crate::quality::load(self.studio_root()).evidence
                 {
@@ -1838,13 +1923,16 @@ impl Chats {
                         3,
                         Some(&chat.workspace),
                     );
-                    let mut decision = self.request(
-                        chat,
-                        stop,
-                        start,
-                        "worker",
-                        json!({"agent":task.agent,"instruction":task.instruction,"expected_result":task.expected_result,"checklist":task.checklist,"step":index+1,"depends_on":task.depends_on,"recalled_memories":recalled,"experiment_experience":crate::improvement::recall(&self.root,&chat.workspace,&task.instruction)}),
-                    )?;
+                    let mut decision = match handoff.take() {
+                        Some(review) => review,
+                        None => self.request(
+                            chat,
+                            stop,
+                            start,
+                            "worker",
+                            json!({"agent":task.agent,"instruction":task.instruction,"expected_result":task.expected_result,"checklist":task.checklist,"step":index+1,"depends_on":task.depends_on,"recalled_memories":recalled,"experiment_experience":crate::improvement::recall(&self.root,&chat.workspace,&task.instruction)}),
+                        )?,
+                    };
                     let loop_detected = chat.pending.is_none()
                         && chat.execution.failure.is_none()
                         && chat.execution.progress.stalled(index, &decision);
@@ -1875,9 +1963,17 @@ impl Chats {
                         {
                             unsupported_completions += 1;
                             chat.evidence.push(json!({"agent":"Worker check","action":"unsupported_completion","ok":false,"summary":"Opening or observing an app did not send a message. Continue the actual task in the requested session, or report the specific login/access blocker. Do not claim actions absent from tool evidence.","data":"The proposed success report was not accepted."}));
+                            chat.execution.loop_guard.record_no_action(summary);
                             self.save(chat)?;
                             if unsupported_completions < 3 {
-                                continue;
+                                match self.loop_trip(chat, stop, start, index)? {
+                                    LoopStep::Go | LoopStep::Repair => continue,
+                                    LoopStep::Review(review) => {
+                                        handoff = Some(review);
+                                        continue;
+                                    }
+                                    LoopStep::Stop => return Ok(()),
+                                }
                             }
                             chat.tasks[index].status = "Needs input".into();
                             chat.status = "Needs input".into();
@@ -1911,9 +2007,17 @@ impl Chats {
                         ) {
                             unsupported_completions += 1;
                             chat.evidence.push(json!({"agent":"Worker check","action":"interaction_check","ok":false,"summary":problem,"data":"The proposed answer was not accepted."}));
+                            chat.execution.loop_guard.record_no_action(summary);
                             self.save(chat)?;
                             if unsupported_completions < 3 {
-                                continue;
+                                match self.loop_trip(chat, stop, start, index)? {
+                                    LoopStep::Go | LoopStep::Repair => continue,
+                                    LoopStep::Review(review) => {
+                                        handoff = Some(review);
+                                        continue;
+                                    }
+                                    LoopStep::Stop => return Ok(()),
+                                }
                             }
                             chat.tasks[index].status = "Needs input".into();
                             chat.status = "Needs input".into();
@@ -1977,7 +2081,20 @@ impl Chats {
                             &decision,
                             &chat.evidence[evidence_start..],
                         );
+                        let failed = chat.evidence[evidence_start..]
+                            .iter()
+                            .any(|e| e["ok"] == false);
+                        chat.execution
+                            .loop_guard
+                            .record_action(&decision["action"], failed);
                         self.save(chat)?;
+                        if chat.execution.host_finish.is_none() {
+                            match self.loop_trip(chat, stop, start, index)? {
+                                LoopStep::Go | LoopStep::Repair => {}
+                                LoopStep::Review(review) => handoff = Some(review),
+                                LoopStep::Stop => return Ok(()),
+                            }
+                        }
                     }
                     if let Some(answer) = chat.execution.host_finish.take() {
                         push(chat, "assistant", "Klyne", &answer);
@@ -2601,6 +2718,52 @@ impl Chats {
         Ok(passed)
     }
 
+    /// Apply the loop guard's verdict after a worker step (2026-10-25).
+    fn loop_trip(
+        &self,
+        chat: &mut Chat,
+        stop: &AtomicBool,
+        start: Instant,
+        index: usize,
+    ) -> io::Result<LoopStep> {
+        use crate::loop_guard::Trip;
+        match chat.execution.loop_guard.check() {
+            Trip::None => Ok(LoopStep::Go),
+            Trip::Soft(warning) => {
+                chat.evidence.push(json!({"agent":"Worker check","action":"loop_warning","ok":false,"summary":warning}));
+                chat.execution.loop_warning = Some(warning);
+                self.save(chat)?;
+                Ok(LoopStep::Go)
+            }
+            Trip::Hard(reason) if chat.execution.loop_guard.handoffs == 0 => {
+                chat.execution.loop_guard.handed_off();
+                chat.evidence.push(json!({"agent":"Host monitor","action":"loop_handoff","ok":false,"summary":format!("{reason} The step was handed to the reviewer.")}));
+                self.save(chat)?;
+                Ok(match self.review_stalled_task(chat, stop, start, index)? {
+                    Some(review) => LoopStep::Review(review),
+                    None => LoopStep::Repair,
+                })
+            }
+            Trip::Hard(reason) | Trip::Cap(reason) => {
+                chat.evidence.push(json!({"agent":"Host monitor","action":"loop_stop","ok":false,"summary":reason}));
+                chat.execution.failure = Some(crate::failure_policy::decide(
+                    crate::failure_policy::FailureKind::MissingInput,
+                ));
+                chat.tasks[index].status = "Needs input".into();
+                chat.status = "Needs input".into();
+                push(
+                    chat,
+                    "assistant",
+                    "Klyne",
+                    &format!(
+                        "{reason} I stopped instead of repeating it. Your work is saved; press Resume work to try again, or tell me what to change."
+                    ),
+                );
+                self.save(chat)?;
+                Ok(LoopStep::Stop)
+            }
+        }
+    }
     fn review_stalled_task(
         &self,
         chat: &mut Chat,
@@ -4808,6 +4971,15 @@ fn capability_present(list: &Value, kind: &str, name: &str) -> bool {
         .into_iter()
         .flatten()
         .any(|item| item["name"] == name && (item["kind"] == kind || item["kind"].is_null()))
+}
+/// What the worker loop does after a loop-guard check.
+enum LoopStep {
+    Go,
+    /// The reviewer left repair guidance; ask the worker again.
+    Repair,
+    /// The reviewer's decision replaces the next worker decision.
+    Review(Value),
+    Stop,
 }
 /// Reviewer loop guard: what to do with a reviewer read request.
 #[derive(Debug, PartialEq)]

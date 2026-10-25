@@ -4,7 +4,7 @@
 //! {"critique":"auto|on|off","findings":"auto|on|off","checklist":true,
 //!  "helper":{"enabled":true,"endpoint":"http://127.0.0.1:11434","model":"<tag>",
 //!            "max_input_chars":12000,"timeout_seconds":90,"internal_jobs":false},
-//!  "fetch_fallback":"jina|off"}
+//!  "fetch_fallback":"jina|off","stall":{"soft_seconds":180,"hard_seconds":480}}
 use serde_json::{Value, json};
 use std::{fs, io, path::Path};
 
@@ -85,6 +85,9 @@ pub struct Settings {
     /// fetch_url fallback backend when a direct fetch fails, is near-empty
     /// or is an anti-bot challenge: "jina" (default, Jina Reader) or "off".
     pub fetch_fallback: String,
+    /// Stall watchdog (`"stall":{"soft_seconds":180,"hard_seconds":480}`):
+    /// 'still working' in the UI, then pause and ask.
+    pub stall: crate::loop_guard::StallLimits,
 }
 
 pub fn parse(value: &Value) -> Settings {
@@ -116,6 +119,7 @@ pub fn parse(value: &Value) -> Settings {
             _ => "jina",
         }
         .to_owned(),
+        stall: crate::loop_guard::StallLimits::parse(&value["stall"]),
         models: RoleModels {
             planner: role_model(&value["models"]["planner"]),
             worker: role_model(&value["models"]["worker"]),

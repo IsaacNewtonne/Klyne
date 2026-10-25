@@ -4744,3 +4744,39 @@ fn missing_recovery_model_is_reported_instead_of_used() {
     );
     assert_eq!(tags.join().unwrap().len(), 1);
 }
+
+#[test]
+fn failing_tool_loop_warns_hands_off_once_then_stops_with_needs_input() {
+    // Loop guard (2026-10-25, adapted from Mercury Agent, MIT): the same
+    // tool failing repeatedly warns, then goes to the reviewer once, then
+    // ends as Needs input with the reason instead of looping on.
+    let s = Server::new();
+    let copy = |i: usize| json!({"decision":"act","action":{"tool":"copy_file","from":format!("missing-{i}.txt"),"to":format!("out-{i}.txt")}});
+    let mut replies = vec![plan()];
+    replies.extend((0..8).map(copy));
+    replies.push(json!({"decision":"repair","summary":"The source file does not exist.","tasks":[{"agent":"Worker","instruction":"Use an existing source"}]}));
+    replies.extend((8..16).map(copy));
+    let (endpoint, fixture) = model(replies);
+    let created = s.api("/api/chats", Some(request(&endpoint)));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    fixture.join().unwrap();
+    assert_eq!(chat["status"], "Needs input", "{chat}");
+    let actions: Vec<&str> = chat["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["action"].as_str())
+        .collect();
+    assert_eq!(
+        actions.iter().filter(|a| **a == "loop_warning").count(),
+        2,
+        "{actions:?}"
+    );
+    assert_eq!(actions.iter().filter(|a| **a == "loop_handoff").count(), 1);
+    assert_eq!(actions.iter().filter(|a| **a == "loop_stop").count(), 1);
+    let last = chat["messages"].as_array().unwrap().last().unwrap();
+    assert!(
+        last["text"].as_str().unwrap().contains("kept failing"),
+        "{last}"
+    );
+}

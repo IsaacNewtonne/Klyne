@@ -26,6 +26,7 @@ mod improvement;
 mod interaction;
 mod live_chat;
 mod local_apps;
+mod loop_guard;
 mod mcp;
 mod native_tools;
 mod network;

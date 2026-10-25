@@ -284,7 +284,7 @@ async function refresh() {
       try {
         const pulse=await api(`/api/chats/${id}/pulse?since=${pulseSeq}`);
         if(selected!==id) return;
-        if(pulse.status!==snapshot?.status||pulse.seq!==pulseSeq||(pulse.dialogue_revision||0)!==dialogueRevision) full=true;
+        if(pulse.status!==snapshot?.status||pulse.seq!==pulseSeq||(pulse.dialogue_revision||0)!==dialogueRevision||Boolean(pulse.still_working)!==Boolean(snapshot?.activity?.still_working)) full=true;
         else pulseSeq=pulse.seq;
         dialogueRevision=pulse.dialogue_revision||0;
         if(full) {
