@@ -98,9 +98,6 @@ fn launched_record(entry: &Value) -> Value {
 pub fn check(entry: &Value, workspace: &Path, present: &dyn Fn(&str, &str) -> bool) -> Value {
     let action = entry["action"].as_str().unwrap_or("");
     let tool = tool_of(action);
-    if entry["agent"] == "User approval" || READS.contains(&tool) {
-        return json!({"status":"not_applicable","check":"read-only or approval record"});
-    }
     // Typed web errors: a blocked source is "blocked", not unfinished work
     // to retry. NETWORK stays unsatisfied (one retry) until it repeats.
     if let Some(code) = entry["error_code"]
@@ -109,6 +106,9 @@ pub fn check(entry: &Value, workspace: &Path, present: &dyn Fn(&str, &str) -> bo
         && (code.final_for_source() || entry["repeat_blocked"] == true)
     {
         return json!({"status":"blocked","check":format!("source blocked: {code}"),"hint":entry["hint"]});
+    }
+    if entry["agent"] == "User approval" || READS.contains(&tool) {
+        return json!({"status":"not_applicable","check":"read-only or approval record"});
     }
     if entry["ok"] != true {
         let text = format!("{} {}", entry["summary"], entry["data"]).to_lowercase();
@@ -286,6 +286,9 @@ mod tests {
         assert_eq!(check(&network, ws, &none)["status"], "unsatisfied");
         let challenge = json!({"agent":"worker","action":"fetch:https://y.test","ok":true,"data":"<html><title>Just a moment...</title></html>"});
         assert_eq!(check(&challenge, ws, &none)["status"], "unsatisfied");
+        let browser = json!({"agent":"worker","action":"browser_open","ok":false,"error_code":"PLATFORM_BLOCKED","source":"browser:https://y.test"});
+        assert_eq!(check(&browser, ws, &none)["status"], "blocked");
+        assert!(!answer_supported(&[browser]));
         let page =
             json!({"agent":"worker","action":"fetch:https://y.test","ok":true,"data":"Real text"});
         assert_eq!(check(&page, ws, &none)["status"], "satisfied");

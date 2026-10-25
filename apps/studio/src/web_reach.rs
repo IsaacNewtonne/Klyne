@@ -369,6 +369,12 @@ pub fn is_challenge(body: &str, cf_mitigated: &str) -> bool {
         "please complete the security check",
         "are you a robot",
         "unusual traffic from your computer network",
+        "checking if the site connection is secure",
+        "verify you are human",
+        "pardon our interruption",
+        "access to this page has been denied",
+        "press & hold to confirm",
+        "incapsula incident id",
     ];
     WEAK.iter().any(|m| sample.contains(m)) && visible_text(&sample).chars().count() < 3000
 }
@@ -1562,6 +1568,16 @@ pub fn blocked_sources(window: &[Value]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut network: Vec<(String, usize)> = Vec::new();
     for e in window {
+        if let Some(source) = e["source"].as_str()
+            && e["ok"] == true
+            && e["error_code"].is_null()
+        {
+            // A later clean read of the same source (e.g. a challenge that
+            // resolved in the browser) unblocks it.
+            out.retain(|b| b["source"] != source);
+            network.retain(|(s, _)| s != source);
+            continue;
+        }
         let (Some(source), Some(code)) = (
             e["source"].as_str().filter(|s| !s.is_empty()),
             e["error_code"].as_str().and_then(ErrorCode::parse),
@@ -1626,6 +1642,236 @@ pub fn repeat_of_blocked(window: &[Value], action: &Value, agent: &str) -> Optio
         "data":format!("{code}: source already blocked; not retried.\nHint: {hint}"),
         "error_code":code,"hint":hint,"source":source,"backend":"host","route":"blocked_source","repeat_blocked":true
     }))
+}
+
+/// Anti-bot challenge in the isolated browser's title and visible text.
+pub fn browser_challenge(title: &str, text: &str) -> bool {
+    let clean = |t: &str| t.replace(['<', '>'], " ");
+    is_challenge(
+        &format!(
+            "<html><title>{}</title><body>{}</body></html>",
+            clean(title.trim()),
+            clean(text)
+        ),
+        "",
+    )
+}
+
+/// True when the request needs a real page interaction (clicks, forms,
+/// logins, screenshots or an explicit browser), so read-only routing and
+/// host-level blocks must not stand in for the browser.
+pub fn needs_interaction(text: &str) -> bool {
+    let words: String = text
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    let t = format!(
+        " {} ",
+        words.split_whitespace().collect::<Vec<_>>().join(" ")
+    );
+    // Whole words or phrases only ("form" must not match "information").
+    const PHRASES: &[&str] = &[
+        "click",
+        "clicks",
+        "clicking",
+        "press",
+        "tap",
+        "fill",
+        "fill in",
+        "fill out",
+        "form",
+        "forms",
+        "type into",
+        "log in",
+        "login",
+        "log into",
+        "sign in",
+        "signin",
+        "sign up",
+        "signup",
+        "submit",
+        "checkout",
+        "check out",
+        "add to cart",
+        "scroll",
+        "screenshot",
+        "screenshots",
+        "browser",
+        "navigate",
+        "interact",
+        "hover",
+        "drag",
+        "dropdown",
+        "upload",
+        "book a",
+        "reserve",
+        "button",
+        "buttons",
+        "captcha",
+    ];
+    PHRASES.iter().any(|p| t.contains(&format!(" {p} ")))
+}
+
+fn host_of(source: &str) -> Option<String> {
+    let (_, rest) = source.split_once(':')?;
+    let url = reqwest::Url::parse(rest).ok()?;
+    url.host_str()
+        .map(|h| h.trim_start_matches("www.").to_ascii_lowercase())
+}
+
+/// URL of the isolated browser's current page, from the latest browser
+/// entry that recorded one.
+pub fn browser_page(window: &[Value]) -> Option<String> {
+    window
+        .iter()
+        .rev()
+        .find_map(|e| e["page_url"].as_str().filter(|u| !u.is_empty()))
+        .map(str::to_owned)
+}
+
+/// Was this URL already fetched with fetch_url in this window (any result)?
+pub fn fetched_before(window: &[Value], url: &str) -> bool {
+    let key = source_key("fetch_url", url, None);
+    window.iter().any(|e| {
+        e["source"] == key.as_str()
+            || e["action"]
+                .as_str()
+                .and_then(|a| a.strip_prefix("fetch:"))
+                .is_some_and(|u| source_key("fetch_url", u, None) == key)
+    })
+}
+
+/// Answer a browser action on a source already blocked, without driving
+/// the browser. browser_open: the same URL blocked by fetch_url or the
+/// browser, or the same host blocked as PLATFORM_BLOCKED / RATE_LIMITED /
+/// NEED_LOGIN; an interactive task may still try the browser unless the
+/// browser itself already hit a challenge there. Reads and inputs on a
+/// page still showing a challenge are not repeated (Klyne does not solve
+/// challenges): input at once, reads after two challenge observations.
+pub fn browser_blocked(
+    window: &[Value],
+    action: &Value,
+    interactive: bool,
+    agent: &str,
+) -> Option<Value> {
+    let tool = action["tool"].as_str()?;
+    let blocked = blocked_sources(window);
+    let found = match tool {
+        "browser_open" => {
+            let url = action["url"].as_str()?;
+            if !url.starts_with("http") {
+                return None;
+            }
+            let keys = [
+                source_key("fetch_url", url, None),
+                source_key("browser", url, None),
+            ];
+            let host = host_of(&keys[1]);
+            let hit = |b: &&Value, browser_only: bool| {
+                let source = b["source"].as_str().unwrap_or("");
+                if browser_only && !source.starts_with("browser:") {
+                    return false;
+                }
+                keys.iter().any(|k| k == source)
+                    || (host.is_some()
+                        && host_of(source) == host
+                        && matches!(
+                            b["error_code"].as_str(),
+                            Some("PLATFORM_BLOCKED" | "RATE_LIMITED" | "NEED_LOGIN")
+                        ))
+            };
+            blocked.iter().find(|b| hit(b, interactive)).cloned()?
+        }
+        "browser_read" | "browser_click" | "browser_fill" => {
+            let page = browser_page(window)?;
+            let key = source_key("browser", &page, None);
+            let b = blocked
+                .iter()
+                .find(|b| b["source"] == key.as_str())?
+                .clone();
+            let seen = window
+                .iter()
+                .filter(|e| e["source"] == key.as_str() && e["error_code"] == "PLATFORM_BLOCKED")
+                .count();
+            (tool != "browser_read" || seen >= 2).then_some(b)?
+        }
+        _ => return None,
+    };
+    let code = found["error_code"].as_str().unwrap_or("PLATFORM_BLOCKED");
+    let hint = found["hint"].as_str().unwrap_or("");
+    let source = found["source"].as_str().unwrap_or("");
+    Some(json!({
+        "agent":agent,"action":tool,"ok":false,
+        "summary":format!("{code}: {source} is already blocked in this task; the browser was not used again. Klyne does not solve anti-bot challenges. Use other sources, finish with what you have and say this source was blocked, or report_blocker."),
+        "data":format!("{code}: source already blocked; browser not used.\nHint: {hint}"),
+        "error_code":code,"hint":hint,"source":source,"backend":"host","route":"blocked_source","repeat_blocked":true,
+        "page_url":action["url"].as_str().map(str::to_owned).or_else(|| browser_page(window))
+    }))
+}
+
+/// Classify a browser observation: adds page_url and source, and turns an
+/// anti-bot challenge into a PLATFORM_BLOCKED failure the evidence gate
+/// never accepts.
+pub fn annotate_browser(
+    entry: &mut Value,
+    value: &Value,
+    window: &[Value],
+    requested: Option<&str>,
+) {
+    let tool = entry["action"].as_str().unwrap_or("").to_owned();
+    if !matches!(
+        tool.as_str(),
+        "browser_open" | "browser_read" | "browser_click" | "browser_fill"
+    ) {
+        return;
+    }
+    let page = value["url"]
+        .as_str()
+        .filter(|u| !u.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            (tool == "browser_open")
+                .then(|| requested.map(str::to_owned))
+                .flatten()
+        })
+        .or_else(|| browser_page(window));
+    let Some(page) = page else {
+        return;
+    };
+    let source = source_key("browser", &page, None);
+    entry["page_url"] = json!(page);
+    entry["source"] = json!(source);
+    entry["backend"] = json!("browser");
+    if value["ok"] == false {
+        return;
+    }
+    let title = value["title"].as_str().unwrap_or("");
+    let text = value["text"].as_str().unwrap_or("");
+    // Interstitials that render inside an iframe (e.g. DataDome) leave the
+    // top page blank with the bare domain as its title.
+    let bare_host = reqwest::Url::parse(&page)
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| h.trim_start_matches("www.").to_ascii_lowercase())
+        })
+        .is_some_and(|h| {
+            title
+                .trim()
+                .trim_start_matches("www.")
+                .eq_ignore_ascii_case(&h)
+        })
+        && text.trim().chars().count() < 40;
+    if bare_host || browser_challenge(title, text) {
+        let code = ErrorCode::PlatformBlocked;
+        entry["ok"] = json!(false);
+        entry["error_code"] = json!(code.as_str());
+        entry["hint"] = json!(code.hint());
+        entry["summary"] = json!(format!(
+            "PLATFORM_BLOCKED: {page} shows an anti-bot challenge in the isolated browser (title {title:?}); not usable as evidence"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1983,5 +2229,127 @@ mod tests {
                 clip(&r.data, 900).0
             );
         }
+    }
+
+    #[test]
+    fn browser_challenges_interaction_and_blocked_hosts() {
+        assert!(browser_challenge(
+            "Just a moment...",
+            "Verifying you are human. This may take a few seconds."
+        ));
+        assert!(browser_challenge(
+            "www.g2.com",
+            "Performing security verification\nThis website uses a security service"
+        ));
+        assert!(browser_challenge("Attention Required! | Cloudflare", ""));
+        assert!(!browser_challenge(
+            "Rust issue #100",
+            &"A long article about verifying you are human. ".repeat(100)
+        ));
+        assert!(!browser_challenge(
+            "Example Domain",
+            "This domain is for use in documentation examples."
+        ));
+
+        assert!(!needs_interaction(
+            "Summarize https://github.com/rust-lang/rust/issues/100 with more information and the platform format"
+        ));
+        assert!(!needs_interaction("What does https://example.com say?"));
+        for t in [
+            "Click the Next button on https://x.test",
+            "fill in the form",
+            "Log in to the site",
+            "Open it in the browser",
+            "take a screenshot of x.test",
+        ] {
+            assert!(needs_interaction(t), "{t}");
+        }
+
+        let open = |url: &str| json!({"tool":"browser_open","url":url});
+        let fetch_block = json!({"action":"fetch:https://www.g2.com/","ok":false,"error_code":"PLATFORM_BLOCKED","hint":"h","source":"fetch_url:https://www.g2.com"});
+        let window = vec![fetch_block.clone()];
+        // Read-only task: same URL and same host are answered as blocked.
+        let skip = browser_blocked(&window, &open("https://www.g2.com/"), false, "w").unwrap();
+        assert_eq!(skip["repeat_blocked"], true);
+        assert_eq!(skip["error_code"], "PLATFORM_BLOCKED");
+        assert!(browser_blocked(&window, &open("https://g2.com/products"), false, "w").is_some());
+        assert!(browser_blocked(&window, &open("https://other.test/"), false, "w").is_none());
+        // An interactive task may still try the browser after a fetch block.
+        assert!(browser_blocked(&window, &open("https://www.g2.com/"), true, "w").is_none());
+        // NOT_FOUND blocks the URL, not the host.
+        let nf = vec![
+            json!({"ok":false,"error_code":"NOT_FOUND","source":"fetch_url:https://x.test/a"}),
+        ];
+        assert!(browser_blocked(&nf, &open("https://x.test/a/"), false, "w").is_some());
+        assert!(browser_blocked(&nf, &open("https://x.test/b"), false, "w").is_none());
+
+        // The browser's own challenge observation, then reads and inputs.
+        let mut first = json!({"action":"browser_open","ok":true});
+        let page = json!({"url":"https://www.g2.com/","title":"Just a moment...","text":"Verifying you are human"});
+        annotate_browser(&mut first, &page, &[], Some("https://www.g2.com/"));
+        assert_eq!(first["ok"], false);
+        assert_eq!(first["error_code"], "PLATFORM_BLOCKED");
+        assert_eq!(first["source"], "browser:https://www.g2.com");
+        let mut w = vec![first.clone()];
+        assert!(browser_blocked(&w, &open("https://www.g2.com/"), true, "w").is_some());
+        let read = json!({"tool":"browser_read"});
+        assert!(
+            browser_blocked(&w, &read, false, "w").is_none(),
+            "one re-read is allowed"
+        );
+        assert!(
+            browser_blocked(
+                &w,
+                &json!({"tool":"browser_click","selector":"#x"}),
+                true,
+                "w"
+            )
+            .is_some()
+        );
+        let mut again = json!({"action":"browser_read","ok":true});
+        annotate_browser(
+            &mut again,
+            &json!({"url":null,"title":"Just a moment...","text":""}),
+            &w,
+            None,
+        );
+        assert_eq!(again["source"], "browser:https://www.g2.com");
+        w.push(again);
+        assert!(browser_blocked(&w, &read, false, "w").is_some());
+        // A later clean read (challenge resolved) unblocks the page.
+        let mut clean = json!({"action":"browser_read","ok":true});
+        annotate_browser(
+            &mut clean,
+            &json!({"url":null,"title":"G2","text":"Business software reviews"}),
+            &w,
+            None,
+        );
+        assert_eq!(clean["ok"], true);
+        w.push(clean);
+        assert!(blocked_sources(&w).is_empty());
+        assert!(browser_blocked(&w, &read, false, "w").is_none());
+
+        let mut blank = json!({"action":"browser_open","ok":true});
+        annotate_browser(
+            &mut blank,
+            &json!({"url":"https://www.g2.com/","title":"g2.com","text":""}),
+            &[],
+            None,
+        );
+        assert_eq!(blank["error_code"], "PLATFORM_BLOCKED");
+        let mut fine = json!({"action":"browser_open","ok":true});
+        annotate_browser(
+            &mut fine,
+            &json!({"url":"https://example.com/","title":"Example Domain","text":""}),
+            &[],
+            None,
+        );
+        assert_eq!(fine["ok"], true);
+        assert!(fetched_before(&window, "https://www.g2.com"));
+        assert!(fetched_before(
+            &[json!({"action":"fetch:https://a.test/x","ok":true})],
+            "https://a.test/x/"
+        ));
+        assert!(!fetched_before(&window, "https://a.test/"));
     }
 }
