@@ -21,6 +21,7 @@ mod document_save;
 mod documents;
 mod execution_graph;
 mod failure_policy;
+mod file_paths;
 mod improvement;
 mod interaction;
 mod live_chat;

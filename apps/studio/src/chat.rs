@@ -2145,7 +2145,14 @@ impl Chats {
                             )
                             .map_or(Ok(()), |p| Err(err(p)))
                         })
-                        .and_then(|()| crate::completion_guard::check_review(goal, &review, evidence))
+                        .and_then(|()| {
+                            crate::completion_guard::check_review_in(
+                                goal,
+                                &review,
+                                evidence,
+                                Some(&chat.workspace),
+                            )
+                        })
                                 .and_then(|()| {
                                     crate::completion_guard::verify_claims(
                                         &review,
@@ -3866,7 +3873,7 @@ impl Chats {
             note_tool(chat, "read_file:read-back", read_started, passed);
             use sha2::{Digest, Sha256};
             let sha256 = format!("{:x}", Sha256::digest(contents.as_bytes()));
-            chat.evidence.push(json!({"agent":"Runtime check","action":read.to_string(),"ok":passed,"summary":"Independent read-back of written content","data":if passed {"Written content matches the file on disk."} else {"File content did not match the write."},"receipt":{"version":1,"effect":"file_write","target":path,"criterion":{"FileDigest":{"path":path,"sha256":sha256}}}}));
+            chat.evidence.push(json!({"agent":"Runtime check","action":read.to_string(),"ok":passed,"summary":"Independent read-back of written content","data":if passed {"Written content matches the file on disk."} else {"File content did not match the write."},"receipt":{"version":1,"effect":"file_write","target":path,"path_key":crate::file_paths::key(path, Some(&chat.workspace)),"criterion":{"FileDigest":{"path":path,"sha256":sha256}}}}));
             self.save(chat)?;
             if !passed {
                 return Err(err(
@@ -3888,7 +3895,7 @@ impl Chats {
                 && serde_json::from_str::<Value>(&observed.data)
                     .is_ok_and(|v| v["sha256"] == digest);
             note_tool(chat, "hash_file:patch-check", hash_started, passed);
-            chat.evidence.push(json!({"agent":"Runtime check","action":format!("hash_file:{path}"),"ok":passed,"summary":"Independent check of patched file","data":observed.data,"receipt":{"version":1,"effect":"file_write","target":path,"criterion":{"FileDigest":{"path":path,"sha256":digest}}}}));
+            chat.evidence.push(json!({"agent":"Runtime check","action":format!("hash_file:{path}"),"ok":passed,"summary":"Independent check of patched file","data":observed.data,"receipt":{"version":1,"effect":"file_write","target":path,"path_key":crate::file_paths::key(path, Some(&chat.workspace)),"criterion":{"FileDigest":{"path":path,"sha256":digest}}}}));
             self.save(chat)?;
             if !passed {
                 return Err(err("Patched file did not match its destination digest"));

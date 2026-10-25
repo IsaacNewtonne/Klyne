@@ -126,10 +126,21 @@ fn navigated_click(entry: &serde_json::Value) -> bool {
     data["changed"] == true && data["url"].as_str().is_some_and(|u| !u.is_empty())
 }
 
+#[cfg(test)]
 pub fn check_review(
     goal: &str,
     review: &serde_json::Value,
     evidence: &[serde_json::Value],
+) -> std::io::Result<()> {
+    check_review_in(goal, review, evidence, None)
+}
+
+/// `workspace` resolves relative file names when matching file receipts.
+pub fn check_review_in(
+    goal: &str,
+    review: &serde_json::Value,
+    evidence: &[serde_json::Value],
+    workspace: Option<&std::path::Path>,
 ) -> std::io::Result<()> {
     let answer = review["summary"].as_str().unwrap_or("");
     if (delivery_claim(goal) || delivery_claim(answer)) && !has_attempted_action(evidence) {
@@ -176,18 +187,19 @@ pub fn check_review(
             "Check the destination with a read-only tool and cite the visible result in observed_results before finishing. Do not repeat the send. A visible outgoing message is an observed result, not proof of delivery or reading.",
         ));
     }
-    check_action_evidence_with_review(answer, evidence, Some(review))
+    check_action_evidence_with_review(answer, evidence, Some(review), workspace)
 }
 /// Bind supported completion claims to host-produced destination receipts.
 /// Unstructured prose remains model-reviewed; it never creates a receipt.
 #[cfg(test)]
 pub fn check_action_evidence(answer: &str, evidence: &[serde_json::Value]) -> std::io::Result<()> {
-    check_action_evidence_with_review(answer, evidence, None)
+    check_action_evidence_with_review(answer, evidence, None, None)
 }
 fn check_action_evidence_with_review(
     answer: &str,
     evidence: &[serde_json::Value],
     review: Option<&serde_json::Value>,
+    workspace: Option<&std::path::Path>,
 ) -> std::io::Result<()> {
     let lower = answer.to_lowercase();
     let groups: &[(&str, &[&str])] = &[
@@ -259,12 +271,11 @@ fn check_action_evidence_with_review(
         }
         if *effect == "file_write" {
             for word in answer.split_whitespace() {
-                let path = word.trim_matches(|c: char| {
-                    matches!(
-                        c,
-                        '`' | '\'' | '"' | '.' | ',' | '(' | ')' | ';' | '!' | '?'
-                    )
-                });
+                // Leading dots belong to the path (./a.txt, .env); only a
+                // trailing full stop is punctuation.
+                let path = word
+                    .trim_start_matches(['`', '\'', '"', '(', ','])
+                    .trim_end_matches(['`', '\'', '"', '.', ',', '(', ')', ';', '!', '?', ':']);
                 let Some((_, extension)) = path.rsplit_once('.') else {
                     continue;
                 };
@@ -276,7 +287,7 @@ fn check_action_evidence_with_review(
                 }
                 if !receipts
                     .iter()
-                    .any(|e| e["receipt"]["target"].as_str() == Some(path))
+                    .any(|e| crate::file_paths::receipt_names(&e["receipt"], path, workspace))
                 {
                     return Err(crate::err(format!("No matching file receipt for {path}")));
                 }
@@ -315,7 +326,11 @@ pub fn verify_claims(
                 || !evidence.iter().any(|e| {
                     valid_receipt(e)
                         && e["receipt"]["effect"] == claim["effect"]
-                        && e["receipt"]["target"] == claim["target"]
+                        && crate::file_paths::receipt_names(
+                            &e["receipt"],
+                            claim["target"].as_str().unwrap_or(""),
+                            Some(policy.workspace_root()),
+                        )
                 })
             {
                 return Err(crate::err(
@@ -333,7 +348,17 @@ pub fn verify_claims(
         .filter_map(|entry| {
             let target = entry["receipt"]["target"].as_str()?;
             (summary.contains(target)
-                || explicit.is_some_and(|claims| claims.iter().any(|c| c["target"] == target)))
+                || explicit.is_some_and(|claims| {
+                    claims.iter().any(|c| {
+                        c["target"].as_str().is_some_and(|t| {
+                            crate::file_paths::receipt_names(
+                                &entry["receipt"],
+                                t,
+                                Some(policy.workspace_root()),
+                            )
+                        })
+                    })
+                }))
             .then_some(target)
         })
         .collect();
@@ -377,6 +402,28 @@ mod tests {
     use serde_json::json;
     fn receipt(path: &str) -> serde_json::Value {
         json!({"agent":"Runtime check","ok":true,"receipt":{"version":1,"effect":"file_write","target":path}})
+    }
+    #[test]
+    fn file_claims_match_receipts_in_any_path_form() {
+        // Live 2026-10-25: receipt "summary.txt", reviewer answer named the
+        // verbatim absolute path inside the conversation workspace.
+        let ws = std::path::Path::new(r"\\?\C:\temp\k\conversations\1-1\files");
+        let review = json!({"summary": r"The summary was saved successfully to \\?\C:\temp\k\conversations\1-1\files\summary.txt."});
+        let evidence = [receipt("summary.txt")];
+        assert!(check_review_in("summarize and save", &review, &evidence, Some(ws)).is_ok());
+        for named in [
+            r"C:\temp\k\conversations\1-1\files\summary.txt",
+            "C:/Temp/K/conversations/1-1/files/SUMMARY.txt",
+            "./summary.txt",
+        ] {
+            let review = json!({"summary": format!("I saved {named}.")});
+            assert!(
+                check_review_in("save", &review, &evidence, Some(ws)).is_ok(),
+                "{named}"
+            );
+        }
+        let other = json!({"summary": r"I saved C:\temp\k\conversations\1-1\files\other.txt."});
+        assert!(check_review_in("save", &other, &evidence, Some(ws)).is_err());
     }
     #[test]
     fn conversational_replies_do_not_require_desktop_outcomes() {
