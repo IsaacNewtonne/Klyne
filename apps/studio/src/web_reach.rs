@@ -1874,6 +1874,77 @@ pub fn annotate_browser(
     }
 }
 
+/// Complete a needs_input blocker from typed blocked-source evidence: kind
+/// "unavailable", the blocked sources as what is missing, their hint as the
+/// reason, and the blocking entries as evidence. Fields the model filled in
+/// correctly are kept; nothing changes when no source is blocked.
+pub fn support_blocker(value: &mut Value, evidence: &[Value], start: usize) {
+    let Some(question) = value.get("question").cloned() else {
+        return;
+    };
+    let window = evidence.get(start..).unwrap_or(&[]);
+    let blocked = blocked_sources(window);
+    if blocked.is_empty() {
+        return;
+    }
+    let sources: Vec<String> = blocked
+        .iter()
+        .filter_map(|b| b["source"].as_str())
+        .map(|s| s.split_once(':').map_or(s, |(_, rest)| rest).to_owned())
+        .collect();
+    let indices: Vec<usize> = window
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            e["source"]
+                .as_str()
+                .is_some_and(|s| blocked.iter().any(|b| b["source"] == s))
+                && e["error_code"].is_string()
+        })
+        .map(|(i, _)| start + i)
+        .collect();
+    let first = &blocked[0];
+    let code = first["error_code"].as_str().unwrap_or("PLATFORM_BLOCKED");
+    let hint = first["hint"].as_str().unwrap_or("");
+    let b = &value["blocker"];
+    let kind_ok = matches!(
+        b["kind"].as_str(),
+        Some("authentication" | "access" | "observed_ambiguity" | "unavailable")
+    );
+    let text = |v: &Value| {
+        v.as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+    };
+    let missing =
+        text(&b["missing"]).unwrap_or_else(|| format!("a readable copy of {}", sources.join(", ")));
+    let why = text(&b["why_user"]).unwrap_or_else(|| format!("{code}: {hint}"));
+    let ids_ok = b["evidence_indices"].as_array().is_some_and(|ids| {
+        !ids.is_empty()
+            && ids
+                .iter()
+                .all(|id| id.as_u64().is_some_and(|i| (i as usize) < evidence.len()))
+    });
+    let kind = if kind_ok {
+        b["kind"].clone()
+    } else {
+        json!("unavailable")
+    };
+    let ids = if ids_ok && kind_ok {
+        b["evidence_indices"].clone()
+    } else {
+        json!(indices)
+    };
+    value["blocker"] = json!({"kind":kind,"missing":missing,"why_user":why,"evidence_indices":ids});
+    if text(&question).is_none_or(|q| q.chars().count() < 12) {
+        value["question"] = json!(format!(
+            "I couldn't read {} ({code}). {hint} Can you paste the content or give another public link?",
+            sources.join(", ")
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2351,5 +2422,35 @@ mod tests {
             "https://a.test/x/"
         ));
         assert!(!fetched_before(&window, "https://a.test/"));
+    }
+
+    #[test]
+    fn blocked_sources_back_a_needs_input_blocker() {
+        let evidence = vec![
+            json!({"action":"list_dir","ok":true,"data":"[]"}),
+            json!({"action":"fetch:https://www.g2.com/","ok":false,"error_code":"PLATFORM_BLOCKED","hint":"Anti-bot.","source":"fetch_url:https://www.g2.com","data":"x"}),
+        ];
+        let mut v = json!({"decision":"needs_input","question":"?"});
+        support_blocker(&mut v, &evidence, 0);
+        assert_eq!(v["blocker"]["kind"], "unavailable");
+        assert_eq!(v["blocker"]["evidence_indices"], json!([1]));
+        assert!(
+            v["question"]
+                .as_str()
+                .unwrap()
+                .contains("https://www.g2.com (PLATFORM_BLOCKED)")
+        );
+        assert!(crate::autonomy::blocker_problem(&v, &evidence, "Fetch g2").is_none());
+        // Model-supplied fields are kept; nothing changes without a block.
+        let mut good = json!({"question":"Paste the G2 page text?","blocker":{"kind":"access","missing":"page text","why_user":"blocked","evidence_indices":[1]}});
+        support_blocker(&mut good, &evidence, 0);
+        assert_eq!(good["blocker"]["missing"], "page text");
+        assert_eq!(good["question"], "Paste the G2 page text?");
+        let mut none = json!({"question":"?"});
+        support_blocker(&mut none, &evidence[..1], 0);
+        assert!(none.get("blocker").is_none());
+        let mut done = json!({"decision":"complete","summary":"x"});
+        support_blocker(&mut done, &evidence, 0);
+        assert!(done.get("blocker").is_none());
     }
 }

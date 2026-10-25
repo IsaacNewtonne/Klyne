@@ -1457,7 +1457,15 @@ impl Chats {
                     Ok(value)
                 });
             match parsed {
-                Ok(value) => {
+                Ok(mut value) => {
+                    // A question about a typed blocked web source is backed
+                    // by that evidence even when a small model leaves the
+                    // blocker fields incomplete.
+                    crate::web_reach::support_blocker(
+                        &mut value,
+                        &chat.evidence,
+                        chat.execution.evidence_start,
+                    );
                     if role == "independent reviewer"
                         && value["question"]
                             .as_str()
