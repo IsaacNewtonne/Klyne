@@ -4508,8 +4508,8 @@ fn reviewer_findings_shape_is_enforced_and_skipped_items_reach_the_planner_as_da
             findings_finish("greeting.txt says Hello", &["Spelling of the greeting"]),
             // Second message in the same conversation: planner sees the note.
             content_reply(&json!({"summary":"Reply","tasks":[{"agent":"Assistant","instruction":"Say thanks"}]}).to_string()),
-            // "thanks" answered without tools: no reviewer call.
             tool_reply("finish", json!({"summary":"Thanks!"})),
+            findings_finish("Thanks!", &[]),
         ],
         true,
     );
@@ -4528,7 +4528,7 @@ fn reviewer_findings_shape_is_enforced_and_skipped_items_reach_the_planner_as_da
     let second = s.wait(&id);
     assert_eq!(second["status"], "Completed", "{second}");
     let calls = fixture.join().unwrap();
-    assert_eq!(calls.len(), 7);
+    assert_eq!(calls.len(), 8);
     let planner: Value =
         serde_json::from_str(calls[5]["messages"][1]["content"].as_str().unwrap()).unwrap();
     let notes = &planner["unverified_notes_untrusted_data"];
@@ -4936,6 +4936,9 @@ fn direct_knowledge_answer_skips_review_and_meta_questions_never_reach_the_user(
     let (endpoint, fixture) = fixture_service(
         vec![
             content_reply(&ask.to_string()),
+            // Ollama's tool-call parser rejecting a malformed call is a
+            // format error: retried once with a correction.
+            json!({"error":"XML syntax error on line 5: element <function> closed by </parameter>"}),
             tool_reply(
                 "finish",
                 json!({"summary":"Warm light neutrals such as cream."}),
@@ -4949,7 +4952,13 @@ fn direct_knowledge_answer_skips_review_and_meta_questions_never_reach_the_user(
     let created = s.api("/api/chats", Some(body));
     let chat = s.wait(created["id"].as_str().unwrap());
     assert_eq!(chat["status"], "Completed", "{chat}");
-    assert_eq!(fixture.join().unwrap().len(), 2);
+    let calls = fixture.join().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert!(
+        calls[0]
+            .to_string()
+            .contains("general knowledge or opinion question")
+    );
     assert!(chat.to_string().contains("direct_answer"), "{chat}");
     let last = chat["messages"].as_array().unwrap().last().unwrap().clone();
     assert!(last["text"].as_str().unwrap().contains("cream"), "{last}");

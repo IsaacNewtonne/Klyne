@@ -1414,6 +1414,11 @@ impl Chats {
             && crate::turn_end::memory_statement(&chat.execution.original_request)
         {
             notes.push(MEMORY_STATEMENT_NOTE.to_owned());
+        } else if matches!(role, "planner" | "worker")
+            && no_earlier_tool_work(chat)
+            && crate::turn_end::direct_question(&chat.execution.original_request)
+        {
+            notes.push(DIRECT_QUESTION_NOTE.to_owned());
         }
         if !notes.is_empty() {
             context["system_notes"] = json!(notes);
@@ -1645,7 +1650,14 @@ impl Chats {
                     .take(8192)
                     .collect::<String>()
             }));
-            let transport_failed = response.is_err();
+            // Ollama's own tool-call parser can reject a malformed call
+            // ("XML syntax error ..."): that is a format error worth one
+            // corrected retry, not a transport failure.
+            let transport_failed = response.as_ref().is_err_and(|error| {
+                !error
+                    .to_string()
+                    .starts_with("Ollama reported an error while generating")
+            });
             let parsed = response
                 .and_then(|output| parse_model_response(&output.0))
                 .and_then(|mut value| {
@@ -2988,7 +3000,7 @@ impl Chats {
             || chat.prompt_maker
             || chat.tasks.is_empty()
             || chat.tasks.iter().any(|t| t.status != "Done")
-            || !(crate::turn_end::direct_question(request)
+            || !((no_earlier_tool_work(chat) && crate::turn_end::direct_question(request))
                 || crate::turn_end::memory_statement(request))
         {
             return None;
@@ -5171,6 +5183,18 @@ fn final_answer_text(messages: &[Message], review: &Value) -> String {
 }
 
 const MEMORY_STATEMENT_NOTE: &str = "The user is telling you something to remember. Klyne saves it to memory automatically after this turn, so do not write files or call other tools to record it: call finish with a one-sentence confirmation.";
+
+/// No tool work earlier in this conversation: a short follow-up such as
+/// "Personalize it" may refer to it, so it is not a standalone question.
+fn no_earlier_tool_work(chat: &Chat) -> bool {
+    chat.evidence
+        .get(..chat.execution.evidence_start)
+        .unwrap_or(&chat.evidence)
+        .iter()
+        .all(|e| e["agent"].as_str().is_some_and(|a| a.starts_with("Host")))
+}
+
+const DIRECT_QUESTION_NOTE: &str = "This is a general knowledge or opinion question with no URL, file or live data: answer it directly from your own knowledge in one Assistant task, then call finish with the answer. Do not browse or call other tools unless the user asked for sources.";
 
 fn last_worker_answer(messages: &[Message]) -> Option<String> {
     messages
