@@ -101,3 +101,30 @@ Source idea: Mercury Agent's context window (MIT), reimplemented in
   inside the history JSON.
 - Evidence, receipts, the completion gate and claim checks are unchanged:
   they still read the full evidence list, not the prompt window.
+
+## 4. Automatic tool groups
+
+Source idea: Mercury Agent's tool exposure (MIT), reimplemented in
+`apps/studio/src/native_tools.rs` (`AUTO_GROUPS`, `auto_groups`, `hint`).
+
+In compact mode (small local models) the always-on core is now: workspace
+files, fetch-first web (`fetch_url`, `browser_open/read/click/fill/close`
+— click and fill stay core for the click gate), `run_shell`/`ask_model`
+when Terminal is on, `runtime_status` and `capability_list`. Other groups
+are sent only when the original request, the current assignment or the
+last 4 user turns contain one of their keywords:
+
+| Group | Tools / host groups | Example keywords |
+|---|---|---|
+| memory | memory_read, memory_save, memory_forget | remember, recall, forget, prefer, from now on, my name |
+| skills | skill_*, tool_save/test/run/forget, capability_history/restore | skill, tool, script, reusable, automate |
+| apps | app_list + the apps group | app, connector, mcp, slack, github, api |
+| desktop | desktop_observe/apps/launch/focus/click/type/key | window, screen, notepad, launch, click, press |
+| web_media | video_transcript | youtube, video, transcript |
+| browser | browser_screenshot + browser_developer | screenshot, console, inspect, scroll |
+| documents | documents + resources groups | pdf, docx, xlsx, csv, spreadsheet, report |
+| voice | voice group (when offered) | voice, speak, read aloud |
+
+`enable_tools` still exposes any hidden group explicitly (its description
+lists what was auto-shown), access toggles still decide what exists at
+all, and full (non-compact) mode is unchanged.

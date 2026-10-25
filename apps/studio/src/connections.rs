@@ -231,6 +231,7 @@ impl Connection {
                 &enabled,
                 context["compact_tools"] == true,
                 role == "independent reviewer",
+                &crate::native_tools::hint(context),
             );
             if role == "independent reviewer" && context["review_findings"] == false {
                 crate::native_tools::without_findings(&mut tools);

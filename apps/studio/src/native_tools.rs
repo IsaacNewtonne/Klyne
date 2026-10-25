@@ -34,20 +34,8 @@ const CORE_WEB: &[&str] = &[
 ];
 /// Cheap read-only/meta tools kept visible in compact mode (2026-10-24):
 /// without them small models ran e.g. "runtime_status" as a shell program.
-const CORE_META: &[&str] = &[
-    "runtime_status",
-    "capability_list",
-    "skill_read",
-    "memory_read",
-    "memory_save",
-    "memory_forget",
-    "tool_save",
-    "tool_test",
-    "tool_run",
-    "skill_forget",
-    "tool_forget",
-    "app_list",
-];
+/// Memory, skill/tool and app tools moved to keyword groups (2026-10-25).
+const CORE_META: &[&str] = &["runtime_status", "capability_list"];
 const CORE_TERMINAL: &[&str] = &["run_shell", "ask_model"];
 const CORE_DESKTOP: &[&str] = &[
     "desktop_observe",
@@ -58,6 +46,216 @@ const CORE_DESKTOP: &[&str] = &[
     "desktop_type",
     "desktop_key",
 ];
+
+/// Automatic tool groups (2026-10-25, idea adapted from Mercury Agent,
+/// MIT): in compact mode a group's schemas are sent only when the request,
+/// the assignment or the last 4 user turns mention one of its keywords.
+/// `tools` are tool names (shown if the host offers them); `host_groups`
+/// are whole `available_tools` groups. `enable_tools` still works on top.
+pub struct AutoGroup {
+    pub name: &'static str,
+    pub tools: &'static [&'static str],
+    pub host_groups: &'static [&'static str],
+    pub keywords: &'static [&'static str],
+}
+
+pub const AUTO_GROUPS: &[AutoGroup] = &[
+    AutoGroup {
+        name: "memory",
+        tools: &["memory_read", "memory_save", "memory_forget"],
+        host_groups: &[],
+        keywords: &[
+            "remember",
+            "recall",
+            "memory",
+            "memorize",
+            "forget",
+            "preference",
+            "prefer",
+            "from now on",
+            "my name",
+            "i like",
+            "i love",
+            "i hate",
+            "favorite",
+            "favourite",
+            "note that",
+            "keep in mind",
+            "last time",
+            "you know",
+        ],
+    },
+    AutoGroup {
+        name: "skills",
+        tools: &[
+            "skill_read",
+            "skill_save",
+            "skill_forget",
+            "tool_save",
+            "tool_test",
+            "tool_run",
+            "tool_forget",
+            "capability_history",
+            "capability_restore",
+        ],
+        host_groups: &[],
+        keywords: &[
+            "skill",
+            "tool",
+            "script",
+            "reusable",
+            "procedure",
+            "routine",
+            "automate",
+            "save this as",
+            "saved",
+            "capabilit",
+        ],
+    },
+    AutoGroup {
+        name: "apps",
+        tools: &["app_list"],
+        host_groups: &["apps"],
+        keywords: &[
+            "app",
+            "connector",
+            "mcp",
+            "integration",
+            "slack",
+            "gmail",
+            "calendar",
+            "github",
+            "notion",
+            "drive",
+            "api",
+        ],
+    },
+    AutoGroup {
+        name: "desktop",
+        tools: CORE_DESKTOP,
+        host_groups: &[],
+        keywords: &[
+            "window",
+            "screen",
+            "desktop",
+            "application",
+            "launch",
+            "notepad",
+            "calculator",
+            "explorer",
+            "paint",
+            "minimi",
+            "maximi",
+            "taskbar",
+            "start menu",
+            "keyboard",
+            "press",
+            "type ",
+            "click",
+            "focus",
+            "settings",
+            "control panel",
+            " app",
+        ],
+    },
+    AutoGroup {
+        name: "web_media",
+        tools: &[],
+        host_groups: &["web_media"],
+        keywords: &[
+            "youtube",
+            "video",
+            "transcript",
+            "podcast",
+            "youtu.be",
+            "vimeo",
+            "watch",
+        ],
+    },
+    AutoGroup {
+        name: "browser",
+        tools: &["browser_screenshot"],
+        host_groups: &["browser_developer"],
+        keywords: &[
+            "screenshot",
+            "console",
+            "devtools",
+            "javascript",
+            "network tab",
+            "inspect",
+            "scroll",
+            "dom",
+            "selector",
+        ],
+    },
+    AutoGroup {
+        name: "documents",
+        tools: &[],
+        host_groups: &["documents", "resources"],
+        keywords: &[
+            "document",
+            "pdf",
+            "docx",
+            "xlsx",
+            "spreadsheet",
+            "csv",
+            "pptx",
+            "word file",
+            "excel",
+            "artifact",
+            "report",
+        ],
+    },
+    AutoGroup {
+        name: "voice",
+        tools: &[],
+        host_groups: &["voice"],
+        keywords: &[
+            "voice",
+            "speak",
+            "say it",
+            "read aloud",
+            "audio",
+            "tts",
+            "microphone",
+        ],
+    },
+];
+
+/// Automatic groups whose keywords appear in `hint` (lower-cased match).
+pub fn auto_groups(hint: &str) -> Vec<&'static AutoGroup> {
+    let hint = hint.to_lowercase();
+    AUTO_GROUPS
+        .iter()
+        .filter(|g| g.keywords.iter().any(|k| hint.contains(k)))
+        .collect()
+}
+
+/// The text the automatic groups match against: the request, the current
+/// assignment and the last 4 user turns.
+pub fn hint(context: &Value) -> String {
+    let mut parts = vec![
+        context["original_request"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned(),
+        context["assignment"]["instruction"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned(),
+    ];
+    if let Some(messages) = context["messages"].as_array() {
+        parts.extend(
+            messages
+                .iter()
+                .rev()
+                .filter(|m| m["role"] == "user")
+                .take(4)
+                .filter_map(|m| m["text"].as_str().map(str::to_owned)),
+        );
+    }
+    parts.join("\n")
+}
 /// Host-side meta tools that map to non-action decisions.
 pub const FINISH: &str = "finish";
 pub const ASK_USER: &str = "ask_user";
@@ -365,8 +563,12 @@ pub fn tools(
     enabled_groups: &[String],
     compact: bool,
     read_only: bool,
+    hint: &str,
 ) -> Vec<Value> {
     let all = groups(available);
+    let auto = auto_groups(hint);
+    let auto_tool = |t: &str| auto.iter().any(|g| g.tools.contains(&t));
+    let auto_group = |g: &str| auto.iter().any(|a| a.host_groups.contains(&g));
     let mut names: Vec<String> = Vec::new();
     let mut hidden_groups: Vec<String> = Vec::new();
     for (group, items) in &all {
@@ -375,10 +577,11 @@ pub fn tools(
             .filter(|t| {
                 !compact
                     || enabled_groups.contains(group)
+                    || auto_group(group)
+                    || auto_tool(t)
                     || CORE_FILES.contains(&t.as_str())
                     || CORE_WEB.contains(&t.as_str())
                     || CORE_TERMINAL.contains(&t.as_str())
-                    || CORE_DESKTOP.contains(&t.as_str())
                     || CORE_META.contains(&t.as_str())
             })
             .collect();
@@ -423,7 +626,15 @@ pub fn tools(
     if compact && !read_only && !hidden_groups.is_empty() {
         out.push(function(
             ENABLE_TOOLS,
-            &format!("Expose more tools for the rest of this task. Groups: {}.", hidden_groups.join(", ")),
+            &if auto.is_empty() {
+                format!("Expose more tools for the rest of this task. Groups: {}.", hidden_groups.join(", "))
+            } else {
+                format!(
+                    "Expose more tools for the rest of this task. Groups: {}. Already shown for this request: {}.",
+                    hidden_groups.join(", "),
+                    auto.iter().map(|g| g.name).collect::<Vec<_>>().join(", ")
+                )
+            },
             json!({"type":"object","properties":{"group":{"type":"string","enum":hidden_groups}},"required":["group"]}),
         ));
     }
@@ -885,7 +1096,7 @@ mod tests {
 
     #[test]
     fn findings_fields_can_be_removed_from_the_reviewer_finish() {
-        let mut tools = tools(&json!({"files":["read_file"]}), &[], true, true);
+        let mut tools = tools(&json!({"files":["read_file"]}), &[], true, true, "");
         let finish = |t: &[Value]| {
             t.iter()
                 .find(|t| t["function"]["name"] == FINISH)
@@ -957,7 +1168,7 @@ mod tests {
     #[test]
     fn compact_mode_exposes_core_tools_and_enable_tools() {
         let available = crate::autonomy::available_tools(true, true, false, true);
-        let compact = tools(&available, &[], true, false);
+        let compact = tools(&available, &[], true, false, "");
         let names: Vec<&str> = compact
             .iter()
             .filter_map(|t| t["function"]["name"].as_str())
@@ -968,16 +1179,67 @@ mod tests {
         // Clicking and typing need no enable_tools round trip.
         assert!(names.contains(&"browser_click") && names.contains(&"browser_fill"));
         assert!(!names.contains(&"browser_eval"));
-        let enabled = tools(&available, &["desktop".into()], true, false);
+        let enabled = tools(&available, &["desktop".into()], true, false, "");
         assert!(
             enabled
                 .iter()
                 .any(|t| t["function"]["name"] == "desktop_drag")
         );
-        let full = tools(&available, &[], false, false);
+        let full = tools(&available, &[], false, false, "");
         assert!(full.len() > compact.len());
-        let review = tools(&available, &[], false, true);
+        let review = tools(&available, &[], false, true, "");
         assert!(review.iter().all(|t| t["function"]["name"] != "write_file"));
+    }
+
+    #[test]
+    fn automatic_groups_follow_the_request_keywords() {
+        let available = crate::autonomy::available_tools(true, true, false, true);
+        let names = |hint: &str| -> Vec<String> {
+            tools(&available, &[], true, false, hint)
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
+                .collect()
+        };
+        let plain = names("Summarize https://github.com/rust-lang/rust/issues/100");
+        // Core stays: files, fetch-first web, click/fill, terminal, status.
+        for core in [
+            "write_file",
+            "fetch_url",
+            "browser_click",
+            "browser_fill",
+            "run_shell",
+            "runtime_status",
+        ] {
+            assert!(plain.contains(&core.to_owned()), "{core} {plain:?}");
+        }
+        for gated in [
+            "memory_save",
+            "tool_save",
+            "desktop_click",
+            "video_transcript",
+        ] {
+            assert!(!plain.contains(&gated.to_owned()), "{gated} {plain:?}");
+        }
+        assert!(names("Remember that I prefer short answers").contains(&"memory_save".into()));
+        assert!(names("Open Notepad and type hello").contains(&"desktop_type".into()));
+        assert!(
+            names("Get the transcript of this YouTube video").contains(&"video_transcript".into())
+        );
+        assert!(names("Save this as a reusable tool").contains(&"tool_save".into()));
+        // Explicit enable_tools still works and the gated group stays listed.
+        let enable = tools(&available, &[], true, false, "");
+        let enable_tool = enable
+            .iter()
+            .find(|t| t["function"]["name"] == ENABLE_TOOLS)
+            .unwrap();
+        assert!(enable_tool.to_string().contains("terminal"));
+        // Full mode is unaffected.
+        assert!(tools(&available, &[], false, false, "").len() > plain.len());
+        // The hint reads the request, the assignment and the last 4 user turns.
+        let context = json!({"original_request":"hi","assignment":{"instruction":"do it"},
+            "messages":[{"role":"user","text":"remember my dog is Rex"},{"role":"assistant","text":"ok"},
+                {"role":"user","text":"a"},{"role":"user","text":"b"},{"role":"user","text":"c"}]});
+        assert!(hint(&context).contains("remember my dog"));
     }
 
     #[test]
