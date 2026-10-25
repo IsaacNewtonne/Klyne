@@ -189,48 +189,63 @@ pub fn problem(request: &str, answer: &str, window: &[Value], can_act: bool) -> 
             }
         }
     }
-    // Quoted values must come from the page after the interaction, not the
-    // page before it. Link labels and the user's own words are exempt.
-    let request_lower = request.to_lowercase();
-    let mut before = String::new();
+    // Quoted values must come from the page the interaction landed on, not
+    // the page before it or a page reopened later. Whole-word matches; link
+    // labels and the user's own words are exempt.
+    // Pages count as landed from an interaction until the next
+    // browser_open (a reopened or different page).
+    let mut following = false;
+    let landed_at: Vec<bool> = window
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            if i >= first && (acted(e, CLICKS) || acted(e, TYPES)) {
+                following = true;
+            } else if e["action"] == "browser_open" && e["ok"] == true {
+                following = false;
+            }
+            following
+        })
+        .collect();
+    let mut before = String::from(" ");
+    let mut after = String::from(" ");
     let mut labels = Vec::new();
-    for e in &window[..first] {
-        if is_page(e) {
-            before.push_str(&page_text(e));
+    for (i, e) in window.iter().enumerate().filter(|(_, e)| is_page(e)) {
+        let landed_page = landed_at[i];
+        let text = normalized(&page_text(e));
+        if landed_page {
+            after.push_str(&text);
+        } else {
+            before.push_str(&text);
             if let Some(links) = observation(e)["links"].as_array() {
                 labels.extend(
                     links
                         .iter()
                         .filter_map(|l| l["text"].as_str())
-                        .map(str::to_lowercase),
+                        .map(normalized),
                 );
             }
         }
     }
-    let after: String = window[first..]
-        .iter()
-        .filter(|e| is_page(e))
-        .map(page_text)
-        .collect();
+    let request_words = normalized(request);
     let clicked: Vec<String> = window[first..]
         .iter()
-        .filter_map(|e| observation(e)["clicked"].as_str().map(str::to_lowercase))
+        .filter_map(|e| observation(e)["clicked"].as_str().map(normalized))
         .collect();
     let stale: Vec<String> = quoted(answer)
         .into_iter()
         .filter(|q| {
-            before.contains(q.as_str())
-                && !after.contains(q.as_str())
-                && !request_lower.contains(q.as_str())
-                && !labels
-                    .iter()
-                    .chain(&clicked)
-                    .any(|l| l.contains(q.as_str()))
+            let words = normalized(q);
+            words.trim().len() >= 3
+                && before.contains(&words)
+                && !after.contains(&words)
+                && !request_words.contains(&words)
+                && !labels.iter().chain(&clicked).any(|l| l.contains(&words))
         })
         .collect();
     if !stale.is_empty() {
         return Some(format!(
-            "Interaction check: \"{}\" appears only on the page before the click, not on the page after it. Answer from the page the click landed on (read it with browser_read).",
+            "Interaction check: \"{}\" appears only on the page before the click, not on the page the click landed on. Answer from the landed page (read it with browser_read), quoting its title or text exactly.",
             stale.join("\", \"")
         ));
     }
@@ -428,6 +443,16 @@ mod tests {
             stale.contains("only on the page before the click"),
             "{stale}"
         );
+
+        // "Example Domain" is not "Example Domains": whole words only.
+        let near = problem(TASK, r#"The title is "Example Domain"."#, &ok, true).unwrap();
+        assert!(near.contains("\"example domain\""), "{near}");
+        // Reopening the first page after the click does not make its title
+        // an answer about the landed page.
+        let mut reopened = ok.clone();
+        reopened.push(example());
+        assert!(problem(TASK, r#"The title is "Example Domain"."#, &reopened, true).is_some());
+        assert!(problem(TASK, r#"The title is "Example Domains"."#, &reopened, true).is_none());
 
         let unchanged = page(
             "browser_click",
