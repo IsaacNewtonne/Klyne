@@ -158,7 +158,11 @@ impl Browsers {
             }
             "browser_click" => {
                 before = Some(page_state(&mut browser));
-                let script = click_script(action)?;
+                let Ok(script) = click_script(action) else {
+                    return Ok(
+                        json!({"ok":false,"error":"browser_click needs ref (e.g. L1) from links, or the link's visible text; nothing was clicked. If the exact text the user named is not listed, click the link that clearly matches it and say which one you clicked.","url":before.as_ref().map(|b| b.0.clone()),"links":links(&mut browser)}),
+                    );
+                };
                 let outcome = browser
                     .eval(&script)
                     .map_err(|e| err(format!("Browser input outcome uncertain: {e}")))?;
@@ -301,12 +305,36 @@ fn valid_ref(value: &str) -> bool {
         && value[1..].bytes().all(|b| b.is_ascii_digit())
 }
 
+/// The ref argument as "L3", accepting 3, "3" and "l3" from small models.
+fn ref_of(action: &Value) -> Option<String> {
+    let raw = match &action["ref"] {
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.trim().to_owned(),
+        _ => return None,
+    };
+    let candidate = if raw.bytes().all(|b| b.is_ascii_digit()) {
+        format!("L{raw}")
+    } else {
+        raw.to_uppercase()
+    };
+    valid_ref(&candidate).then_some(candidate)
+}
+
+/// Visible text to click: text or a common alias, or a ref that is really
+/// link text.
+fn text_of(action: &Value) -> Option<String> {
+    ["text", "link_text", "label", "name", "link"]
+        .iter()
+        .find_map(|k| action[*k].as_str())
+        .or_else(|| action["ref"].as_str().filter(|_| ref_of(action).is_none()))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+}
+
 /// CSS selector for a ref or selector argument (fill and selector clicks).
 fn target_selector(action: &Value) -> io::Result<String> {
-    if let Some(r) = action["ref"].as_str().filter(|r| !r.is_empty()) {
-        if !valid_ref(r) {
-            return Err(err("ref must look like L3 (from links)"));
-        }
+    if let Some(r) = ref_of(action) {
         return Ok(format!("[data-klyne-ref=\"{r}\"]"));
     }
     action["selector"]
@@ -319,13 +347,11 @@ fn target_selector(action: &Value) -> io::Result<String> {
 /// Page script for browser_click by ref, selector or visible text. Links
 /// open in the same tab so the observation shows where the click landed.
 fn click_script(action: &Value) -> io::Result<String> {
-    let find = if let Some(text) = action["text"]
-        .as_str()
-        .filter(|t| !t.trim().is_empty())
-        .filter(|_| action["ref"].as_str().is_none_or(str::is_empty))
+    let find = if let Some(text) = text_of(action)
+        .filter(|_| ref_of(action).is_none())
         .filter(|_| action["selector"].as_str().is_none_or(str::is_empty))
     {
-        let wanted = serde_json::to_string(text).map_err(err)?;
+        let wanted = serde_json::to_string(&text).map_err(err)?;
         format!(
             "const norm = s => (s || '').replace(/\\s+/g, ' ').replace(/[.\\u2026]+$/, '').trim().toLowerCase(); const want = norm({wanted}); const all = [...document.querySelectorAll('a[href],button,[role=button],[role=link],input[type=submit],input[type=button]')].filter(e => {{ const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }}); const label = e => norm(e.innerText || e.value || e.getAttribute('aria-label') || e.title); const el = all.find(e => label(e) === want) || all.find(e => want && label(e).includes(want)); const what = {wanted};"
         )
@@ -346,7 +372,19 @@ mod tests {
     fn click_targets_refs_text_and_selectors() {
         let by_ref = click_script(&json!({"tool":"browser_click","ref":"L2"})).unwrap();
         assert!(by_ref.contains(r#"[data-klyne-ref=\"L2\"]"#), "{by_ref}");
-        assert!(click_script(&json!({"ref":"L2;x"})).is_err());
+        // Numeric refs, link text in ref and text aliases are tolerated.
+        assert_eq!(click_script(&json!({"ref":2})).unwrap(), by_ref);
+        assert_eq!(click_script(&json!({"ref":"2"})).unwrap(), by_ref);
+        assert!(
+            click_script(&json!({"ref":"Learn more"}))
+                .unwrap()
+                .contains(r#"norm("Learn more")"#)
+        );
+        assert!(
+            click_script(&json!({"link_text":"Learn more"}))
+                .unwrap()
+                .contains(r#"norm("Learn more")"#)
+        );
         let by_text = click_script(&json!({"text":"More information..."})).unwrap();
         assert!(by_text.contains(r#"const want = norm("More information...")"#));
         assert!(by_text.contains("removeAttribute('target')"));

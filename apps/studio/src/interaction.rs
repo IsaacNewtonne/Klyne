@@ -301,7 +301,7 @@ pub fn route_open(request: &str, window: &[Value], action: &Value) -> Option<Ope
         })
         .collect();
     Some(OpenRoute::Refuse(format!(
-        "Not opened: the task asks to click, and {url} is not a link on the current page ({here}). Use browser_click with the ref of the named link instead of guessing a URL. Links on this page: {}.",
+        "Not opened: the task asks to click, and {url} is not a link on the current page ({here}). Use browser_click with the ref of the named link instead of guessing a URL; if the exact text is not listed, click the link that clearly matches it and say which one. Links on this page: {}.",
         if listed.is_empty() {
             "none listed; call browser_read".to_owned()
         } else {
