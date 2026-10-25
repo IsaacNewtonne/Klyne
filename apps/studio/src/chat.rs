@@ -3017,6 +3017,19 @@ impl Chats {
         }
         let answer = last_worker_answer(&chat.messages)?;
         let answer = answer.trim();
+        if crate::turn_end::memory_statement(request) {
+            // Auto-memory stores the fact after this turn; a confirmation
+            // that claims an unobserved save (or says nothing) is replaced
+            // by a plain one instead of going to review.
+            let plain = !answer.is_empty()
+                && !crate::native_tools::refusal(answer)
+                && crate::verify::unsupported_claims(answer, window).is_empty();
+            return Some(if plain {
+                answer.to_owned()
+            } else {
+                "Noted.".into()
+            });
+        }
         (!answer.is_empty()
             && !crate::native_tools::refusal(answer)
             && (crate::turn_end::memory_statement(request)

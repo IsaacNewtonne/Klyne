@@ -5038,3 +5038,30 @@ fn remember_statement_answered_in_plain_text_completes_and_saves_once() {
     let beliefs = s.api("/api/beliefs", None);
     assert_eq!(beliefs["beliefs"].as_array().unwrap().len(), 1, "{beliefs}");
 }
+
+#[test]
+fn remember_statement_with_an_unobserved_save_claim_skips_review() {
+    let s = Server::new();
+    let plan = json!({"summary":"Acknowledge.","tasks":[{"agent":"Assistant","instruction":"Confirm the preference"}]});
+    let (endpoint, fixture) = fixture_service(
+        vec![
+            content_reply(&plan.to_string()),
+            tool_reply(
+                "finish",
+                json!({"summary":"Your preference has been saved to memory and stored successfully."}),
+            ),
+            content_reply(&json!({"ops":[]}).to_string()),
+        ],
+        true,
+    );
+    let mut body = request(&endpoint);
+    body["message"] = json!("Remember that I prefer British English and short replies.");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert!(chat.to_string().contains("direct_answer"), "{chat}");
+    let last = chat["messages"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["text"], "Noted.", "{last}");
+    // Planner, worker and the memory extraction: no reviewer call.
+    assert_eq!(fixture.join().unwrap().len(), 3);
+}
