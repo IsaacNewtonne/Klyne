@@ -39,6 +39,7 @@ mod restart_reconciliation;
 mod review_quality;
 mod route_recovery;
 mod schedules;
+mod side_effects;
 mod skipped;
 mod telemetry;
 mod verify;

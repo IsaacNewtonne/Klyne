@@ -594,6 +594,35 @@ fn restart_reconciles_saved_artifact_intent_without_repeating_publication() {
 }
 
 #[test]
+fn read_requests_answer_in_chat_without_writing_new_files() {
+    let s = Server::new();
+    let (endpoint, fixture) = model(vec![
+        plan(),
+        write_file("Klyne is a local agent harness."),
+        complete("Klyne is a local agent harness."),
+        complete("Klyne is a local agent harness."),
+    ]);
+    let mut body = request(&endpoint);
+    body["message"] = json!("Summarize what Klyne is in one sentence.");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    let evidence = chat["evidence"].as_array().unwrap();
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e["route"] == "not_requested" && e["ok"] == false),
+        "{chat}"
+    );
+    assert!(
+        !std::path::Path::new(chat["workspace"].as_str().unwrap())
+            .join("greeting.txt")
+            .exists()
+    );
+    fixture.join().unwrap();
+}
+
+#[test]
 fn missing_document_is_observed_and_recovered_without_resubmission() {
     let s = Server::new();
     let (endpoint, fixture) = model(vec![

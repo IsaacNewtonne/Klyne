@@ -111,7 +111,7 @@ fn schema(tool: &str) -> (String, Value) {
             &["path"],
         ),
         "write_file" => object(
-            "Create or replace a text file with the exact contents. The host reads it back to verify.",
+            "Create or replace a text file with the exact contents. The host reads it back to verify. Only when the user asks to save, write, create or export a file; answer reads and summaries in chat.",
             json!({"path":path(),"contents":s("Complete file contents")}),
             &["path", "contents"],
         ),
