@@ -177,3 +177,14 @@ Source idea: Mercury Agent's memory extraction (MIT), reimplemented in
 - **Config.** `"auto_memory": true` (default) in `quality/config.json`;
   set `false` to turn it off. The `memory_read`/`memory_save`/
   `memory_forget` tools and their sqlite store are unchanged.
+
+## Follow-up fixes (2026-10-25 evening)
+
+Two problems found in live qwen3.5:9b runs after the port.
+
+**Reviewer meta-question.** For a knowledge question ("What colour should I paint a small north-facing room?") the worker answered directly, then the reviewer called `ask_user` with "Is this sufficient, or do you need verification?" three times; the host refused the unsupported question and the chat ended Blocked.
+- Root cause: every finished goal went to model review, even when there was no tool evidence to check, and nothing stopped the reviewer handing its own judgement to the user.
+- Fix: `turn_end::direct_question` (no URL, path, file, action or live-data words) plus no non-host evidence in the goal window skips review; the worker's answer is shown and a `direct_answer` host record is kept. A reviewer `ask_user` that `turn_end::sufficiency_question` recognises is turned into an accept of the worker's answer (`review_meta_question` record). Real `ask_user` questions for missing information are unchanged. The existing blocker check already stops a repeated unsupported question after three attempts, so the loop guard (which watches dispatched tools) was not changed.
+
+**"Remember that I prefer ..." ended Blocked.** Logged with a local proxy: the planner returned valid JSON; the worker replied in plain text ("Understood. I'll respond in British English ..."). In native-tool mode a short "I'll ..." reply counts as an empty promise and is left invalid, the format retry got the same text, and the chat ended "model response was not valid JSON" before auto-memory could run. Another run wrote an `.acknowledgement.txt` file to "record" the preference.
+- Fix: `turn_end::memory_statement` detects remember-this requests. The planner and worker get a host note that memory is saved automatically and only a one-sentence confirmation is needed; a plain-text acknowledgement from the worker on such a request is accepted as the completion; the direct-answer path then skips review and auto-memory records the belief (an existing matching belief gains support instead of a duplicate).

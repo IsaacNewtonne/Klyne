@@ -1409,6 +1409,12 @@ impl Chats {
         {
             notes.push(remembered);
         }
+        if matches!(role, "planner" | "worker")
+            && crate::quality::load(self.studio_root()).auto_memory
+            && crate::turn_end::memory_statement(&chat.execution.original_request)
+        {
+            notes.push(MEMORY_STATEMENT_NOTE.to_owned());
+        }
         if !notes.is_empty() {
             context["system_notes"] = json!(notes);
         }
@@ -1654,8 +1660,41 @@ impl Chats {
                     validate_model_decision(role, &value)?;
                     Ok(value)
                 });
+            // "Remember that I prefer ..." needs only a brief confirmation;
+            // small models answer it in plain text ("Understood. I'll ...").
+            // Auto-memory records the fact after the turn completes.
+            let parsed = match parsed {
+                Err(error)
+                    if !transport_failed
+                        && role == "worker"
+                        && crate::turn_end::memory_statement(&chat.execution.original_request) =>
+                {
+                    match responses
+                        .last()
+                        .cloned()
+                        .flatten()
+                        .filter(|text| crate::turn_end::acknowledgement_reply(text))
+                    {
+                        Some(text) => Ok(json!({"decision":"complete","summary":text.trim()})),
+                        None => Err(error),
+                    }
+                }
+                other => other,
+            };
             match parsed {
                 Ok(mut value) => {
+                    // The reviewer decides sufficiency itself: a question that
+                    // only asks the user to confirm the answer is accepted as
+                    // the worker's answer instead of reaching the user.
+                    if role == "independent reviewer"
+                        && value["question"]
+                            .as_str()
+                            .is_some_and(crate::turn_end::sufficiency_question)
+                        && let Some(answer) = last_worker_answer(&chat.messages)
+                    {
+                        chat.evidence.push(json!({"agent":"Host verifier","action":"review_meta_question","ok":true,"summary":"The reviewer asked the user to confirm sufficiency; accepted the worker's answer instead."}));
+                        value = json!({"decision":"complete","summary":answer});
+                    }
                     // A question about a typed blocked web source is backed
                     // by that evidence even when a small model leaves the
                     // blocker fields incomplete.
@@ -2336,6 +2375,16 @@ impl Chats {
                     }
                 }
             }
+            // Direct-answer fast path (2026-10-25): a knowledge or opinion
+            // question answered without any tool needs no evidence review.
+            if let Some(answer) = self.direct_answer(chat) {
+                chat.evidence.push(json!({"agent":"Host verifier","action":"direct_answer","ok":true,"summary":"Direct answer to a knowledge question; no tool evidence was needed, so review was skipped."}));
+                push(chat, "assistant", "Klyne", &answer);
+                chat.status = "Completed".into();
+                chat.execution.failure = None;
+                self.save(chat)?;
+                return Ok(());
+            }
             chat.status = "Reviewing".into();
             self.save(chat)?;
             let verification_only =
@@ -2926,6 +2975,42 @@ impl Chats {
                 Ok(LoopStep::Stop)
             }
         }
+    }
+    /// The worker's answer when the goal was a direct knowledge/opinion
+    /// question (or a remember-this statement) settled without any tool:
+    /// there is no evidence for a reviewer to check.
+    fn direct_answer(&self, chat: &Chat) -> Option<String> {
+        let request = &chat.execution.original_request;
+        if chat.contract.is_some()
+            || chat.pending.is_some()
+            || !chat.execution.approval_queue.is_empty()
+            || chat.execution.failure.is_some()
+            || chat.prompt_maker
+            || chat.tasks.is_empty()
+            || chat.tasks.iter().any(|t| t.status != "Done")
+            || !(crate::turn_end::direct_question(request)
+                || crate::turn_end::memory_statement(request))
+        {
+            return None;
+        }
+        let window = chat
+            .evidence
+            .get(chat.execution.evidence_start..)
+            .unwrap_or(&[]);
+        if window
+            .iter()
+            .any(|e| e["agent"].as_str().is_none_or(|a| !a.starts_with("Host")))
+        {
+            return None;
+        }
+        let answer = last_worker_answer(&chat.messages)?;
+        let answer = answer.trim();
+        (!answer.is_empty()
+            && !crate::native_tools::refusal(answer)
+            && (crate::turn_end::memory_statement(request)
+                || !crate::native_tools::empty_promise(answer))
+            && crate::verify::unsupported_claims(answer, window).is_empty())
+        .then(|| answer.to_owned())
     }
     fn review_stalled_task(
         &self,
@@ -5084,6 +5169,8 @@ fn final_answer_text(messages: &[Message], review: &Value) -> String {
     }
     parts.join("\n")
 }
+
+const MEMORY_STATEMENT_NOTE: &str = "The user is telling you something to remember. Klyne saves it to memory automatically after this turn, so do not write files or call other tools to record it: call finish with a one-sentence confirmation.";
 
 fn last_worker_answer(messages: &[Message]) -> Option<String> {
     messages

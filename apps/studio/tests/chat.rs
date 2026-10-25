@@ -4508,8 +4508,8 @@ fn reviewer_findings_shape_is_enforced_and_skipped_items_reach_the_planner_as_da
             findings_finish("greeting.txt says Hello", &["Spelling of the greeting"]),
             // Second message in the same conversation: planner sees the note.
             content_reply(&json!({"summary":"Reply","tasks":[{"agent":"Assistant","instruction":"Say thanks"}]}).to_string()),
+            // "thanks" answered without tools: no reviewer call.
             tool_reply("finish", json!({"summary":"Thanks!"})),
-            findings_finish("Thanks!", &[]),
         ],
         true,
     );
@@ -4528,7 +4528,7 @@ fn reviewer_findings_shape_is_enforced_and_skipped_items_reach_the_planner_as_da
     let second = s.wait(&id);
     assert_eq!(second["status"], "Completed", "{second}");
     let calls = fixture.join().unwrap();
-    assert_eq!(calls.len(), 8);
+    assert_eq!(calls.len(), 7);
     let planner: Value =
         serde_json::from_str(calls[5]["messages"][1]["content"].as_str().unwrap()).unwrap();
     let notes = &planner["unverified_notes_untrusted_data"];
@@ -4874,8 +4874,9 @@ fn auto_memory_records_owner_beliefs_filters_secrets_and_can_retire_them() {
     let note = json!({"summary":"Acknowledge it.","tasks":[{"agent":"Assistant","instruction":"Acknowledge the user's preference"}]});
     let (endpoint, fixture) = model(vec![
         note,
+        // No reviewer call: a remember-this statement answered without
+        // tools takes the direct-answer path (2026-10-25).
         complete("Noted: metric units."),
-        complete("Acknowledged."),
         json!({"ops":[
             {"op":"owner_stated","kind":"preference","statement":"The user prefers metric units."},
             {"op":"create","kind":"fact","statement":"The user's password is hunter2"}
@@ -4909,7 +4910,7 @@ fn auto_memory_records_owner_beliefs_filters_secrets_and_can_retire_them() {
     assert!(!beliefs.to_string().contains("hunter2"));
     // The next conversation sees it as a host note, not as history.
     let plan2 = json!({"summary":"Answer.","tasks":[{"agent":"Assistant","instruction":"Answer the units question"}]});
-    let (endpoint, fixture) = model(vec![plan2, complete("Use grams."), complete("Answered.")]);
+    let (endpoint, fixture) = model(vec![plan2, complete("Use grams.")]);
     let mut next = request(&endpoint);
     next["message"] = json!("Which units should the recipe use?");
     let created = s.api("/api/chats", Some(next));
@@ -4925,4 +4926,106 @@ fn auto_memory_records_owner_beliefs_filters_secrets_and_can_retire_them() {
     let after = s.api("/api/beliefs", None);
     assert_eq!(after["beliefs"].as_array().unwrap().len(), 1);
     assert_eq!(after["beliefs"][0]["status"], "retired");
+}
+
+#[test]
+fn direct_knowledge_answer_skips_review_and_meta_questions_never_reach_the_user() {
+    // Direct answer (2026-10-25): no tools, no URL or file, so no review.
+    let s = Server::new();
+    let ask = json!({"summary":"Answer.","tasks":[{"agent":"Assistant","instruction":"Answer the paint question"}]});
+    let (endpoint, fixture) = fixture_service(
+        vec![
+            content_reply(&ask.to_string()),
+            tool_reply(
+                "finish",
+                json!({"summary":"Warm light neutrals such as cream."}),
+            ),
+        ],
+        true,
+    );
+    let mut body = request(&endpoint);
+    body["message"] =
+        json!("What colour should I paint a small north-facing room? Answer briefly.");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert_eq!(fixture.join().unwrap().len(), 2);
+    assert!(chat.to_string().contains("direct_answer"), "{chat}");
+    let last = chat["messages"].as_array().unwrap().last().unwrap().clone();
+    assert!(last["text"].as_str().unwrap().contains("cream"), "{last}");
+
+    // A reviewed task: the reviewer's "is this sufficient?" becomes an
+    // accept of the worker's answer instead of a question to the user.
+    let (endpoint, fixture) = fixture_service(
+        vec![
+            content_reply(&plan().to_string()),
+            tool_reply("list_dir", json!({"path":"."})),
+            tool_reply("finish", json!({"summary":"The workspace is empty."})),
+            tool_reply(
+                "ask_user",
+                json!({"question":"The Assistant listed the workspace. Is this sufficient, or do you need me to provide additional verification?"}),
+            ),
+        ],
+        true,
+    );
+    let mut body = request(&endpoint);
+    body["message"] = json!("List the files in the workspace");
+    let created = s.api("/api/chats", Some(body));
+    let chat = s.wait(created["id"].as_str().unwrap());
+    fixture.join().unwrap();
+    assert_eq!(chat["status"], "Completed", "{chat}");
+    assert!(chat.to_string().contains("review_meta_question"), "{chat}");
+    assert!(
+        !chat
+            .to_string()
+            .contains("Is this sufficient, or do you need me")
+    );
+}
+
+#[test]
+fn remember_statement_answered_in_plain_text_completes_and_saves_once() {
+    let s = Server::new();
+    let plan = json!({"summary":"Acknowledge.","tasks":[{"agent":"Assistant","instruction":"Confirm the preference"}]});
+    let ops = json!({"ops":[{"op":"owner_stated","kind":"preference","statement":"The user prefers British English."}]});
+    let mut replies = vec![];
+    for _ in 0..2 {
+        replies.push(content_reply(&plan.to_string()));
+        // Plain text where a decision was expected: not an error any more.
+        replies.push(content_reply(
+            "Understood. I'll respond in British English, as you prefer.",
+        ));
+        replies.push(content_reply(&ops.to_string()));
+    }
+    let (endpoint, fixture) = fixture_service(replies, true);
+    for _ in 0..2 {
+        let mut body = request(&endpoint);
+        body["message"] = json!("Remember that I prefer answers in British English.");
+        let created = s.api("/api/chats", Some(body));
+        let chat = s.wait(created["id"].as_str().unwrap());
+        assert_eq!(chat["status"], "Completed", "{chat}");
+        let last = chat["messages"].as_array().unwrap().last().unwrap().clone();
+        assert!(
+            last["text"].as_str().unwrap().starts_with("Understood"),
+            "{last}"
+        );
+        let mut count = 0;
+        for _ in 0..100 {
+            let b = s.api("/api/beliefs", None);
+            count = b["beliefs"].as_array().unwrap().len();
+            if count > 0 && b["beliefs"][0]["support"].as_u64().unwrap_or(0) >= 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(count, 1);
+    }
+    let calls = fixture.join().unwrap();
+    // The worker was told memory is automatic.
+    assert!(
+        calls[1]
+            .to_string()
+            .contains("saves it to memory automatically")
+    );
+    let beliefs = s.api("/api/beliefs", None);
+    assert_eq!(beliefs["beliefs"].as_array().unwrap().len(), 1, "{beliefs}");
 }
