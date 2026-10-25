@@ -127,6 +127,7 @@ The test tiers are described in [docs/test-tiers.md](docs/test-tiers.md). Deskto
 | Voice | [Setup, use and limits](docs/voice.md) |
 | Audits | [2026-09 audit](AUDIT-2026-09-13.md) · [Instruction reliability](docs/audit-2026-10-01.md) |
 | Core runtime | [Harness overview](docs/harness-overview.md) |
+| Known issues | [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) |
 
 ## Status and limits
 
@@ -135,6 +136,7 @@ Klyne is under active development. Small models still wander: the reviewer and t
 - `desktop_type` (typing text) is not gated by approval yet.
 - Whether a request is read-only is decided by a word heuristic.
 - Supervised processes are lifetime-managed, not sandboxed.
+- Multi-step browser click tasks are unreliable with qwen3.5:9b; see [Known issues](docs/KNOWN-ISSUES.md).
 
 ## Credits
 

@@ -192,3 +192,11 @@ Two problems found in live qwen3.5:9b runs after the port.
 **Second live round.** A first rerun found two more causes:
 - One paint run went to the web: the planner planned "consult external web resources", and the worker kept fetching pages for more than 7 minutes. Knowledge questions now carry a host note for the planner and worker: answer directly, no tools unless the user asked for sources.
 - One remember run ended Blocked with "Ollama reported an error while generating: XML syntax error ..." (Ollama's own tool-call parser rejected a malformed call). That error is now treated as a format error and retried once with the correction note, instead of being treated as a transport failure with no retry.
+
+**Third fix (9329406).** One remember run still ended Blocked: the worker's `finish` claimed the preference was "stored in memory", the host found no save in the evidence, so the turn went to the reviewer, which asked an unsupported question. For memory statements, a confirmation that claims an unobserved save (or is empty or a refusal) is now replaced by "Noted." on the direct-answer path instead of going to review; auto-memory then records the belief as before.
+
+**Latest live round** (qwen3.5:9b, fresh isolated roots):
+- Remember ("Remember that I prefer British English and short replies.") x5 on 9329406: 5/5 Completed in 5-10 s; one belief, support 5, no duplicates.
+- Paint question x3 on ab926d6: 3/3 Completed in 10-15 s, no review, no browsing.
+- GitHub issue summary on ab926d6: Completed in 35 s.
+- Click 'Learn more' on example.com: unreliable; see [KNOWN-ISSUES.md](KNOWN-ISSUES.md).
