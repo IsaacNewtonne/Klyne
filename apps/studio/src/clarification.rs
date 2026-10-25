@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn profile_selection_requires_inspection_first() {
         assert!(profile_inspection_question(
-            "Which specific profile(s) should I open? Please provide the exact profile name(s) to open (case-sensitive, e.g., 'mrmuller'). I can list the visible profiles; please confirm."
+            "Which specific profile(s) should I open? Please provide the exact profile name(s) to open (case-sensitive, e.g., 'jdoe'). I can list the visible profiles; please confirm."
         ));
         assert!(profile_inspection_question("Which profile should I use?"));
         assert!(!profile_inspection_question(

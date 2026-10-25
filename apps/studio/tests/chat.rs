@@ -1614,7 +1614,7 @@ fn invented_message_delivery_requests_verification_without_replaying() {
 fn profile_question_before_inspection_uses_the_available_recovery_path() {
     for desktop in [true, false] {
         let s = Server::new();
-        let question = "I need to locate the Chrome profile named 'mrmuller'. Which specific profile(s) should I open? Please provide the exact profile name(s) (case-sensitive). Please confirm whether you want me to list them.";
+        let question = "I need to locate the Chrome profile named 'jdoe'. Which specific profile(s) should I open? Please provide the exact profile name(s) (case-sensitive). Please confirm whether you want me to list them.";
         let mut replies = vec![
             plan(),
             json!({"decision":"needs_input","question":question}),
@@ -1622,7 +1622,7 @@ fn profile_question_before_inspection_uses_the_available_recovery_path() {
         replies.push(preference_question("Which account should I use?"));
         let (endpoint, fixture) = model(replies);
         let mut body = request(&endpoint);
-        body["message"] = json!("Open Chrome, mrmuller profile, then open WhatsApp");
+        body["message"] = json!("Open Chrome, jdoe profile, then open WhatsApp");
         body["access"]["desktop"] = json!(desktop);
         let created = s.api("/api/chats", Some(body));
         let chat = s.wait(created["id"].as_str().unwrap());

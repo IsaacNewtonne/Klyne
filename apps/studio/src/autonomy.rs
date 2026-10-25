@@ -303,8 +303,8 @@ mod tests {
     }
     #[test]
     fn supplied_information_is_reused_and_real_preferences_remain_questions() {
-        let mut q = json!({"question":"Which profile?","blocker":{"kind":"missing_user_information","missing":"mrmuller","why_user":"Need name"}});
-        assert!(blocker_problem(&q, &[], "Open Chrome mrmuller profile").is_some());
+        let mut q = json!({"question":"Which profile?","blocker":{"kind":"missing_user_information","missing":"jdoe","why_user":"Need name"}});
+        assert!(blocker_problem(&q, &[], "Open Chrome jdoe profile").is_some());
         q["blocker"]["missing"] = json!("preferred document title");
         q["blocker"]["kind"] = json!("user_preference");
         assert!(blocker_problem(&q, &[], "Write a document").is_none());
