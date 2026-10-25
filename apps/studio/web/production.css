@@ -811,7 +811,7 @@ h1,h2,#prod-title,#ui-callout h3,.welcome h1{font-family:Bahnschrift,"DIN Altern
 /* Caveats round 2026-10-25 -------------------------------------------------- */
 /* Callout slot stays present while a chat is open; the progress card and the
    Done box share one height so the result lands in place (no layout shift). */
-#ui-callout{min-height:var(--callout-slot,124px);box-sizing:border-box}
+#ui-callout{min-height:var(--callout-slot,124px);box-sizing:border-box;flex-shrink:0}
 #ui-callout.ui-progress{border-color:rgba(255,255,255,.08);background:rgba(255,255,255,.025)}
 #ui-callout.ui-progress h3{color:#d8cbbd}
 #ui-callout.ui-progress p{margin:4px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
