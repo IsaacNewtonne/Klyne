@@ -3,7 +3,8 @@
 //!
 //! {"critique":"auto|on|off","findings":"auto|on|off","checklist":true,
 //!  "helper":{"enabled":true,"endpoint":"http://127.0.0.1:11434","model":"<tag>",
-//!            "max_input_chars":12000,"timeout_seconds":90,"internal_jobs":false}}
+//!            "max_input_chars":12000,"timeout_seconds":90,"internal_jobs":false},
+//!  "fetch_fallback":"jina|off"}
 use serde_json::{Value, json};
 use std::{fs, io, path::Path};
 
@@ -81,6 +82,9 @@ pub struct Settings {
     /// means the conversation's current model.
     pub models: RoleModels,
     pub helper: Helper,
+    /// fetch_url fallback backend when a direct fetch fails, is near-empty
+    /// or is an anti-bot challenge: "jina" (default, Jina Reader) or "off".
+    pub fetch_fallback: String,
 }
 
 pub fn parse(value: &Value) -> Settings {
@@ -107,6 +111,11 @@ pub fn parse(value: &Value) -> Settings {
         }
         .to_owned(),
         evidence: value["evidence"].as_bool().unwrap_or(false),
+        fetch_fallback: match value["fetch_fallback"].as_str() {
+            Some("off" | "none" | "") => "off",
+            _ => "jina",
+        }
+        .to_owned(),
         models: RoleModels {
             planner: role_model(&value["models"]["planner"]),
             worker: role_model(&value["models"]["worker"]),
@@ -252,6 +261,12 @@ mod tests {
         assert_eq!(s.critique, "auto");
         assert!(s.checklist);
         assert_eq!(s.think, "off");
+        assert_eq!(s.fetch_fallback, "jina");
+        assert_eq!(
+            parse(&json!({"fetch_fallback":"off"})).fetch_fallback,
+            "off"
+        );
+        assert_eq!(parse(&json!({"fetch_fallback":"x"})).fetch_fallback, "jina");
         assert_eq!(s.models, RoleModels::default());
         let m =
             parse(&json!({"models":{"worker":"ornith","reviewer":" ","planner":"current"}})).models;

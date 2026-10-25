@@ -101,6 +101,15 @@ pub fn check(entry: &Value, workspace: &Path, present: &dyn Fn(&str, &str) -> bo
     if entry["agent"] == "User approval" || READS.contains(&tool) {
         return json!({"status":"not_applicable","check":"read-only or approval record"});
     }
+    // Typed web errors: a blocked source is "blocked", not unfinished work
+    // to retry. NETWORK stays unsatisfied (one retry) until it repeats.
+    if let Some(code) = entry["error_code"]
+        .as_str()
+        .and_then(crate::web_reach::ErrorCode::parse)
+        && (code.final_for_source() || entry["repeat_blocked"] == true)
+    {
+        return json!({"status":"blocked","check":format!("source blocked: {code}"),"hint":entry["hint"]});
+    }
     if entry["ok"] != true {
         let text = format!("{} {}", entry["summary"], entry["data"]).to_lowercase();
         if (tool.ends_with("_forget") && text.contains("no saved"))
@@ -134,8 +143,18 @@ pub fn check(entry: &Value, workspace: &Path, present: &dyn Fn(&str, &str) -> bo
             fact(ok, "command exit code 0".into())
         }
         "fetch" | "fetch_url" => {
+            // An anti-bot challenge page is never accepted as evidence.
+            let ok = entry["data"]
+                .as_str()
+                .is_some_and(|d| !d.trim().is_empty() && !crate::web_reach::is_challenge(d, ""));
+            fact(
+                ok,
+                format!("fetched {target} with content (not a challenge page)"),
+            )
+        }
+        "video_transcript" => {
             let ok = entry["data"].as_str().is_some_and(|d| !d.trim().is_empty());
-            fact(ok, format!("fetched {target} with content"))
+            fact(ok, format!("transcript of {target} retrieved"))
         }
         "memory_save" | "skill_save" | "tool_save" => {
             let data = result_data(entry);
@@ -207,6 +226,12 @@ pub fn unsatisfied(evidence: &[Value]) -> Vec<String> {
     let mut latest: Vec<(String, bool)> = Vec::new();
     for entry in evidence {
         let status = entry["verify"]["status"].as_str().unwrap_or("");
+        if status == "blocked" {
+            // A blocked source supersedes earlier failed attempts at it.
+            let key = attempt_key(entry["action"].as_str().unwrap_or(""));
+            latest.retain(|(k, _)| *k != key);
+            continue;
+        }
         if !matches!(status, "satisfied" | "unsatisfied") || entry["agent"] == "Reviewer" {
             continue;
         }
@@ -249,6 +274,28 @@ mod tests {
         assert_eq!(check(&again, Path::new("."), &none)["status"], "satisfied");
         let read = json!({"agent":"Planner","action":"browser_read","ok":true,"verify":{"status":"not_applicable"}});
         assert!(answer_supported(&[read]));
+    }
+
+    #[test]
+    fn blocked_web_sources_are_blocked_and_challenges_are_never_evidence() {
+        let none = |_: &str, _: &str| false;
+        let ws = Path::new(".");
+        let blocked = json!({"agent":"worker","action":"fetch:https://x.test","ok":false,"error_code":"PLATFORM_BLOCKED","hint":"h","source":"fetch_url:https://x.test"});
+        assert_eq!(check(&blocked, ws, &none)["status"], "blocked");
+        let network = json!({"agent":"worker","action":"fetch:https://x.test","ok":false,"error_code":"NETWORK"});
+        assert_eq!(check(&network, ws, &none)["status"], "unsatisfied");
+        let challenge = json!({"agent":"worker","action":"fetch:https://y.test","ok":true,"data":"<html><title>Just a moment...</title></html>"});
+        assert_eq!(check(&challenge, ws, &none)["status"], "unsatisfied");
+        let page =
+            json!({"agent":"worker","action":"fetch:https://y.test","ok":true,"data":"Real text"});
+        assert_eq!(check(&page, ws, &none)["status"], "satisfied");
+        // A failed attempt followed by the host's blocked verdict is not
+        // left as unfinished work that would force another retry.
+        let mut evidence = vec![network.clone(), network, blocked];
+        evidence[1]["repeat_blocked"] = json!(true);
+        annotate(&mut evidence, ws, &none);
+        assert_eq!(evidence[1]["verify"]["status"], "blocked");
+        assert!(unsatisfied(&evidence).is_empty());
     }
 
     #[test]

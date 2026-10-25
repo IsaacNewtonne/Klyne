@@ -41,6 +41,7 @@ mod skipped;
 mod telemetry;
 mod verify;
 mod voice;
+mod web_reach;
 
 use harness_core::{
     AgentRuntime, Objective, PermissionPolicy, ShutdownHandle, SqliteEventStore, ToolRegistry,
