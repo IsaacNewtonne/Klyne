@@ -370,13 +370,13 @@ fn schema(tool: &str) -> (String, Value) {
             &[],
         ),
         "browser_click" => object(
-            "Click a link or button in the browser page: pass ref from links (e.g. L3); text or a CSS selector also work. Returns the page after the click with url_before and changed. When a task says click or follow a link, use this instead of opening a guessed URL. If the exact text the user named is not listed, click the link that clearly matches it and say which one you clicked; then answer from the page after the click.",
-            json!({"ref":s("Link ref from links, e.g. L3"),"text":s("Visible link or button text, instead of ref"),"selector":s("CSS selector, instead of ref")}),
+            "Click a link or button in the browser page: pass ref from the latest links (e.g. s12:L3; refs from an older page snapshot are refused); text or a CSS selector also work. Returns the page after the click with url_before, changed and a note saying where it landed. After changed:true, answer from that page and do not click the same link again. When a task says click or follow a link, use this instead of opening a guessed URL. If the exact text the user named is not listed, click the link that clearly matches it and say which one you clicked; then answer from the page after the click.",
+            json!({"ref":s("Link ref from the latest links, e.g. s12:L3"),"text":s("Visible link or button text, instead of ref"),"selector":s("CSS selector, instead of ref")}),
             &["ref"],
         ),
         "browser_fill" => object(
             "Type into a browser input given by ref or CSS selector.",
-            json!({"ref":s("Ref from links"),"selector":s("CSS selector"),"text":s("Text")}),
+            json!({"ref":s("Ref from the latest links, e.g. s12:L3"),"selector":s("CSS selector"),"text":s("Text")}),
             &["text"],
         ),
         "browser_screenshot" => object("Save a screenshot of the browser page.", json!({}), &[]),

@@ -3188,6 +3188,14 @@ impl Chats {
                 }
                 None => {}
             }
+            // Retry guard: a click this goal already followed (changed:true)
+            // is not repeated while the browser shows the landed page.
+            if let Some(hint) = crate::browser_tools::repeated_click(window, &decision["action"]) {
+                let page = crate::web_reach::browser_page(window);
+                chat.evidence.push(json!({"agent":agent,"action":"browser_click","ok":false,"route":"already_clicked","page_url":page,"summary":hint.clone(),"data":hint}));
+                self.save(chat)?;
+                return guard(chat, stop, start);
+            }
             if decision["action"]["tool"] == "browser_open"
                 && chat.access.web
                 && !interactive
@@ -3830,7 +3838,14 @@ impl Chats {
                     "browser_read" | "browser_screenshot" | "browser_close"
                 ),
             ) == harness_core::EffectState::Unknown;
-            let mut entry = json!({"agent":agent,"action":decision["action"]["tool"],"ok":value["ok"]!=false,"summary":"Browser observation","data":value.to_string()});
+            // Page observations are stored head-first (url, title,
+            // changed, note; text; links last) so a clipped copy keeps
+            // where the browser is; the click note becomes the summary.
+            let summary = value["note"]
+                .as_str()
+                .map_or("Browser observation".to_owned(), str::to_owned);
+            let data = crate::browser_tools::page_json(&value).unwrap_or_else(|| value.to_string());
+            let mut entry = json!({"agent":agent,"action":decision["action"]["tool"],"ok":value["ok"]!=false,"summary":summary,"data":data});
             // Page URL, source and anti-bot challenge classification: a
             // challenge page is PLATFORM_BLOCKED and never evidence.
             crate::web_reach::annotate_browser(
@@ -5052,6 +5067,18 @@ fn compact_context(context: &mut Value, chat: &Chat) {
     };
     if let Some(observations) = context["observations"].as_array_mut() {
         for observation in observations {
+            // Browser pages: head first, text and links cut separately,
+            // so a long click result keeps its title and url.
+            if observation["action"]
+                .as_str()
+                .is_some_and(|a| a.starts_with("browser_"))
+                && let Some(compact) = observation["data"]
+                    .as_str()
+                    .and_then(|d| serde_json::from_str::<Value>(d).ok())
+                    .and_then(|d| crate::browser_tools::compact_observation(&d, 3000))
+            {
+                observation["data"] = json!(compact);
+            }
             clip(&mut observation["data"], 3000);
         }
     }
